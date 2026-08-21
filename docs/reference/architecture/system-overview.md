@@ -16,8 +16,8 @@ flowchart LR
   A[Task or operator need] --> B[Choose execution model]
   B --> C[Run orchestration or deterministic loop]
   C --> D[Emit artifacts and gates]
-  D --> E[Benchmark or verify]
-  E --> F[Publish claim with provenance]
+  D --> E[Verify]
+  E --> F[Document observable behavior]
   F --> G[Docs and release review]
   G --> H[Reusable reference implementation]
 ```
@@ -35,16 +35,17 @@ flowchart LR
 3. `tools/repo-hygiene/`
    Use for narrow, explicit maintenance operations that should not be mistaken
    for the core runtime architecture.
-4. `evals/`
-   Stores benchmark metadata, scenarios, run cards, schemas, and result
-   artifacts.
-5. `docs/`
+4. `docs/`
    Explains the system, records its limits, and constrains what may be claimed.
-6. `profiles/agent-environments/`
+5. `profiles/agent-environments/`
    Public machine-agnostic publication lane for portable operator
    environments. The current committed surface defines policy and boundaries;
    sanitized payloads land here only after extraction. Manifest v2 uses
    no-follow filesystem operations and retained recovery evidence.
+6. `packages/orchestration/platform/`
+   Experimental hosted control-plane and worker source. It is separate from
+   the loopback operator and umbrella CLI, and has no production deployment
+   evidence.
 
 ## Integration rule
 
@@ -53,7 +54,6 @@ sharing:
 
 - terminology
 - claim and evidence policy
-- benchmark metadata
 - release criteria
 - operator workflow guidance
 
@@ -67,9 +67,7 @@ sharing:
    `./scripts/rae.sh agent run ...`; for manual stage control, use
    `./scripts/rae.sh orchestrate ...`.
 4. Record the resulting artifacts, gates, or reports.
-5. If the result is used for comparison or publication, register it through the
-   `evals/` metadata model.
-6. Update claim-bearing docs only after evidence and provenance are available.
+5. Update claim-bearing docs only after observable evidence is available.
 
 ## Artifact flow
 
@@ -79,11 +77,11 @@ work is reliable. The important artifact families are:
 - `.pipeline/runs/<run-id>/`
   Orchestration state, traces, stage artifacts, gates, review-loop state, and
   progress summaries.
-- `evals/results/`
-  Benchmark run cards, command-result transcripts, regression reports, release
-  gate reports, and result ledgers.
 - `profiles/agent-environments/`
   Sanitized operator profile material and installation regression fixtures.
+- `packages/orchestration/platform/`
+  Experimental PostgreSQL state, OIDC route checks, fenced worker leases,
+  S3-compatible artifact handling, and Streamable HTTP MCP compatibility.
 
 New code should either produce one of these artifacts, validate one of these
 artifacts, or stay inside the package-local runtime that owns the behavior.
@@ -103,6 +101,8 @@ explicitly separated modules, shared publication doctrine, and traceable claims.
 
 - this diagram is explanatory architecture, not empirical proof of universal
   superiority over other designs
+- the hosted-platform source is not evidence of a deployed service or external
+  integration
 
 ## Source note
 
