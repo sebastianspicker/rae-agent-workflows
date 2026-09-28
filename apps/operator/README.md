@@ -2,14 +2,18 @@
 
 The operator presents durable autonomous-run state under `.pipeline/`. It binds
 only to `127.0.0.1`, uses an ephemeral port by default, and does not expose raw
-provider traces. The terminal-inspired interface uses modular CSS and TypeScript
-under `static/css/` and `static/js/`, compiled into `dist/static/`.
+provider traces. The interface uses modular CSS and TypeScript under
+`static/css/` and `static/js/`, compiled into `dist/static/`. Its design system,
+the reasoning behind it and the assumptions it rests on are recorded in
+[DESIGN_BRIEF.md](DESIGN_BRIEF.md).
 
 ## Task and evidence review
 
-The selected task places recorded evidence beside the human decision. The task
-outline follows description, decision review, execution and result inspection;
-it does not estimate progress or replace the workflow graph. Approval saves its
+The selected task places recorded evidence beside the human decision. Text a
+person wrote (the task, rationale and saved decisions) is set in a serif, and
+everything the machine recorded is set in monospace. A stepped trace follows
+task, checkpoint, execution and hand-off from recorded run state only; it does
+not estimate progress or replace the workflow graph. Approval saves its
 outcome and rationale. Resume is a separate action enabled by the server's
 current run controls. Draft rationale survives background updates to the same
 checkpoint. Start validates the task's 32 KiB UTF-8 limit before submission.
@@ -21,10 +25,15 @@ workflow editor remains under **Workflow editor**. **All runs** exposes the
 catalogue, search, state filters and new-run form. `Ctrl+K` or `Cmd+K` opens run
 search. Copy controls copy displayed references without reading local files.
 
-The initial theme is dark; the theme control retains a previously chosen light
-or dark preference when browser storage is available. Narrow windows stack
-evidence before decisions. Status text, keyboard focus and labelled controls
-remain available independently of the decorative pixel motif.
+Without a stored choice the theme follows the operating system and falls back
+to dark; the theme control retains a chosen light or dark preference when
+browser storage is available. Narrow windows stack evidence before decisions.
+State is always given in text as well as colour.
+
+The console self-hosts two SIL Open Font License typefaces, IBM Plex Mono and
+Newsreader, under `static/fonts/` with their licences. The server's content
+security policy allows same-origin fonts only (`font-src 'self'`); no asset is
+loaded from another origin.
 
 ## Static Pages demo
 
@@ -63,25 +72,6 @@ evidence from a real run:
 ![Workflow editor desktop fixture](docs/screenshots/evidence-dossier-desktop.png)
 
 ![Workflow editor mobile fixture](docs/screenshots/evidence-dossier-mobile.png)
-
-Regenerate both captures from the current operator UI and the sanitized graph
-fixture:
-
-```bash
-npm --workspace @rae/operator run build
-node apps/operator/dist/scripts/capture-docs-screenshots.js
-```
-
-The capture script requires a local Chrome or Chromium installation. It starts
-an ephemeral loopback fixture server and does not read repository run state.
-Each capture uses an isolated browser profile and
-[explicit viewport dimensions](https://chromedevtools.github.io/devtools-protocol/tot/Emulation/#method-setDeviceMetricsOverride).
-The script verifies the connected Graph view, browser errors, viewport size,
-and page overflow before saving each PNG. It awaits browser process-group
-cleanup and retains the temporary profile if containment cannot be confirmed.
-Use `node apps/operator/dist/scripts/capture-docs-screenshots.js --check` to
-verify both viewports with temporary images. The root verification gate uses
-this mode so it does not change the maintained screenshots.
 
 Start it with one or more canonical Git roots:
 
@@ -203,14 +193,16 @@ Start defaults to checkpoints before both mutation and release.
 ## Verification
 
 ```bash
-npm --workspace @rae/operator test
+npm --workspace @rae/operator run build
 ```
 
 ## Summary discovery and event replay
 
 `GET /api/v1/projects/:projectId/runs?view=summary` returns identity, workspace
-labels, status, phase and timing fields without gates, attempts, checkpoints or
-graph-health projection. The default response remains the full run projection.
+labels, status, phase, timing and a `needs_human_decision` boolean without
+gates, attempts, checkpoint identities or graph-health projection. This keeps
+human checkpoint holds distinct from workflow timer waits. The default
+response remains the full run projection.
 Run pages use opaque timestamp-and-ID keyset cursors, with pagination applied
 before detail loading. The browser initially loads 100 summaries and offers
 further pages without discarding the selected run. Legacy runs whose only start

@@ -372,7 +372,14 @@ function edgeLabel(edgeRecord: WorkflowEdge, from: Position, to: Position): SVGT
   label.setAttribute("class", "workflow-edge-label");
   label.setAttribute("x", String((from.x + to.x + 130) / 2));
   label.setAttribute("y", String((from.y + to.y) / 2 + 20));
-  label.textContent = edgeRecord.condition ?? edgeRecord.artifact ?? edgeRecord.type;
+  // The graph's 50-unit inter-node channel fits edge kinds, while complete
+  // condition and artifact values remain available in the equivalent tables.
+  label.textContent =
+    edgeRecord.type === "condition"
+      ? "when"
+      : edgeRecord.type === "loop-back"
+        ? "loop"
+        : edgeRecord.type;
   return label;
 }
 
@@ -632,6 +639,7 @@ export async function loadWorkflows(): Promise<void> {
     ...state.workflows.map((workflow) => {
       const button = document.createElement("button");
       button.type = "button";
+      button.setAttribute("role", "option");
       button.dataset.workflowId = workflow.workflow_id;
       button.textContent = `${workflow.workflow_id} · r${workflow.latest_revision ?? "—"}${workflow.active ? " · active" : ""}`;
       button.addEventListener("click", () => selectWorkflow(workflow.workflow_id).catch(showError));
