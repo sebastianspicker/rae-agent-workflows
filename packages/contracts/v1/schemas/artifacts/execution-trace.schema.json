@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Execution trace event",
+  "description": "Append-only event schema for .pipeline/runs/<run_id>/trace.jsonl entries.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ts", "run_id", "event", "phase"],
+  "properties": {
+    "ts": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "seq": { "type": "integer", "minimum": 1 },
+    "event_id": { "type": "string", "minLength": 1 },
+    "parent_event_id": { "type": "string", "minLength": 1 },
+    "input_digests": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+      "uniqueItems": true
+    },
+    "output_digests": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+      "uniqueItems": true
+    },
+    "event": {
+      "anyOf": [
+        { "type": "string", "pattern": "^workflow_[a-z][a-z0-9_]{1,95}$" },
+        { "type": "string", "enum": [
+        "run_start",
+        "phase_start",
+        "phase_end",
+        "task_session_start",
+        "task_session_end",
+        "review_state_change",
+        "artifact_read",
+        "artifact_write",
+        "agent_call",
+        "gate_result",
+        "retry",
+        "error",
+        "run_end",
+        "checkpoint_requested",
+        "checkpoint_resolved",
+        "run_waiting",
+        "run_resumed",
+        "run_stop_requested",
+        "run_stopped",
+        "run_interrupted",
+        "run_blocked",
+        "run_completed"
+        ] }
+      ]
+    },
+    "phase": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9._-]{0,63}$"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "pass",
+        "fail",
+        "warn",
+        "ok",
+        "error",
+        "retry",
+        "waiting",
+        "stopped",
+        "interrupted",
+        "blocked",
+        "completed"
+      ]
+    },
+    "artifact_ref": {
+      "type": "string",
+      "minLength": 1
+    },
+    "gate_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "tool_name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "tier": {
+      "type": "string",
+      "enum": ["high_reasoning", "balanced", "fast"]
+    },
+    "model_hint": {
+      "type": "string"
+    },
+    "activity_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "runtime_name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "runtime_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "tokens_in": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "tokens_out": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "cost_usd": {
+      "type": "number",
+      "minimum": 0
+    },
+    "duration_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "error_code": {
+      "type": "string"
+    },
+    "message": {
+      "type": "string"
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  }
+}

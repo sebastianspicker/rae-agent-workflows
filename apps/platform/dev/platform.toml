@@ -1,0 +1,21 @@
+# Development-only loopback configuration for the host control process.
+[server]
+host = "127.0.0.1"
+port = 8080
+publicBaseUrl = "http://127.0.0.1:8080"
+
+[database]
+url = "postgres://rae:rae-dev-only@127.0.0.1:5432/rae_platform"
+
+[platform]
+development = true
+allowInsecureAuth = true
+allowInsecureHttp = true
+leaseSeconds = 60
+heartbeatSeconds = 20
+
+[storage]
+bucket = "rae-artifacts"
+region = "us-east-1"
+endpoint = "http://127.0.0.1:9000"
+forcePathStyle = true

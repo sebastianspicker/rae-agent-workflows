@@ -1,0 +1,13 @@
+# Keep quality evaluation offline and confine temporary output to /tmp.
+network:
+  allow: []
+filesystem:
+  read:
+    - /workspace
+  write:
+    - /tmp
+process:
+  allow_subprocess: false
+limits:
+  max_files: 5000
+  max_file_mb: 5
