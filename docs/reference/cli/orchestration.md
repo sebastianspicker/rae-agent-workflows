@@ -71,8 +71,8 @@ state.
 
 ## Package references
 
-- [Package README](https://github.com/sebastianspicker/rae/blob/main/packages/engine/README.md)
-- [Runbook](https://github.com/sebastianspicker/rae/blob/main/docs/how-to/engine-runbook.md)
+- [Package README](https://github.com/sebastianspicker/rae-agent-workflows/blob/main/packages/engine/README.md)
+- [Runbook](https://github.com/sebastianspicker/rae-agent-workflows/blob/main/docs/how-to/engine-runbook.md)
 - [Platform support](../engine/adapter-platforms.md)
 - [Repository map](../repo-map.md)
 

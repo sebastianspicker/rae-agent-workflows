@@ -4,7 +4,7 @@
 
 Please report security issues privately before opening a public issue.
 
-- Preferred route: [private GitHub security advisory](https://github.com/sebastianspicker/rae/security/advisories/new).
+- Preferred route: [private GitHub security advisory](https://github.com/sebastianspicker/rae-agent-workflows/security/advisories/new).
 - Include: affected path(s), reproduction steps, impact, and whether public
   disclosure appears to have already occurred.
 

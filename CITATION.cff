@@ -8,8 +8,8 @@ type: software
 authors:
   - given-names: Sebastian
     family-names: Spicker
-repository-code: https://github.com/sebastianspicker/rae
-url: https://github.com/sebastianspicker/rae
+repository-code: https://github.com/sebastianspicker/rae-agent-workflows
+url: https://github.com/sebastianspicker/rae-agent-workflows
 license: MIT
 abstract: >-
   Reliable Agentic Engineering is an evaluation-first reference implementation

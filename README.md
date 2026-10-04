@@ -6,10 +6,10 @@
   </picture>
 </p>
 
-[![ci](https://github.com/sebastianspicker/rae/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/sebastianspicker/rae/actions/workflows/ci.yml)
+[![ci](https://github.com/sebastianspicker/rae-agent-workflows/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/sebastianspicker/rae-agent-workflows/actions/workflows/ci.yml)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13179/badge)](https://www.bestpractices.dev/projects/13179)
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/sebastianspicker/rae/badge)](https://scorecard.dev/viewer/?uri=github.com/sebastianspicker/rae)
-[![License: MIT](https://img.shields.io/github/license/sebastianspicker/rae)](LICENSE)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/sebastianspicker/rae-agent-workflows/badge)](https://scorecard.dev/viewer/?uri=github.com/sebastianspicker/rae-agent-workflows)
+[![License: MIT](https://img.shields.io/github/license/sebastianspicker/rae-agent-workflows)](LICENSE)
 
 RAE is a local-first toolkit for controlled repository changes. It combines
 versioned graph workflows, isolated Git worktrees, schema-validated artifacts,
@@ -63,7 +63,7 @@ The same editor reflows for narrow windows:
 
 ![Operator workflow editor, mobile fixture](apps/operator/docs/screenshots/evidence-dossier-mobile.png)
 
-Try the [static Pages demo](https://sebastianspicker.github.io/rae/) to click
+Try the [static Pages demo](https://sebastianspicker.github.io/rae-agent-workflows/) to click
 through the interface against an in-browser mock. It has no repository or
 backend access. The full operator stays bearer-authenticated and loopback-only.
 

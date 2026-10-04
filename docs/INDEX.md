@@ -8,7 +8,7 @@ evidence_links: reference/claims/evidence-index.md
 
 # Documentation guide
 
-Use the root [README](https://github.com/sebastianspicker/rae/blob/main/README.md) for purpose, requirements, installation,
+Use the root [README](https://github.com/sebastianspicker/rae-agent-workflows/blob/main/README.md) for purpose, requirements, installation,
 common commands, repository structure, and current limitations.
 
 Start with the pages below; the site navigation covers the complete maintained
@@ -55,10 +55,10 @@ corpus. This is a curated path, not a file listing.
 
 Package-owned command details:
 
-- [Workflow engine](https://github.com/sebastianspicker/rae/blob/main/packages/engine/README.md)
-- [Engine runbook](https://github.com/sebastianspicker/rae/blob/main/docs/how-to/engine-runbook.md)
-- [Ralph package](https://github.com/sebastianspicker/rae/blob/main/packages/ralph/README.md)
-- [Co-author trailer cleaner](https://github.com/sebastianspicker/rae/blob/main/tools/repo-hygiene/coauthor-trailer-cleaner/README.md)
+- [Workflow engine](https://github.com/sebastianspicker/rae-agent-workflows/blob/main/packages/engine/README.md)
+- [Engine runbook](https://github.com/sebastianspicker/rae-agent-workflows/blob/main/docs/how-to/engine-runbook.md)
+- [Ralph package](https://github.com/sebastianspicker/rae-agent-workflows/blob/main/packages/ralph/README.md)
+- [Co-author trailer cleaner](https://github.com/sebastianspicker/rae-agent-workflows/blob/main/tools/repo-hygiene/coauthor-trailer-cleaner/README.md)
 
 ## Explanation
 
@@ -77,10 +77,10 @@ Package-owned command details:
 
 Repository-level contribution, security, support, and governance information
 is in
-[CONTRIBUTING.md](https://github.com/sebastianspicker/rae/blob/main/CONTRIBUTING.md),
-[SECURITY.md](https://github.com/sebastianspicker/rae/blob/main/SECURITY.md),
-[SUPPORT.md](https://github.com/sebastianspicker/rae/blob/main/SUPPORT.md), and
-[GOVERNANCE.md](https://github.com/sebastianspicker/rae/blob/main/GOVERNANCE.md).
+[CONTRIBUTING.md](https://github.com/sebastianspicker/rae-agent-workflows/blob/main/CONTRIBUTING.md),
+[SECURITY.md](https://github.com/sebastianspicker/rae-agent-workflows/blob/main/SECURITY.md),
+[SUPPORT.md](https://github.com/sebastianspicker/rae-agent-workflows/blob/main/SUPPORT.md), and
+[GOVERNANCE.md](https://github.com/sebastianspicker/rae-agent-workflows/blob/main/GOVERNANCE.md).
 
 ## Source note
 

@@ -382,39 +382,39 @@ export const navigation: DefaultTheme.SidebarItem[] = [
     items: [
       {
         text: "Changelog",
-        link: "https://github.com/sebastianspicker/rae/blob/main/CHANGELOG.md",
+        link: "https://github.com/sebastianspicker/rae-agent-workflows/blob/main/CHANGELOG.md",
       },
       {
         text: "Proposed Release Notes",
-        link: "https://github.com/sebastianspicker/rae/blob/main/RELEASE_NOTES.md",
+        link: "https://github.com/sebastianspicker/rae-agent-workflows/blob/main/RELEASE_NOTES.md",
       },
       {
         text: "Release Status",
-        link: "https://github.com/sebastianspicker/rae/blob/main/RELEASE_STATUS.md",
+        link: "https://github.com/sebastianspicker/rae-agent-workflows/blob/main/RELEASE_STATUS.md",
       },
       {
         text: "Releasing",
-        link: "https://github.com/sebastianspicker/rae/blob/main/RELEASING.md",
+        link: "https://github.com/sebastianspicker/rae-agent-workflows/blob/main/RELEASING.md",
       },
       {
         text: "Contributing",
-        link: "https://github.com/sebastianspicker/rae/blob/main/CONTRIBUTING.md",
+        link: "https://github.com/sebastianspicker/rae-agent-workflows/blob/main/CONTRIBUTING.md",
       },
       {
         text: "Security",
-        link: "https://github.com/sebastianspicker/rae/blob/main/SECURITY.md",
+        link: "https://github.com/sebastianspicker/rae-agent-workflows/blob/main/SECURITY.md",
       },
       {
         text: "Support",
-        link: "https://github.com/sebastianspicker/rae/blob/main/SUPPORT.md",
+        link: "https://github.com/sebastianspicker/rae-agent-workflows/blob/main/SUPPORT.md",
       },
       {
         text: "Governance",
-        link: "https://github.com/sebastianspicker/rae/blob/main/GOVERNANCE.md",
+        link: "https://github.com/sebastianspicker/rae-agent-workflows/blob/main/GOVERNANCE.md",
       },
       {
         text: "Code of Conduct",
-        link: "https://github.com/sebastianspicker/rae/blob/main/CODE_OF_CONDUCT.md",
+        link: "https://github.com/sebastianspicker/rae-agent-workflows/blob/main/CODE_OF_CONDUCT.md",
       },
     ],
   },

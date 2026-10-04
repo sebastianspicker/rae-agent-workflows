@@ -201,8 +201,8 @@ boundary fails closed.
 - [Orchestration CLI](orchestration.md)
 - [Ralph CLI](ralph.md)
 - [Repository hygiene CLI](repo-hygiene.md)
-- [Orchestration package](https://github.com/sebastianspicker/rae/blob/main/packages/engine/README.md)
-- [Ralph package](https://github.com/sebastianspicker/rae/blob/main/packages/ralph/README.md)
+- [Orchestration package](https://github.com/sebastianspicker/rae-agent-workflows/blob/main/packages/engine/README.md)
+- [Ralph package](https://github.com/sebastianspicker/rae-agent-workflows/blob/main/packages/ralph/README.md)
 
 ## Source note
 
