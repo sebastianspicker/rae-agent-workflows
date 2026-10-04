@@ -217,3 +217,4 @@ id_ed25519.*
 !/docs/reference/claims/claims-ledger.md
 /docs/research/deep-audit-*.md
 /docs/research/scientific-proofread-notes.md
+/packages/ralph/AGENTS.md

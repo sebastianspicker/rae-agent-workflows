@@ -20,7 +20,6 @@ import type { Mode, Prd, RuntimePaths, Story } from "./types.js";
 
 const EMBEDDED_FILES = [
   "INSTRUCTIONS.md",
-  "AGENTS.md",
   "README.md",
   "CONTRIBUTING.md",
   "SECURITY.md",
