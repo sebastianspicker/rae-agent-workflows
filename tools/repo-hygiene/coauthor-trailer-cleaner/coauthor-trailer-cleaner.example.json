@@ -1,8 +1,7 @@
 {
   "defaults": {
-    "dryRun": false,
     "noPush": true,
-    "backupRemote": "backup"
+    "deleteRecoveryBranch": false
   },
   "targets": [
     {

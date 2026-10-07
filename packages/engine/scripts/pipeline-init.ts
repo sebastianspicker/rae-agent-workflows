@@ -45,6 +45,11 @@ interface ValidatedOwnership {
   branch: string;
 }
 
+/** Single-quotes a value for a POSIX shell, so the printed command is safe to paste. */
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
 function usage(): string {
   return `Usage: rae-pipeline-init [project-root] [--use-worktree] [--worktree-root <path>] [--branch-prefix <prefix>]
        rae-pipeline-init --cleanup-worktree <path>
@@ -172,25 +177,33 @@ function assertOwnedCleanup(worktree: string, state: OwnershipState): ValidatedO
   return canonical;
 }
 
-function assertCleanOwnedWorktree(worktree: string): void {
+/** Refuses on non-ignored changes; returns gitignored leftovers (excluding runtime state) as info. */
+function assertCleanOwnedWorktree(worktree: string): string[] {
   if (
     !gitSucceeds(worktree, ["diff", "--quiet", "--ignore-submodules", "--", "."]) ||
     !gitSucceeds(worktree, ["diff", "--cached", "--quiet", "--ignore-submodules", "--", "."])
   ) {
     throw new Error("refusing cleanup: owned worktree has uncommitted changes");
   }
-  const untracked = [
-    git(worktree, ["ls-files", "--others", "--exclude-standard", "-z"]),
-    git(worktree, ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"]),
-  ]
-    .join("")
+  const runtimeState = (entry: string): boolean =>
+    entry === ".pipeline/pipeline-state.json" || entry.startsWith(".pipeline/runs/");
+  const untracked = git(worktree, ["ls-files", "--others", "--exclude-standard", "-z"])
     .split("\0")
     .filter(Boolean);
-  const unsafe = untracked.find(
-    (entry) => entry !== ".pipeline/pipeline-state.json" && !entry.startsWith(".pipeline/runs/"),
-  );
+  const unsafe = untracked.find((entry) => !runtimeState(entry));
   if (unsafe)
     throw new Error(`refusing cleanup: owned worktree has uncommitted changes at: ${unsafe}`);
+  // Build output, caches, and editor files are ignored by design; they do not block cleanup.
+  return git(worktree, [
+    "ls-files",
+    "--others",
+    "--ignored",
+    "--exclude-standard",
+    "--directory",
+    "-z",
+  ])
+    .split("\0")
+    .filter((entry) => entry && !runtimeState(entry) && !entry.startsWith(".pipeline/"));
 }
 
 function cleanupWorktree(target: string): void {
@@ -213,12 +226,16 @@ function cleanupWorktree(target: string): void {
   if (git(worktree, ["branch", "--show-current"], true) !== workspace.branch) {
     throw new Error("refusing cleanup: branch ownership does not match");
   }
-  assertCleanOwnedWorktree(worktree);
+  const ignoredLeftovers = assertCleanOwnedWorktree(worktree);
   git(primary, ["merge-base", "--is-ancestor", `refs/heads/${workspace.branch}`, "HEAD"]);
   git(primary, ["worktree", "remove", "--force", worktree]);
   git(primary, ["branch", "-d", "--", workspace.branch]);
   process.stdout.write(
-    `Worktree cleanup:\n  worktree_path: ${worktree}\n  branch:        ${workspace.branch}\n  status:        removed\n`,
+    `Worktree cleanup:\n  worktree_path: ${worktree}\n  branch:        ${workspace.branch}\n  status:        removed\n${
+      ignoredLeftovers.length
+        ? `  info:          removed ${ignoredLeftovers.length} ignored path(s), for example ${ignoredLeftovers.slice(0, 5).join(", ")}\n`
+        : ""
+    }`,
   );
 }
 
@@ -332,6 +349,13 @@ function pipelineState(
   };
 }
 
+/** Best-effort removal of a just-created worktree and branch after a later initialization failure. */
+function rollbackWorktree(primaryRoot: string, workspaceRoot: string, branch: string): void {
+  git(primaryRoot, ["worktree", "remove", "--force", workspaceRoot], true);
+  git(primaryRoot, ["worktree", "prune"], true);
+  git(primaryRoot, ["branch", "-D", "--", branch], true);
+}
+
 function initialize(options: InitOptions): void {
   const requestedRoot = resolve(options.projectRoot);
   // A plain bootstrap creates a missing target, as the shell implementation did; worktree mode needs a repository.
@@ -356,6 +380,37 @@ function initialize(options: InitOptions): void {
     projectRoot = primaryRoot;
     mode = "git-worktree";
   }
+  try {
+    writePipelineState({
+      options,
+      runId,
+      workspaceRoot,
+      projectRoot,
+      primaryRoot,
+      mode,
+      branch,
+      worktreeRoot,
+    });
+  } catch (error) {
+    if (options.useWorktree) rollbackWorktree(primaryRoot, workspaceRoot, branch);
+    throw error;
+  }
+}
+
+interface InitializedWorkspace {
+  options: InitOptions;
+  runId: string;
+  workspaceRoot: string;
+  projectRoot: string;
+  primaryRoot: string;
+  mode: string;
+  branch: string;
+  worktreeRoot: string | null;
+}
+
+function writePipelineState(init: InitializedWorkspace): void {
+  const { options, runId, workspaceRoot, projectRoot, primaryRoot, mode, branch, worktreeRoot } =
+    init;
   const createdAt = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
   const root = openRoot(workspaceRoot);
   let pipeline = -1;
@@ -376,7 +431,7 @@ function initialize(options: InitOptions): void {
       worktree_root: worktreeRoot,
       ownership_marker: options.useWorktree ? "rae-pipeline-worktree-v1" : null,
       cleanup_command: options.useWorktree
-        ? `node ${process.argv[1]} --cleanup-worktree ${JSON.stringify(workspaceRoot)}`
+        ? `node ${shellQuote(process.argv[1])} --cleanup-worktree ${shellQuote(workspaceRoot)}`
         : null,
     };
     atomicWriteAt(
@@ -403,7 +458,7 @@ function initialize(options: InitOptions): void {
       `${JSON.stringify(pipelineState(runId, createdAt, workspace, options.useWorktree), null, 2)}\n`,
     );
     process.stdout.write(
-      `Pipeline initialized:\n  run_id:         ${runId}\n  workspace_mode: ${mode}\n  workspace_root: ${workspaceRoot}\n  primary_root:   ${projectRoot}\n  branch:         ${branch}\n  run_dir:        ${resolve(workspaceRoot, runDirectory)}\n  trace:          ${resolve(workspaceRoot, runDirectory, "trace.jsonl")}\n  state:          ${resolve(workspaceRoot, ".pipeline/pipeline-state.json")}\n\nNext step:\n  ${options.useWorktree ? `cd ${JSON.stringify(workspaceRoot)} && ` : ""}rae-pipeline run-stage --run-id ${runId} --phase arm\n`,
+      `Pipeline initialized:\n  run_id:         ${runId}\n  workspace_mode: ${mode}\n  workspace_root: ${workspaceRoot}\n  primary_root:   ${projectRoot}\n  branch:         ${branch}\n  run_dir:        ${resolve(workspaceRoot, runDirectory)}\n  trace:          ${resolve(workspaceRoot, runDirectory, "trace.jsonl")}\n  state:          ${resolve(workspaceRoot, ".pipeline/pipeline-state.json")}\n\nNext step:\n  ${options.useWorktree ? `cd ${shellQuote(workspaceRoot)} && ` : ""}rae-pipeline run-stage --run-id ${runId} --phase arm\n`,
     );
   } finally {
     if (pipeline >= 0) closeSync(pipeline);

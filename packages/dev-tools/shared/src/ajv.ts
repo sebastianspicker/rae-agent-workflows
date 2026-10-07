@@ -33,7 +33,7 @@ function resolveModuleDefault<T>(mod: Record<string, unknown>): T {
 export async function getAjv(): Promise<AjvConstructor> {
   if (_AjvClass) return _AjvClass;
   _AjvClass = resolveModuleDefault<AjvConstructor>(
-    (await import("ajv")) as Record<string, unknown>,
+    (await import("ajv/dist/2020.js")) as Record<string, unknown>,
   );
   return _AjvClass;
 }

@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- `--discard-transaction <id>` is refused once promotion started unless
+  `--force` is given; forced discards keep sibling backups in place, list the
+  possibly half-promoted live paths, move the journal last and remove the
+  pointer last. A pointer whose journal is missing is kept with a warning.
+- Journal an `installing` state before each staging-to-live rename, and block
+  automatic cleanup after uncertain provider containment.
+- Deny `.github/`, `.claude/`, `.codex/`, `.husky/`, `.git/`, agent policy
+  files, Git attribute files, `package.json` and lockfiles regardless of story
+  scope; reject absolute or escaping promoted symlinks.
+- Scan forwarded environment values for credentials, put policy before story
+  data in prompts, filter `--import-state` keys, harden stale-lock detection,
+  make `--dry-run` lock- and log-free, and support targets outside the Ralph
+  package via `RALPH_STATE_DIR` and caller-relative bundles.
+
 ## [0.4.0] - 2026-09-07
 
 ### Changed

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /** Implements Ralph's command-line lifecycle and stable exit-code contract. */
 import { accessSync, existsSync, readFileSync, constants } from "node:fs";
-import { join, relative } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { syncBranch } from "./branch.js";
 import { EXIT, RalphError, errorMessage } from "./errors.js";
 import { assertNodeVersion, parseArgs, resolvePaths, USAGE, VERSION } from "./config.js";
@@ -24,7 +24,15 @@ import {
 import { modelPreflight, processStory } from "./runner.js";
 import { CONTAINMENT_EXIT } from "./supervisor.js";
 import { securityPreflight } from "./preflight.js";
-import { recoverTransaction } from "./transaction.js";
+import {
+  clearContainmentSentinel,
+  orphanedPointer,
+  pendingTransaction,
+  recoverTransaction,
+  removePointer,
+  retainTransaction,
+  transactionStatus,
+} from "./transaction.js";
 import { appendRelative, atomicWriteRelative } from "./safe-fs.js";
 import type { CliOptions, Mode, Prd, RuntimePaths, Story } from "./types.js";
 
@@ -89,7 +97,7 @@ function validateConfig(paths: RuntimePaths, prd: Prd, mode: Mode, options: CliO
   const lock = lockState(paths);
   if (options.outputFormat === "json")
     process.stdout.write(
-      `${JSON.stringify({ command: "validate-config", ok: true, mode, checks: { prd: "ok", jq: "ok", mktemp: "ok", python: "ok", node: "ok", fs_bridge: "ok", tool, lock: lock.held ? "held" : "not_held" } })}\n`,
+      `${JSON.stringify({ command: "validate-config", ok: true, mode, checks: { prd: "ok", node: "ok", fs_bridge: "ok", tool, lock: lock.held ? "held" : "not_held" } })}\n`,
     );
   else
     process.stderr.write(
@@ -98,8 +106,17 @@ function validateConfig(paths: RuntimePaths, prd: Prd, mode: Mode, options: CliO
   void prd;
 }
 
+function pendingSummary(paths: RuntimePaths): ReturnType<typeof transactionStatus> | string {
+  try {
+    return transactionStatus(paths);
+  } catch (error) {
+    return `unavailable: ${errorMessage(error)}`;
+  }
+}
+
 function doctor(paths: RuntimePaths, prd: Prd, mode: Mode, options: CliOptions): void {
   const lock = lockState(paths);
+  const transaction = pendingSummary(paths);
   const reportDir = prd.defaults.report_dir;
   const ready =
     Boolean(reportDir) && !reportDir.startsWith("/") && !reportDir.split("/").includes("..");
@@ -122,6 +139,7 @@ function doctor(paths: RuntimePaths, prd: Prd, mode: Mode, options: CliOptions):
       fs_bridge: "found",
     },
     lock,
+    transaction,
     strict_report_dir: {
       enabled: options.strictReportDir,
       default_report_dir: reportDir || null,
@@ -132,7 +150,7 @@ function doctor(paths: RuntimePaths, prd: Prd, mode: Mode, options: CliOptions):
   if (options.outputFormat === "json") process.stdout.write(`${JSON.stringify(result)}\n`);
   else
     process.stdout.write(
-      `Doctor Report\nMode: ${mode}\nRepo root: ${paths.repoRoot}\nPackage root: ${paths.packageRoot}\nPRD file: ${paths.prdFile}\nState dir: ${paths.stateDir}\nDependencies: codex=${result.dependencies.tool} node=${process.versions.node} fs_bridge=found\nLock: ${lock.status}\nStrict report dir: ${options.strictReportDir ? (ready ? `enabled (ready, defaults.report_dir=${reportDir})` : "enabled (not ready)") : "disabled"}\n`,
+      `Doctor Report\nMode: ${mode}\nRepo root: ${paths.repoRoot}\nPackage root: ${paths.packageRoot}\nPRD file: ${paths.prdFile}\nState dir: ${paths.stateDir}\nDependencies: codex=${result.dependencies.tool} node=${process.versions.node} fs_bridge=found\nLock: ${lock.status}\nPending transaction: ${typeof transaction === "string" ? transaction : transaction ? `${transaction.id ?? "?"} (state=${transaction.state}, journal=${transaction.journal})` : "none"}\nStrict report dir: ${options.strictReportDir ? (ready ? `enabled (ready, defaults.report_dir=${reportDir})` : "enabled (not ready)") : "disabled"}\n`,
     );
 }
 
@@ -157,8 +175,8 @@ function maybeAutoArchive(
   }
   if (options.autoArchive && previous && previous !== current) {
     archiveState(
-      paths.packageRoot,
-      join(paths.packageRoot, "archive"),
+      dirname(paths.prdFile),
+      join(dirname(paths.prdFile), "archive"),
       previous,
       `auto-archive on project change (${previous} -> ${current})`,
     );
@@ -168,8 +186,9 @@ function maybeAutoArchive(
   atomicWriteRelative(paths.repoRoot, relativeTracking, `${current}\n`);
 }
 
+/** Read-only actions create no runtime files, take no lock, and write no logs. */
 function readonlyAction(action: CliOptions["action"]): boolean {
-  return action === "check" || action === "doctor";
+  return action === "check" || action === "doctor" || action === "dry-run";
 }
 
 interface CommandContext {
@@ -238,7 +257,61 @@ function queryCommand({ options, paths, logger, prd, mode }: CommandContext): bo
   }
   return true;
 }
-function stateCommand({ options, paths, logger, prd }: CommandContext): boolean {
+function discardOrphan({ options, paths, logger }: CommandContext): boolean {
+  const orphan = orphanedPointer(paths);
+  if (!orphan) return false;
+  if (orphan.id !== undefined && orphan.id !== options.actionValue)
+    throw new RalphError(
+      `--discard-transaction requires the pending journal id (${orphan.id}, journal missing)`,
+      EXIT.scope,
+    );
+  if (!options.force)
+    throw new RalphError(
+      `Transaction pointer ${orphan.pointer} references missing journal ${orphan.journal}; re-run with --force to remove the pointer`,
+      EXIT.scope,
+    );
+  removePointer(paths);
+  logger.log(`Removed transaction pointer ${orphan.pointer} (journal ${orphan.journal} missing).`);
+  return true;
+}
+function discardCommand(context: CommandContext): void {
+  const { options, paths, logger } = context;
+  const pending = pendingTransaction(paths);
+  if (!pending) {
+    if (discardOrphan(context)) return;
+    if (options.force && clearContainmentSentinel(paths))
+      logger.log("Removed the containment-uncertain sentinel; no journal was pending.");
+    else logger.log("No pending fixing transaction.");
+    return;
+  }
+  if (pending.id !== options.actionValue)
+    throw new RalphError(
+      `--discard-transaction requires the pending journal id (${pending.id}, state=${pending.state})`,
+      EXIT.scope,
+    );
+  logger.log(`Retiring fixing transaction ${pending.id} (state=${pending.state}); evidence:`);
+  for (const path of pending.evidence) logger.log(`  ${path}`);
+  const retained = retainTransaction(paths, pending.journalPath, options.force === true);
+  for (const note of retained.skipped) logger.warn(`  skipped: ${note}`);
+  const where = `Evidence retained under ${retained.destination}`;
+  const baselines = `external-placement baselines moved to ${retained.destination}/quarantine`;
+  if (retained.promotion === "none") {
+    logger.log(
+      `${where}; nothing was promoted, so the live repository was not modified (${baselines}).`,
+    );
+    return;
+  }
+  if (retained.promotion === "completed") {
+    logger.log(`${where}; promotion completed; evidence retained (${baselines}).`);
+    return;
+  }
+  logger.warn(
+    `${where}. Promotion had started; these live paths may be half-promoted (sibling backups were left in place; ${baselines}):`,
+  );
+  for (const path of retained.live) logger.warn(`  ${path}`);
+}
+function stateCommand(context: CommandContext): boolean {
+  const { options, paths, logger, prd } = context;
   switch (options.action) {
     case "import-state":
       importState(paths, prd, options.actionValue ?? "");
@@ -253,13 +326,16 @@ function stateCommand({ options, paths, logger, prd }: CommandContext): boolean 
       logger.log(count ? `Reset ${count} skipped stories for retry.` : "No skipped stories found.");
       break;
     }
+    case "discard-transaction":
+      discardCommand(context);
+      break;
     default:
       return false;
   }
   return true;
 }
 function refreshProgress({ options, paths, logger, prd }: CommandContext): void {
-  const path = join(paths.packageRoot, "progress.txt");
+  const path = join(dirname(paths.prdFile), "progress.txt");
   if (!options.autoProgressRefresh || !existsSync(path)) return;
   try {
     writeProgress(paths, prd);
@@ -311,6 +387,7 @@ async function executeStory(context: CommandContext, story: Story): Promise<numb
     return await processStory(paths, prd, story, mode, sandbox, options, logger);
   } catch (error) {
     if (error instanceof RalphError && error.exitCode !== EXIT.tool) throw error;
+    process.stderr.write(`[ralph][ERROR] story=${story.id} failed: ${errorMessage(error)}\n`);
     return EXIT.tool;
   }
 }
@@ -320,28 +397,36 @@ function summarize(
   passed: number,
   started: number,
 ): void {
-  const { prd, mode, logger } = context;
+  const { prd, mode, logger, options } = context;
   const remaining = openStories(prd, mode).length;
+  const skipped = prd.stories.filter((story) => story.mode === mode && story.skipped).length;
   const elapsed = Math.floor((Date.now() - started) / 1000);
   logger.log(
-    `summary processed=${processed} passed=${passed} remaining=${remaining} mode=${mode} tool=codex elapsed=${elapsed}s`,
+    `summary processed=${processed} passed=${passed} remaining=${remaining} skipped=${skipped} mode=${mode} tool=codex elapsed=${elapsed}s`,
   );
   logger.event(
     "RUN_END",
-    `processed=${processed} passed=${passed} remaining=${remaining} mode=${mode} tool=codex elapsed_seconds=${elapsed}`,
+    `processed=${processed} passed=${passed} remaining=${remaining} skipped=${skipped} mode=${mode} tool=codex elapsed_seconds=${elapsed}`,
   );
-  if (remaining === 0) {
+  if (remaining !== 0 || options.action === "dry-run") return;
+  if (skipped > 0)
+    logger.log(`${skipped} stories skipped; use --retry-failed to reset them. Not complete.`);
+  else {
     process.stdout.write("<promise>COMPLETE</promise>\n");
     logger.log("All stories complete.");
   }
 }
 async function runStories(context: CommandContext): Promise<void> {
   const { options, paths, logger, prd, mode, sandbox, maximum } = context;
-  recoverTransaction(paths);
+  const dryRun = options.action === "dry-run";
+  // A dry run has no side effects: no lock, logs, recovery, archive, branch sync, or provider.
+  if (!dryRun) recoverTransaction(paths);
   securityPreflight(options, logger);
-  maybeAutoArchive(prd, paths, mode, options, logger);
-  syncBranch(prd, paths, mode, options, logger);
-  if (maximum > 0) await modelPreflight(paths, options, mode, sandbox, logger);
+  if (!dryRun) {
+    maybeAutoArchive(prd, paths, mode, options, logger);
+    syncBranch(prd, paths, mode, options, logger);
+  }
+  if (maximum > 0 && !dryRun) await modelPreflight(paths, options, mode, sandbox, logger);
   if (options.signal?.aborted) return;
   logger.log(`start mode=${mode} tool=codex max_stories=${maximum} sandbox=${sandbox}`);
   logger.event(
@@ -351,19 +436,19 @@ async function runStories(context: CommandContext): Promise<void> {
   const started = Date.now();
   let processed = 0,
     passed = 0;
+  const preview = dryRun ? openStories(prd, mode) : [];
   while (processed < maximum) {
-    const story = openStories(prd, mode)[0];
+    const story = dryRun ? preview[processed] : openStories(prd, mode)[0];
     if (!story) break;
     processed++;
     logger.log(`Processing story ${processed}/${maximum} (${story.id})`);
     const code = await executeStory(context, story);
     if (options.signal?.aborted && code !== CONTAINMENT_EXIT) return;
     if (code !== 0) failedStory(context, story, code);
-    else if (options.action !== "dry-run") {
+    else if (!dryRun) {
       passed++;
       completeStory(context, story);
     }
-    if (options.action === "dry-run") break;
   }
   summarize(context, processed, passed, started);
 }
@@ -409,7 +494,13 @@ async function runMain(argv: string[]): Promise<number> {
     return 0;
   }
   const context = commandContext(argv);
-  return queryCommand(context) ? 0 : runLocked(context);
+  if (queryCommand(context)) return 0;
+  if (context.options.action === "dry-run") {
+    // A preview is read-only: it neither takes the run lock nor writes logs.
+    await runStories(context);
+    return 0;
+  }
+  return runLocked(context);
 }
 
 runMain(process.argv.slice(2))

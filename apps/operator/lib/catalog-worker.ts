@@ -21,6 +21,9 @@ port.on("message", async (request: CatalogRequest) => {
     response.error = error instanceof Error ? error.message : "Catalog operation failed";
     if (error instanceof Error && "status" in error && typeof error.status === "number")
       response.status = error.status;
+    // Engine errors carry a code instead of a status; the server maps it after the hop.
+    if (error instanceof Error && "code" in error && typeof error.code === "string")
+      response.code = error.code;
   }
   if ((workerData as { measureReads?: boolean }).measureReads) {
     const after = measure.snapshot();

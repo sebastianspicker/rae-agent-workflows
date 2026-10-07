@@ -77,7 +77,16 @@ export async function eventStream(path: string, options: RequestInit = {}): Prom
   });
 }
 
+/**
+ * Notices are polite, self-dismissing status messages. Errors stay visible in an alert region
+ * until the operator dismisses them or a later error replaces them.
+ */
 export function showToast(message: string, toneValue = "error"): void {
+  if (toneValue === "error") {
+    elements["error-toast-message"].textContent = message;
+    elements["error-toast"].hidden = false;
+    return;
+  }
   const toast = elements.toast;
   toast.hidden = false;
   toast.dataset.tone = toneValue;
@@ -88,11 +97,22 @@ export function showToast(message: string, toneValue = "error"): void {
   }, 5200);
 }
 
+export function dismissError(): void {
+  elements["error-toast"].hidden = true;
+  elements["error-toast-message"].textContent = "";
+}
+
 export function showError(error: unknown): void {
   showToast(error instanceof Error ? error.message : "Unexpected operator error", "error");
 }
 
+let connectionSignature = "";
+
+/** Updates the session pill; unchanged states are not rewritten, so the live region stays quiet. */
 export function setConnection(stateValue: string, label: string, detail = "Local session"): void {
+  const signature = JSON.stringify([stateValue, label, detail]);
+  if (signature === connectionSignature) return;
+  connectionSignature = signature;
   const status = elements["connection-status"];
   const dot = document.createElement("span");
   const copy = document.createElement("span");

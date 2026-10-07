@@ -1,7 +1,7 @@
 ---
 status: stable
 owner: core
-last_reviewed: 2026-09-02
+last_reviewed: 2026-10-07
 source_of_truth: README.md
 evidence_links: reference/claims/evidence-index.md
 ---
@@ -47,6 +47,7 @@ corpus. This is a curated path, not a file listing.
 - [Artifact schemas](reference/contracts/artifact-schemas.md)
 - [Execution profile 3.0](reference/contracts/execution-profile-v3.md)
 - [Local graph and memory](reference/contracts/graph-memory.md)
+- [Workflow 2.0 and 2.1](reference/contracts/workflow-v2.md)
 - [Workflow 2.2](reference/contracts/workflow-v2.2.md)
 - [Quality gates](reference/contracts/quality-gates.md)
 - [Safety boundaries](reference/invariants/safety-boundaries.md)
@@ -87,7 +88,3 @@ is in
 - [Diataxis](reference/claims/bibliography.md#src-diataxis)
 - [NIST GenAI Profile](reference/claims/bibliography.md#src-nist-genai-profile)
 - [IEEE 1012](reference/claims/bibliography.md#src-ieee-1012)
-- [Model Cards](reference/claims/bibliography.md#src-model-cards)
-- [Datasheets](reference/claims/bibliography.md#src-datasheets)
-- [Pineau reproducibility report](reference/claims/bibliography.md#src-pineau-reproducibility)
-- [Nosek open research culture](reference/claims/bibliography.md#src-nosek-open-research)

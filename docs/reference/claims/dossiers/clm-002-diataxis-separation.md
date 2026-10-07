@@ -1,8 +1,8 @@
 ---
 status: stable
 owner: science
-last_reviewed: 2026-04-17
-source_of_truth: ../claims-ledger.md
+last_reviewed: 2026-10-07
+source_of_truth: docs/reference/claims/claims-ledger.md
 evidence_links: ../evidence-index.md#clm-002
 ---
 
@@ -63,7 +63,10 @@ architecture scope.
 
 ## Review status
 
-Adopted as a scoped documentation architecture heuristic.
+Provisional as a scoped documentation architecture heuristic.
+No retained measurement supports it yet; the
+[claims ledger](../claims-ledger.md#metrics-for-provisional-claims) names the
+metric that would test it.
 
 ## Source note
 

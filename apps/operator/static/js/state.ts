@@ -39,6 +39,10 @@ export const elements = Object.fromEntries(
   [
     "project-select",
     "connection-status",
+    "decisions-pending",
+    "decisions-pending-count",
+    "decisions-pending-label",
+    "search-shortcut",
     "new-run-button",
     "toggle-search",
     "cycle-filter",
@@ -51,6 +55,8 @@ export const elements = Object.fromEntries(
     "runs-empty",
     "workspace-empty",
     "run-content",
+    "run-task",
+    "task-toggle",
     "run-title",
     "run-branch",
     "run-workspace",
@@ -90,6 +96,9 @@ export const elements = Object.fromEntries(
     "resume-button",
     "cleanup-button",
     "toast",
+    "error-toast",
+    "error-toast-message",
+    "error-toast-close",
     "start-dialog",
     "start-form",
     "start-task",
@@ -97,6 +106,7 @@ export const elements = Object.fromEntries(
     "start-execution-profile",
     "workflow-proposal-profile",
     "start-submit",
+    "start-pending",
     "start-close",
     "start-cancel",
     "confirm-dialog",
@@ -104,6 +114,11 @@ export const elements = Object.fromEntries(
     "confirm-kicker",
     "confirm-heading",
     "confirm-message",
+    "confirm-rationale",
+    "confirm-run-id-field",
+    "confirm-help",
+    "confirm-error",
+    "confirm-pending",
     "confirm-expected-id",
     "confirm-run-id",
     "confirm-submit",
@@ -139,7 +154,6 @@ export const elements = Object.fromEntries(
     "workflow-delete-node",
     "workflow-add-edge",
     "workflow-delete-edge",
-    "workflow-auto-layout",
     "workflow-proposal-task",
     "workflow-propose",
     "workflow-node-select",
@@ -157,6 +171,7 @@ export const elements = Object.fromEntries(
     "workflow-node-resource",
     "workflow-node-verification",
     "workflow-node-checkpoint",
+    "workflow-node-checkpoint-field",
     "workflow-node-ownership",
     "workflow-node-loop-mode",
     "workflow-node-loop-bound",
@@ -177,4 +192,9 @@ if (state.token) history.replaceState(null, "", `${location.pathname}${location.
 export function currentRun(): OperatorRun | null {
   if (state.runDetail?.id === state.runId) return state.runDetail;
   return state.runs.find((run) => run.id === state.runId && run.gates) ?? null;
+}
+
+/** The selected catalogue row, which exists before (or without) the run detail. */
+export function selectedSummary(): OperatorRun | null {
+  return state.runs.find((run) => run.id === state.runId) ?? null;
 }

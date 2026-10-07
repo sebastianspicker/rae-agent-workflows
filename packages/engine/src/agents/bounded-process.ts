@@ -6,6 +6,20 @@ export const MAX_STDOUT_BYTES = 20 * 1024 * 1024;
 export const MAX_STDERR_BYTES = 16 * 1024 * 1024;
 export const REDACTED_TAIL_BYTES = 64 * 1024;
 const TERMINATION_GRACE_MS = 1_000;
+const trackedGroups = new Set<number>();
+
+/** Synchronously SIGKILLs every provider process group still running; for signal handlers. */
+export function killTrackedProcessGroups(): void {
+  if (process.platform === "win32") return;
+  for (const pid of trackedGroups) {
+    try {
+      process.kill(-pid, "SIGKILL");
+    } catch {
+      // The group already exited.
+    }
+  }
+  trackedGroups.clear();
+}
 
 export interface BoundedProcessRequest {
   command: string;
@@ -20,7 +34,7 @@ export interface BoundedProcessRequest {
 }
 
 export interface TerminationEvidence {
-  reason: "timeout" | "stdout_overflow" | "stderr_overflow" | "aborted";
+  reason: "timeout" | "stdout_overflow" | "stderr_overflow" | "aborted" | "background_group";
   groupTerminationAttempted: boolean;
   directTerminationAttempted: boolean;
   closeObserved: boolean;
@@ -40,6 +54,8 @@ export interface BoundedProcessResult {
   stderrTail: string;
   error?: Error;
   termination?: TerminationEvidence;
+  /** Present when a normally exited child left background processes that were then reaped. */
+  backgroundCleanup?: TerminationEvidence;
 }
 
 interface StreamCapture {
@@ -166,6 +182,30 @@ async function terminate(
     containmentUncertain: evidence.failed || !closed() || !groupAbsentObserved,
   };
 }
+/**
+ * After a normal exit, stops background grandchildren that kept the detached process group alive.
+ * Returns evidence of the cleanup, or undefined when the group was already gone.
+ */
+async function reapBackgroundGroup(child: ChildProcess): Promise<TerminationEvidence | undefined> {
+  const pid = child.pid;
+  if (pid === undefined || process.platform === "win32" || !groupExists(pid)) return undefined;
+  const evidence: SignalEvidence = { group: false, direct: false, failed: false };
+  sendTerminationSignal(child, "SIGTERM", evidence);
+  let gone = await waitFor(() => !groupExists(pid), TERMINATION_GRACE_MS);
+  // The group may have exited between the TERM wait and now; only a surviving group is killed.
+  if (!gone && groupExists(pid)) {
+    sendTerminationSignal(child, "SIGKILL", evidence);
+    gone = await waitFor(() => !groupExists(pid), TERMINATION_GRACE_MS);
+  }
+  return {
+    reason: "background_group",
+    groupTerminationAttempted: evidence.group,
+    directTerminationAttempted: evidence.direct,
+    closeObserved: true,
+    groupAbsentObserved: gone,
+    containmentUncertain: evidence.failed || !gone,
+  };
+}
 function capture(limit: number): StreamCapture {
   return { chunks: [], tail: Buffer.alloc(0), bytes: 0, limit, overflow: false };
 }
@@ -196,6 +236,7 @@ function processResult(
   stderr: StreamCapture,
   error?: Error,
   termination?: TerminationEvidence,
+  backgroundCleanup?: TerminationEvidence,
 ): BoundedProcessResult {
   return {
     pid: child.pid,
@@ -209,6 +250,7 @@ function processResult(
     stderrTail: boundedDiagnosticTail(stderr.tail.toString("utf8")),
     ...(error ? { error } : {}),
     ...(termination ? { termination } : {}),
+    ...(backgroundCleanup ? { backgroundCleanup } : {}),
   };
 }
 
@@ -226,6 +268,7 @@ export async function runBoundedProcess(
     shell: false,
     stdio: ["pipe", "pipe", "pipe"],
   });
+  if (child.pid !== undefined && process.platform !== "win32") trackedGroups.add(child.pid);
   let closed = false;
   let spawnError: Error | undefined;
   let requestedReason: TerminationEvidence["reason"] | undefined;
@@ -265,12 +308,15 @@ export async function runBoundedProcess(
   const termination = requestedReason
     ? await terminate(child, requestedReason, () => closed)
     : undefined;
+  const backgroundCleanup =
+    !requestedReason && closed ? await reapBackgroundGroup(child) : undefined;
   if (!closed) await Promise.race([closedPromise, delay(TERMINATION_GRACE_MS)]);
+  if (child.pid !== undefined) trackedGroups.delete(child.pid);
   if (!closed) {
     child.stdin?.destroy();
     child.stdout?.destroy();
     child.stderr?.destroy();
     child.unref();
   }
-  return processResult(child, stdout, stderr, spawnError, termination);
+  return processResult(child, stdout, stderr, spawnError, termination, backgroundCleanup);
 }

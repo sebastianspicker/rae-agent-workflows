@@ -1,7 +1,7 @@
 ---
 status: stable
 owner: science
-last_reviewed: 2026-04-12
+last_reviewed: 2026-10-07
 source_of_truth: ../../reference/contracts/quality-gates.md
 evidence_links: ../../reference/claims/evidence-index.md
 ---
@@ -31,11 +31,11 @@ Typical contract dimensions:
 A gate says whether the current artifact is sufficient for progression under a
 specific decision rule.
 
-Typical gate outputs:
+Gate outputs depend on the execution path:
 
-- `pass`
-- `warn`
-- `fail`
+- legacy ten-phase pipeline: `pass`, `warn`, `fail`; `warn` always advances and
+  only `fail` blocks
+- graph workflow (default): `passed` or `failed`
 
 ## 3. Why the distinction is mathematically useful
 
@@ -47,7 +47,11 @@ $$
 $$
 
 $$
-\operatorname{gate}(A) \in \{\text{pass}, \text{warn}, \text{fail}\}
+\operatorname{gate}(A) \in
+\begin{cases}
+\{\text{pass}, \text{warn}, \text{fail}\} & \text{legacy} \\
+\{\text{passed}, \text{failed}\} & \text{graph}
+\end{cases}
 $$
 
 So an artifact can be:

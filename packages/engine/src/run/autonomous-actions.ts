@@ -6,6 +6,7 @@ import type { AnySchema } from "ajv";
 import { PHASE_ORDER } from "./constants.js";
 import {
   acquireWorkflowLock,
+  DEFAULT_CHECKPOINT_POLICY,
   initializeOrResume,
   mergeResumeOptions,
   type AutonomousCommandOptions,
@@ -23,6 +24,7 @@ import { appendTraceEvent, projectOperatorEvents } from "./trace.js";
 import { getRunDir, readJsonStrict, writeJson } from "./state.js";
 import {
   checkpointPolicy,
+  clearStopRequest,
   createCheckpoint,
   listCheckpoints,
   readOperatorControl,
@@ -30,7 +32,7 @@ import {
   resolveCheckpointById,
   setRunStatus,
 } from "./operator-control.js";
-import { ensureRuntimeStateReadable } from "./runtime-state-guard.js";
+import { ensureRuntimeStateReadable, inspectRuntimeStateGuard } from "./runtime-state-guard.js";
 import { projectGraph, recordRunMemory } from "../graph/index.js";
 import { runGraphWorkflow } from "../workflow/workflow-runtime.js";
 import { recordWorkflowV22Signal } from "../workflow/workflow-v22-reducer.js";
@@ -63,6 +65,8 @@ interface ControlCommandContext {
   workspaceRoot: string;
   runId: string;
   state: PipelineState;
+  /** Set when a live guard owner holds the runtime state; only stop may proceed in that window. */
+  guardedPhase?: string;
 }
 interface WorkflowError extends Error {
   pipelineStateUnsafe?: boolean;
@@ -307,10 +311,26 @@ function recordFreshCommandResume(
   });
 }
 
-function controlCommandContext(options: AutonomousActionOptions): ControlCommandContext {
+function controlCommandContext(
+  options: AutonomousActionOptions,
+  command?: string,
+): ControlCommandContext {
   if (!options["run-id"]) throw new Error("control command requires --run-id <id>");
   const workspaceRoot = requireDirectory(options["project-root"] ?? process.cwd(), "project root");
   assertGitRepository(workspaceRoot);
+  if (command === "stop") {
+    // Stop only touches the control file and trace, which the guard tolerates, so it must not
+    // wait for a live guarded phase (which may run for the whole timeout) to finish.
+    const guard = inspectRuntimeStateGuard(workspaceRoot, { expectedRunId: options["run-id"] });
+    if (guard.found && guard.ownerActive) {
+      return {
+        workspaceRoot,
+        runId: options["run-id"],
+        state: {} as PipelineState,
+        guardedPhase: guard.phase ?? "build",
+      };
+    }
+  }
   ensureRuntimeStateReadable(workspaceRoot, { expectedRunId: options["run-id"] });
   const state = readJsonStrict(resolve(workspaceRoot, ".pipeline", "pipeline-state.json"));
   if (state.run_id !== options["run-id"]) {
@@ -348,7 +368,7 @@ function emitReadableControlResult(
 }
 
 export function runControlCommand(command: string, options: AutonomousActionOptions): void {
-  const context = controlCommandContext(options);
+  const context = controlCommandContext(options, command);
   if (command === "status") {
     const runDir = getRunDir(context.runId, context.workspaceRoot);
     emitReadableControlResult(
@@ -372,15 +392,17 @@ export function runControlCommand(command: string, options: AutonomousActionOpti
     if (!["stop-requested", "stopped"].includes(previous.status)) {
       appendTraceEvent(
         context.runId,
-        { event: "run_stop_requested", phase: nextRunPhase(context.state), status: "ok" },
+        {
+          event: "run_stop_requested",
+          phase: context.guardedPhase ?? nextRunPhase(context.state),
+          status: "ok",
+        },
         context.workspaceRoot,
       );
     }
-    emitReadableControlResult(
-      context,
-      { success: true, run_id: context.runId, operator_control: control },
-      options,
-    );
+    const stopResult = { success: true, run_id: context.runId, operator_control: control };
+    if (context.guardedPhase) emitControlResult(stopResult, options);
+    else emitReadableControlResult(context, stopResult, options);
     return;
   }
   if (command === "signal") {
@@ -394,7 +416,9 @@ export function runControlCommand(command: string, options: AutonomousActionOpti
       request.workflow && typeof request.workflow === "object" && !Array.isArray(request.workflow)
         ? (request.workflow as Record<string, unknown>)
         : null;
-    const workflow = requestWorkflow?.snapshot ? validateWorkflow(requestWorkflow.snapshot) : null;
+    const workflow = requestWorkflow?.snapshot
+      ? validateWorkflow(requestWorkflow.snapshot, { mode: "snapshot" })
+      : null;
     if (workflow?.schema_version !== "2.2.0") {
       throw new Error("signal is available only for a workflow schema 2.2.0 run");
     }
@@ -608,6 +632,10 @@ function prepareLegacyRun(
   ) {
     return false;
   }
+  // The workflow lock is held here, so any process that was asked to stop is gone.
+  if (command === "resume") {
+    clearStopRequest(context.runId, context.workspaceRoot, { lockOwnerConfirmedDead: true });
+  }
   setRunStatus(context.runId, "running", context.workspaceRoot, { stop_requested: false });
   if (command === "resume") {
     appendTraceEvent(
@@ -617,7 +645,12 @@ function prepareLegacyRun(
     );
     refreshResumeRefBaseline(context.workspaceRoot, context.initialGitState);
   } else {
-    assertGitStateInvariant(context.workspaceRoot, context.initialGitState, "run preflight");
+    assertGitStateInvariant(
+      context.workspaceRoot,
+      context.initialGitState,
+      "run preflight",
+      "full",
+    );
   }
   return true;
 }
@@ -718,6 +751,27 @@ function finalizeLegacyRun(
   printFinal(context, writeRunReport(context, { provider }), runOptions);
 }
 
+function reportUnreadablePipelineState(
+  context: AutonomousLifecycleContext,
+  runOptions: AutonomousActionOptions,
+  error: Error,
+): void {
+  const payload = {
+    success: false,
+    status: "pipeline-state-unreadable",
+    run_id: context.runId,
+    workspace_root: context.workspaceRoot,
+    report: null,
+    cleanup_command: null,
+    changed_files: [],
+    documentation: null,
+    error: error.message,
+  };
+  if (runOptions.json) process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+  else process.stderr.write(`RAE pipeline state is unreadable: ${error.message}\n`);
+  process.exitCode = 1;
+}
+
 function handleLegacyFailure(
   context: AutonomousLifecycleContext,
   provider: AgentProvider | "auto",
@@ -726,20 +780,7 @@ function handleLegacyFailure(
 ): void {
   const error = workflowError(caught);
   if (error.pipelineStateUnsafe === true) {
-    const payload = {
-      success: false,
-      status: "pipeline-state-unreadable",
-      run_id: context.runId,
-      workspace_root: context.workspaceRoot,
-      report: null,
-      cleanup_command: null,
-      changed_files: [],
-      documentation: null,
-      error: error.message,
-    };
-    if (runOptions.json) process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
-    else process.stderr.write(`RAE pipeline state is unreadable: ${error.message}\n`);
-    process.exitCode = 1;
+    reportUnreadablePipelineState(context, runOptions, error);
     return;
   }
   const failedControl = readOperatorControl(context.runId, context.workspaceRoot);
@@ -813,8 +854,13 @@ async function runLegacyWorkflow(
 
 export async function runWorkflow(
   command: string,
-  options: AutonomousActionOptions,
+  suppliedOptions: AutonomousActionOptions,
 ): Promise<void> {
+  // A new run that names no checkpoint policy uses the CLI default; resume keeps the stored one.
+  const options =
+    command === "run" && suppliedOptions["checkpoint-policy"] === undefined
+      ? { ...suppliedOptions, "checkpoint-policy": DEFAULT_CHECKPOINT_POLICY }
+      : suppliedOptions;
   if (command === "run") validateOptions(options);
   if (command === "resume") validateFreshCommandResume(options);
   const context = initializeOrResume(command, options);
@@ -838,9 +884,18 @@ function prepareGraphRun(command: string, context: AutonomousLifecycleContext): 
     error.preserveControl = true;
     throw error;
   }
+  // The workflow lock is held here, so any process that was asked to stop is gone.
+  if (command === "resume") {
+    clearStopRequest(context.runId, context.workspaceRoot, { lockOwnerConfirmedDead: true });
+  }
   setRunStatus(context.runId, "running", context.workspaceRoot, { stop_requested: false });
   if (command !== "resume") {
-    assertGitStateInvariant(context.workspaceRoot, context.initialGitState, "run preflight");
+    assertGitStateInvariant(
+      context.workspaceRoot,
+      context.initialGitState,
+      "run preflight",
+      "full",
+    );
     return;
   }
   refreshResumeRefBaseline(context.workspaceRoot, context.initialGitState);
@@ -851,7 +906,8 @@ function prepareGraphRun(command: string, context: AutonomousLifecycleContext): 
   );
 }
 
-function completeGraphRun(
+/** Exported for tests. */
+export function completeGraphRun(
   context: AutonomousLifecycleContext,
   result: GraphWorkflowResult,
   provider: AgentProvider | "auto",
@@ -885,10 +941,27 @@ function completeGraphRun(
   }
   if (result.status === "through") {
     setRunStatus(context.runId, "stopped", context.workspaceRoot, { stop_requested: false });
-    printFinal(context, writeRunReport(context, { provider, status: "stopped" }), runOptions);
+    printFinal(context, writeRunReport(context, { provider, status: "through" }), runOptions);
     return;
   }
-  setRunStatus(context.runId, "completed", context.workspaceRoot, { stop_requested: false });
+  const terminalNode = context.workflow?.terminal_node ?? "workflow";
+  if (readOperatorControl(context.runId, context.workspaceRoot).stop_requested) {
+    publishStoppedRun(context, provider, terminalNode, runOptions);
+    return;
+  }
+  const completedControl = setRunStatus(context.runId, "completed", context.workspaceRoot, {
+    stop_requested: false,
+  });
+  if (completedControl.stop_requested) {
+    publishStoppedRun(context, provider, terminalNode, runOptions);
+    return;
+  }
+  // Graph memory validation requires the run_completed event, so it precedes persistence.
+  appendTraceEvent(
+    context.runId,
+    { event: "run_completed", phase: terminalNode, status: "completed" },
+    context.workspaceRoot,
+  );
   persistGraphMemory(context, runOptions);
   printFinal(context, writeRunReport(context, { provider }), runOptions);
 }
@@ -903,6 +976,10 @@ function handleGraphFailure(
   if (error.preserveControl === true) throw error;
   if (error.workflowWaiting === true) {
     waitingReport(context, provider, runOptions);
+    return;
+  }
+  if (error.pipelineStateUnsafe === true) {
+    reportUnreadablePipelineState(context, runOptions, error);
     return;
   }
   setRunStatus(context.runId, "blocked", context.workspaceRoot, { stop_requested: false });

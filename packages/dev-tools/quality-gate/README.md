@@ -98,5 +98,5 @@ docker run --rm rae-quality-gate --healthcheck
 ```
 
 The image compiles the shared package and this tool with the root workspace
-lockfile, includes the versioned schemas, and runs as the existing non-root
-`skill` user.
+lockfile, includes the versioned schemas, and runs as the non-root
+`node` user from `/opt/rae`; the repository is mounted read-only at `/workspace`.

@@ -3,7 +3,13 @@ import { closeSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { openRoot } from "@rae/fs-bridge";
 import { fileState, openTarget, assertNodeTarget, type FileState } from "./io.js";
-import { transact, type Hook, type Mutation } from "./receipts.js";
+import {
+  assertNoLeftovers,
+  recoverInterrupted,
+  transact,
+  type Hook,
+  type Mutation,
+} from "./receipts.js";
 
 // Persisted identity stored in every manifest-v2 receipt (`.rae-profile-install.json`).
 // This string is not a live file path: it must stay byte-for-byte stable so existing
@@ -27,6 +33,16 @@ const files = [
     ".rae-profile-backups/docs/agent-operator-policy.md.bak",
   ],
 ] as const;
+/** Every path a profile transaction may touch; journals may name nothing else. */
+const managedPaths: readonly string[] = [
+  manifestPath,
+  ...files.flatMap(([path, _source, backup]) => [path, backup]),
+];
+/** Recovers an interrupted run, then refuses to start over retained evidence. */
+function prepareTarget(root: number): void {
+  recoverInterrupted(root, managedPaths);
+  assertNoLeftovers(root, managedPaths);
+}
 interface Entry {
   path: string;
   sha256: string;
@@ -120,6 +136,7 @@ export async function install(
   const root = openTarget(target);
   try {
     assertNodeTarget(root);
+    prepareTarget(root);
     const existing = checkedManifest(root);
     const before = new Map<string, FileState>(
       [manifestPath, ...files.flatMap(([path, _source, backup]) => [path, backup])].map((path) => [
@@ -183,6 +200,7 @@ export async function install(
 export async function uninstall(target: string, hook?: Hook): Promise<boolean> {
   const root = openTarget(target);
   try {
+    prepareTarget(root);
     const entries = checkedManifest(root);
     if (!entries) return false;
     const mutations: Mutation[] = [];

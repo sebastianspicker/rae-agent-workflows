@@ -131,6 +131,10 @@ export const navigation: DefaultTheme.SidebarItem[] = [
             link: "/reference/contracts/graph-memory",
           },
           {
+            text: "Workflow 2.0 and 2.1",
+            link: "/reference/contracts/workflow-v2",
+          },
+          {
             text: "Workflow 2.2",
             link: "/reference/contracts/workflow-v2.2",
           },
@@ -383,18 +387,6 @@ export const navigation: DefaultTheme.SidebarItem[] = [
       {
         text: "Changelog",
         link: "https://github.com/sebastianspicker/rae-agent-workflows/blob/main/CHANGELOG.md",
-      },
-      {
-        text: "Proposed Release Notes",
-        link: "https://github.com/sebastianspicker/rae-agent-workflows/blob/main/RELEASE_NOTES.md",
-      },
-      {
-        text: "Release Status",
-        link: "https://github.com/sebastianspicker/rae-agent-workflows/blob/main/RELEASE_STATUS.md",
-      },
-      {
-        text: "Releasing",
-        link: "https://github.com/sebastianspicker/rae-agent-workflows/blob/main/RELEASING.md",
       },
       {
         text: "Contributing",

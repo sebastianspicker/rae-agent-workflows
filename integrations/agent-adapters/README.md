@@ -21,6 +21,10 @@ node integrations/agent-adapters/dist/generate-adapters.js
 node integrations/agent-adapters/dist/generate-adapters.js --check
 ```
 
+In `--check` mode, optional personal mirrors (for example `CLAUDE.md`) are
+compared only when git tracks them; untracked or ignored mirrors are skipped
+with a notice. Write mode is unchanged.
+
 Limit a run with repeatable `--runner <id>`. Use `--manifest <path>` only
 when validating an explicit alternate manifest.
 

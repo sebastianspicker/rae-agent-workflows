@@ -3,12 +3,14 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadConfig } from "../src/config.js";
+import { loadConfig, platformAllowedHosts } from "../src/config.js";
 import { createAuthenticator } from "../src/auth.js";
 import { createArtifactService } from "../src/artifacts.js";
 import { createPlatformServer } from "../src/http.js";
 import { createLogger, Metrics } from "../src/observability.js";
 import { PostgresStore } from "../src/store.js";
+import { HeadBucketCommand, S3Client } from "@aws-sdk/client-s3";
+import type { PlatformConfig } from "../src/config.js";
 
 const command = process.argv[2] ?? "";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -17,7 +19,10 @@ async function main() {
   if (!new Set(["migrate", "doctor", "serve"]).has(command))
     throw new Error("usage: rae-platform <migrate|doctor|serve>");
   const config = await loadConfig();
-  const store = PostgresStore.connect(config.database.url);
+  const store = PostgresStore.connect(config.database.url, config.platform, {
+    logger: cliLogger,
+    statementTimeoutMs: config.database.statementTimeoutMs,
+  });
   const cleanup: (() => Promise<unknown>)[] = [() => store.close()];
   const stop = async () => {
     for (const action of cleanup.splice(0).reverse()) {
@@ -46,28 +51,32 @@ async function main() {
       return;
     }
     if (command === "doctor") {
-      if (!(await store.isReady()))
+      const schema = await store.schemaStatus();
+      if (schema === "not-migrated")
+        throw new Error(
+          "database is not migrated (schema_migrations is missing); run migrate first",
+        );
+      if (schema === "stale")
         throw new Error("database schema is stale; run explicit migrate first");
+      const storage = config.storage ? await probeStorage(config.storage) : null;
       console.log(
         JSON.stringify({
           experimental: true,
           database: "ready",
           oidc: Boolean(config.oidc),
-          storage: Boolean(config.storage),
+          storage: storage ? storage.ok : false,
+          ...(storage && !storage.ok ? { storageError: storage.error } : {}),
         }),
       );
+      if (storage && !storage.ok) process.exitCode = 1;
       return;
     }
     if (!(await store.isReady()))
       throw new Error("database schema is stale; serve never applies migrations automatically");
     const publicBaseUrl =
       config.server.publicBaseUrl || `http://${config.server.host}:${config.server.port}`;
-    const allowedHosts = [config.server.host];
-    try {
-      allowedHosts.push(new URL(publicBaseUrl).hostname);
-    } catch {
-      /* config validation rejects malformed URLs */
-    }
+    const allowedHosts = platformAllowedHosts(config);
+    let activeEventStreams = () => 0;
     const metrics = new Metrics();
     const stopReconciler = await store.startReconciler(({ expired }) => {
       metrics.reconciliations += 1;
@@ -77,7 +86,10 @@ async function main() {
     const management = createManagementServer({
       source: {
         isReady: (signal) => store.isReady(signal),
-        lifecycleSnapshot: (signal) => store.metricsSnapshot(signal),
+        lifecycleSnapshot: async (signal) => ({
+          ...(await store.metricsSnapshot(signal)),
+          activeEventStreams: activeEventStreams(),
+        }),
       },
       metrics,
       ...config.management,
@@ -95,7 +107,9 @@ async function main() {
       oidc: config.oidc,
       resourceBaseUrl: publicBaseUrl,
       allowedHosts,
+      allowInsecureAuth: config.platform.allowInsecureAuth,
     });
+    activeEventStreams = () => server.activeEventStreamCount();
     cleanup.push(() => server.closeGracefully({ graceMs: 5000 }));
     await listen(management.server, config.management.port, management.host);
     await listen(server, config.server.port, config.server.host);
@@ -134,4 +148,23 @@ async function listen(server: Server, port: number, host: string): Promise<void>
       resolve();
     });
   });
+}
+
+/** Probes the configured bucket with a short-timeout HeadBucket call. */
+async function probeStorage(storage: NonNullable<PlatformConfig["storage"]>) {
+  const client = new S3Client({
+    region: storage.region,
+    ...(storage.endpoint ? { endpoint: storage.endpoint } : {}),
+    forcePathStyle: storage.forcePathStyle,
+  });
+  try {
+    await client.send(new HeadBucketCommand({ Bucket: storage.bucket }), {
+      abortSignal: AbortSignal.timeout(5000),
+    });
+    return { ok: true as const };
+  } catch (error) {
+    return { ok: false as const, error: error instanceof Error ? error.message : "unknown error" };
+  } finally {
+    client.destroy();
+  }
 }

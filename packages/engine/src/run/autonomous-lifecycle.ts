@@ -7,10 +7,9 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  readFileSync,
   readSync,
   realpathSync,
-  unlinkSync,
-  writeFileSync,
 } from "node:fs";
 import type { BigIntStats } from "node:fs";
 import { basename, extname, isAbsolute, relative, resolve } from "node:path";
@@ -19,7 +18,13 @@ import {
   policyDigest,
   validateAutonomousPolicy,
 } from "./autonomous-policy.js";
-import { getRunDir, readJsonStrict, writeJson } from "./state.js";
+import {
+  assertWorkspaceRootMatches,
+  getRunDir,
+  readJsonStrict,
+  resolveWorkspaceRootForRun,
+  writeJson,
+} from "./state.js";
 import { checkpointPolicy } from "./operator-control.js";
 import {
   assertGitRepository,
@@ -30,6 +35,7 @@ import {
   runProcess,
 } from "./autonomous-git.js";
 import { reconcileRuntimeStateGuard } from "./runtime-state-guard.js";
+import { acquireExclusiveLock } from "../primitives/stale-lock.js";
 import { loadWorkflow, validateWorkflow, workflowDigest } from "../workflow/workflow-contract.js";
 import {
   contextPolicyDigest,
@@ -57,6 +63,8 @@ import { isContainedRelative } from "../primitives/paths.js";
 const PIPELINE_INIT = pipelineInitEntrypoint();
 const MAX_TASK_BYTES = 128 * 1024;
 const DEFAULT_TIMEOUT_SECONDS = 1800;
+/** CLI runs pause for human approval before mutation unless a policy is given explicitly. */
+export const DEFAULT_CHECKPOINT_POLICY = "before-mutation";
 
 export interface AutonomousCommandOptions extends Record<string, unknown> {
   "project-root"?: string;
@@ -471,7 +479,7 @@ export function savedAgentOptions(request: Partial<RunRequest>): AutonomousComma
     ...(saved.variant ? { variant: saved.variant } : {}),
     ...(request.execution_profile ? { "execution-profile-snapshot": true } : {}),
     ...(saved.timeout_seconds ? { "timeout-seconds": String(saved.timeout_seconds) } : {}),
-    "checkpoint-policy": request.checkpoint_policy ?? "none",
+    "checkpoint-policy": request.checkpoint_policy ?? DEFAULT_CHECKPOINT_POLICY,
     "graph-memory": request.graph_memory ?? "off",
     "context-mode": request.context_policy?.mode ?? "legacy",
     ...(request.workflow?.mode === "legacy-linear" ? { "legacy-linear": true } : {}),
@@ -526,48 +534,34 @@ function resetProviderOptions(saved: AutonomousCommandOptions): AutonomousComman
 
 /**
  * Acquires an exclusive workflow lock and rejects concurrent runs that target the same workspace.
+ * A lock whose recorded owner is dead is retired; a live owner's lock is never replaced.
  */
 export function acquireWorkflowLock(workspaceRoot: string, runId: string): () => void {
   const lockPath = resolve(getRunDir(runId, workspaceRoot), "autonomous.lock");
-  let descriptor: number | undefined;
-  try {
-    descriptor = openSync(lockPath, "wx", 0o600);
-  } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "EEXIST") {
-      throw new Error(
-        `autonomous run ${runId} is already active; inspect ${lockPath} and remove it only after confirming the owning process is gone`,
-      );
-    }
-    throw error;
-  }
-  try {
-    writeFileSync(
-      descriptor,
-      `${JSON.stringify({ pid: process.pid, started_at: new Date().toISOString() })}\n`,
-      "utf8",
+  const lock = acquireExclusiveLock(lockPath);
+  if (!lock) {
+    throw new Error(
+      `autonomous run ${runId} is already active; inspect ${lockPath} and remove it only after confirming the owning process is gone`,
     );
-  } catch (error) {
-    closeSync(descriptor);
-    unlinkSync(lockPath);
-    throw error;
   }
-  return () => {
-    closeSync(descriptor);
-    try {
-      unlinkSync(lockPath);
-    } catch (error) {
-      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
-    }
-  };
+  return lock.release;
 }
 
 export function initializeOrResume(
   command: string,
   options: AutonomousCommandOptions,
 ): AutonomousLifecycleContext {
-  const projectRoot = requireDirectory(options["project-root"] ?? process.cwd(), "project root");
+  let projectRoot = requireDirectory(options["project-root"] ?? process.cwd(), "project root");
   assertGitRepository(projectRoot);
   if (command === "resume") {
+    // A worktree run is resumable from the primary checkout: locate its workspace by run id.
+    if (options["run-id"]) {
+      const located = resolveWorkspaceRootForRun(options["run-id"], projectRoot);
+      if (located !== projectRoot) {
+        projectRoot = requireDirectory(located, "run workspace");
+        assertGitRepository(projectRoot);
+      }
+    }
     try {
       reconcileRuntimeStateGuard(projectRoot, { recovery: true });
     } catch (error) {
@@ -591,6 +585,9 @@ function resumeContext(
   const { state, request } = readRunRequest(projectRoot);
   if (state.run_id !== options["run-id"]) {
     throw new Error(`run-id mismatch: workspace has ${state.run_id}`);
+  }
+  if (typeof state.workspace?.root === "string") {
+    assertWorkspaceRootMatches(state.workspace.root, projectRoot);
   }
   const initialGitStatePath = resolve(
     getRunDir(state.run_id, projectRoot),
@@ -796,7 +793,8 @@ function storedRunWorkflow(
   options: AutonomousCommandOptions,
 ): ResolvedWorkflow | null {
   if (!request.workflow || request.workflow.mode === "legacy-linear") return null;
-  const workflow = validateWorkflow(request.workflow.snapshot);
+  // Stored snapshots validate structurally so newer authoring rules cannot strand an existing run.
+  const workflow = validateWorkflow(request.workflow.snapshot, { mode: "snapshot" });
   const digest = workflowDigest(workflow);
   if (digest !== request.workflow.digest)
     throw new Error("stored workflow digest does not match its snapshot");
@@ -852,41 +850,87 @@ function newRunContext(
   const directExecutionRuntime =
     options.provider === "opencode" ? runtimeIdentity("opencode") : null;
   const initialized = initializeRun(projectRoot, options["in-place"] === true);
-  const runDir = resolve(initialized.workspaceRoot, ".pipeline", "runs", initialized.runId);
-  const resolvedRun = {
-    task,
-    projectRoot,
-    initialized,
-    options,
-    resolvedPolicy,
-    resolvedWorkflow,
-    resolvedExecutionProfile,
-    resolvedExecutionRuntime,
-    directExecutionRuntime,
-    resolvedContextPolicy,
+  try {
+    const runDir = resolve(initialized.workspaceRoot, ".pipeline", "runs", initialized.runId);
+    const resolvedRun = {
+      task,
+      projectRoot,
+      initialized,
+      options,
+      resolvedPolicy,
+      resolvedWorkflow,
+      resolvedExecutionProfile,
+      resolvedExecutionRuntime,
+      directExecutionRuntime,
+      resolvedContextPolicy,
+    };
+    writeJson(resolve(runDir, "request.json"), newRunRequest(resolvedRun));
+    if (resolvedWorkflow) writeWorkflowSnapshot(runDir, resolvedWorkflow);
+    const gitStatePath = resolve(runDir, "initial-git-state.json");
+    writeJson(gitStatePath, gitStateSnapshot(initialized.workspaceRoot));
+    const workflowConfiguration = workflowConfigurationFields(resolvedWorkflow);
+    return {
+      ...initialized,
+      projectRoot,
+      task,
+      initialGitState: readJsonStrict(gitStatePath) as unknown as GitStateSnapshot,
+      resumed: false,
+      policy: resolvedPolicy.policy,
+      policyDigest: resolvedPolicy.digest,
+      ...workflowConfiguration,
+      executionProfile: resolvedExecutionProfile?.profile ?? null,
+      executionProfileDigest: resolvedExecutionProfile?.digest ?? null,
+      executionRuntime: resolvedExecutionRuntime,
+      contextMode: resolvedContextPolicy.mode,
+      contextPolicy: resolvedContextPolicy.policy,
+      contextPolicyDigest: resolvedContextPolicy.digest,
+      runDir,
+    };
+  } catch (error) {
+    rollbackNewWorktree(projectRoot, initialized, options["in-place"] === true);
+    throw error;
+  }
+}
+
+/** True when the worktree's pipeline state carries the pipeline ownership marker. */
+function worktreeIsPipelineOwned(workspaceRoot: string): boolean {
+  try {
+    const state: unknown = JSON.parse(
+      readFileSync(resolve(workspaceRoot, ".pipeline", "pipeline-state.json"), "utf8"),
+    );
+    const workspace = (state as { workspace?: { ownership_marker?: unknown } } | null)?.workspace;
+    return workspace?.ownership_marker === "rae-pipeline-worktree-v1";
+  } catch {
+    return false;
+  }
+}
+
+/** Removes a worktree and branch created for a run whose setup failed, so retries start clean. */
+export function rollbackNewWorktree(
+  projectRoot: string,
+  initialized: { workspaceRoot: string; initializationOutput: string },
+  inPlace: boolean,
+): void {
+  if (inPlace) return;
+  const run = (args: string[]): void => {
+    runProcess("git", ["-C", projectRoot, ...args], {
+      label: `git ${args[0]}`,
+      allowFailure: true,
+    });
   };
-  writeJson(resolve(runDir, "request.json"), newRunRequest(resolvedRun));
-  if (resolvedWorkflow) writeWorkflowSnapshot(runDir, resolvedWorkflow);
-  const gitStatePath = resolve(runDir, "initial-git-state.json");
-  writeJson(gitStatePath, gitStateSnapshot(initialized.workspaceRoot));
-  const workflowConfiguration = workflowConfigurationFields(resolvedWorkflow);
-  return {
-    ...initialized,
-    projectRoot,
-    task,
-    initialGitState: readJsonStrict(gitStatePath) as unknown as GitStateSnapshot,
-    resumed: false,
-    policy: resolvedPolicy.policy,
-    policyDigest: resolvedPolicy.digest,
-    ...workflowConfiguration,
-    executionProfile: resolvedExecutionProfile?.profile ?? null,
-    executionProfileDigest: resolvedExecutionProfile?.digest ?? null,
-    executionRuntime: resolvedExecutionRuntime,
-    contextMode: resolvedContextPolicy.mode,
-    contextPolicy: resolvedContextPolicy.policy,
-    contextPolicyDigest: resolvedContextPolicy.digest,
-    runDir,
-  };
+  if (worktreeIsPipelineOwned(initialized.workspaceRoot)) {
+    run(["worktree", "remove", "--force", initialized.workspaceRoot]);
+  } else {
+    process.stderr.write(
+      `warning: not removing ${initialized.workspaceRoot}: .pipeline/pipeline-state.json does not carry the rae-pipeline-worktree-v1 marker\n`,
+    );
+  }
+  run(["worktree", "prune"]);
+  try {
+    run(["branch", "-D", "--", parseInitField(initialized.initializationOutput, "branch")]);
+  } catch {
+    // The init output always reports the branch; nothing else to remove if it does not.
+  }
 }
 
 function resolveNewContextPolicy(
@@ -962,7 +1006,7 @@ function newRunRequest(context: NewRunData): RunRequest {
     workspace_root: initialized.workspaceRoot,
     workspace_mode: options["in-place"] ? "main-repo" : "git-worktree",
     mutation_policy: "workspace-only-no-commit-no-push",
-    checkpoint_policy: checkpointPolicy(options["checkpoint-policy"]),
+    checkpoint_policy: checkpointPolicy(options["checkpoint-policy"] ?? DEFAULT_CHECKPOINT_POLICY),
     graph_memory: options["graph-memory"] ?? "off",
     ...requestedContextPolicy(resolvedContextPolicy),
     policy: requestedPolicy(resolvedPolicy),

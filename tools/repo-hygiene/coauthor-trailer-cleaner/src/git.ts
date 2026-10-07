@@ -24,23 +24,36 @@ export interface RewriteOptions {
   validateOnly: boolean;
   noPush: boolean;
   backupRemote: string;
+  deleteRecoveryBranch?: boolean;
+  allowBackupPush?: boolean;
 }
 export interface RewriteResult {
   original: string;
   rewritten: string;
   commits: number;
+  changedCommits: number;
   invalidatedSignatures: number;
   recoveryRef?: string;
+  /** Remote still holding the unrewritten backup ref (it retains the targeted trailers). */
+  backupRemoteRetained?: string;
+  /** Local refs other than the recovery ref that still contain a rewritten original commit. */
+  residualRefs?: string[];
+  /** Non-fatal problems after a completed rewrite. */
+  warnings?: string[];
 }
+/** Recognised GitHub remote shapes; owner and repository capture groups come first. */
+const GITHUB_URLS = [
+  /^https:\/\/(?:[^/@\s]+@)?github\.com\/([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/i,
+  /^git@github\.com:([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/i,
+  /^ssh:\/\/git@github\.com(?::\d+)?\/([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/i,
+  /^git:\/\/github\.com\/([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/i,
+];
 export function githubIdentity(url: string): string {
-  const match = url
-    .replace(/\/$/, "")
-    .replace(/\.git$/, "")
-    .match(
-      /^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([^/\s]+)\/([^/\s]+)$/,
-    );
-  if (!match) throw new Error(`Unsupported GitHub URL: ${url}`);
-  return `${match[1]}/${match[2]}`;
+  for (const pattern of GITHUB_URLS) {
+    const match = url.trim().match(pattern);
+    if (match) return `${match[1]}/${match[2]}`.toLowerCase();
+  }
+  throw new Error(`Unsupported GitHub URL: ${url}`);
 }
 export function git(
   path: string,
@@ -157,6 +170,60 @@ function tree(path: string, commit: string): string {
   return text(path, "rev-parse", `${commit}^{tree}`);
 }
 
+/**
+ * The backup push sends the original history (with the targeted trailers) off-machine. It runs
+ * only when pushing is enabled or explicitly allowed, and never republishes the original history
+ * to the repository being cleaned unless --allow-backup-push is passed.
+ */
+function authorizeBackupRemote(path: string, url: string, options: RewriteOptions): void {
+  const remote = options.backupRemote;
+  if (remote.startsWith("-") || !/^[a-zA-Z0-9_.-]+$/.test(remote))
+    throw new Error("Invalid backup remote name");
+  if (options.noPush && !options.allowBackupPush)
+    throw new Error(
+      `Backup remote ${remote} would push the original history while pushing is disabled; pass --push or --allow-backup-push`,
+    );
+  if (options.allowBackupPush) return;
+  if (!text(path, "remote").split("\n").includes(remote))
+    throw new Error(`Backup remote ${remote} is not a configured remote`);
+  const pushUrls = text(path, "remote", "get-url", "--push", "--all", remote).split("\n");
+  // A push URL that is not a recognised GitHub shape (a host alias, say) cannot be proven
+  // different from the repository being cleaned, so it is refused like a match.
+  const sameRepository = pushUrls.some((candidate) => {
+    try {
+      return githubIdentity(candidate) === githubIdentity(url);
+    } catch {
+      return true;
+    }
+  });
+  if (sameRepository)
+    throw new Error(
+      `Backup remote ${remote} pushes to the repository being cleaned or to a URL that cannot be proven different, which would republish the original history; use a different remote or pass --allow-backup-push`,
+    );
+}
+
+/** Refs that still reach any rewritten original commit, i.e. residual exposure of the trailers. */
+function residualRefs(path: string, originals: readonly string[], exclude: string[]): string[] {
+  const refs = new Set<string>();
+  for (let index = 0; index < originals.length; index += 200) {
+    const contains = originals
+      .slice(index, index + 200)
+      .flatMap((commit) => ["--contains", commit]);
+    for (const ref of text(path, "for-each-ref", "--format=%(refname)", ...contains).split("\n"))
+      if (ref && !exclude.includes(ref)) refs.add(ref);
+  }
+  return [...refs].sort();
+}
+
+/** Parent OIDs from a raw commit header. */
+function parents(raw: Buffer): string[] {
+  const header = raw.subarray(0, raw.indexOf(Buffer.from("\n\n"))).toString("latin1");
+  return header
+    .split("\n")
+    .filter((line) => line.startsWith("parent "))
+    .map((line) => line.slice(7));
+}
+
 export function rewriteRepository(repository: Repository, options: RewriteOptions): RewriteResult {
   githubIdentity(repository.url);
   const path = repository.path;
@@ -204,17 +271,45 @@ export function rewriteRepository(repository: Repository, options: RewriteOption
     if (pushUrls.length !== 1 || githubIdentity(pushUrls[0]) !== githubIdentity(repository.url))
       throw new Error("Push URL differs from authorized repository");
   }
+  // A dry run never pushes, so it does not need the backup remote authorized.
+  if (options.backupRemote && !(options.dryRun && !options.validateOnly))
+    authorizeBackupRemote(path, repository.url, options);
   const result: RewriteResult = {
     original,
     rewritten: original,
     commits: 0,
+    changedCommits: 0,
     invalidatedSignatures: 0,
   };
-  if (options.validateOnly || options.dryRun) return result;
+  if (options.validateOnly) return result;
+  if (options.dryRun) {
+    // Compute the transformation in memory: hash-object without -w writes nothing.
+    const mapping = new Map<string, string>();
+    for (const commit of text(path, "rev-list", "--reverse", "--topo-order", original).split(
+      "\n",
+    )) {
+      const raw = git(path, ["cat-file", "commit", commit]);
+      const transformed = transformCommit(raw, mapping, options.targets);
+      const changed = !transformed.bytes.equals(raw);
+      mapping.set(
+        commit,
+        changed
+          ? git(path, ["hash-object", "-t", "commit", "--stdin"], transformed.bytes)
+              .toString("ascii")
+              .trim()
+          : commit,
+      );
+      result.commits++;
+      if (changed) result.changedCommits++;
+      result.invalidatedSignatures += transformed.invalidatedSignatures;
+    }
+    return result;
+  }
   const guard = referenceTransactions(path, branch, original);
   try {
     const suffix = `${new Date().toISOString().replace(/[^0-9]/g, "")}-${randomBytes(6).toString("hex")}`;
-    const recovery = `refs/heads/backup/coauthor-trailer-cleaner-${suffix}`;
+    // Outside refs/heads/ so branch push globs and mirror-less pushes never publish it.
+    const recovery = `refs/coauthor-trailer-cleaner/recovery/${suffix}`;
     const transaction = `refs/coauthor-trailer-cleaner/transactions/${suffix}`;
     result.recoveryRef = recovery;
     const assertState = (expected: string): void => {
@@ -233,9 +328,13 @@ export function rewriteRepository(repository: Repository, options: RewriteOption
       `create ${recovery} ${original}`,
       `create ${transaction} ${original}`,
     ]);
-    if (options.backupRemote && !options.noPush)
-      git(path, ["push", options.backupRemote, `${original}:${recovery}`]);
+    if (options.backupRemote) {
+      git(path, ["push", "--", options.backupRemote, `${original}:${recovery}`]);
+      result.backupRemoteRetained = options.backupRemote;
+    }
     const mapping = new Map<string, string>();
+    // Earliest rewritten originals: every ref reaching a rewritten commit reaches one of these.
+    const exposed: string[] = [];
     const history = text(path, "rev-list", "--reverse", "--topo-order", original).split("\n");
     for (const commit of history) {
       const raw = git(path, ["cat-file", "commit", commit]);
@@ -247,12 +346,22 @@ export function rewriteRepository(repository: Repository, options: RewriteOption
             .trim();
       if (tree(path, commit) !== tree(path, rewritten))
         throw new Error(`Tree mismatch; retained ${recovery}`);
+      if (rewritten !== commit && parents(raw).every((parent) => mapping.get(parent) === parent))
+        exposed.push(commit);
       mapping.set(commit, rewritten);
       result.commits++;
+      if (rewritten !== commit) result.changedCommits++;
       result.invalidatedSignatures += transformed.invalidatedSignatures;
     }
     const rewritten = mapping.get(original);
     if (!rewritten) throw new Error("Missing rewritten HEAD");
+    // Verify before any ref moves so a failure never reaches the branch or remote.
+    for (const commit of mapping.values()) {
+      const raw = git(path, ["cat-file", "commit", commit]);
+      const message = raw.subarray(raw.indexOf(Buffer.from("\n\n")) + 2);
+      if (!cleanMessage(message, options.targets).equals(message))
+        throw new Error("Target verification failed; recovery refs retained");
+    }
     result.rewritten = rewritten;
     assertState(original);
     guard.update([
@@ -290,18 +399,31 @@ export function rewriteRepository(repository: Repository, options: RewriteOption
       }
     }
     assertState(rewritten);
-    for (const commit of mapping.values()) {
-      const raw = git(path, ["cat-file", "commit", commit]);
-      const message = raw.subarray(raw.indexOf(Buffer.from("\n\n")) + 2);
-      if (!cleanMessage(message, options.targets).equals(message))
-        throw new Error("Target verification failed; recovery refs retained");
-    }
+    // The recovery branch is kept unless explicitly requested otherwise.
     guard.update([
       `verify ${branch} ${rewritten}`,
-      `delete ${recovery} ${original}`,
+      ...(options.deleteRecoveryBranch ? [`delete ${recovery} ${original}`] : []),
       `delete ${transaction} ${rewritten}`,
     ]);
-    delete result.recoveryRef;
+    if (options.deleteRecoveryBranch) {
+      delete result.recoveryRef;
+      if (result.backupRemoteRetained) {
+        try {
+          git(path, ["push", "--", result.backupRemoteRetained, `:${recovery}`]);
+          delete result.backupRemoteRetained;
+        } catch {
+          // Reported through backupRemoteRetained; the rewrite itself succeeded.
+        }
+      }
+    }
+    try {
+      result.residualRefs = residualRefs(path, exposed, [recovery]);
+    } catch (error) {
+      // The rewrite is complete; failing to enumerate leftovers must not report it as failed.
+      result.warnings = [
+        `Could not check for residual refs (${error instanceof Error ? error.message : String(error)}); inspect refs that contain the original commits`,
+      ];
+    }
     return result;
   } finally {
     guard.close();

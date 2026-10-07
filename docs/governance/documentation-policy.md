@@ -1,7 +1,7 @@
 ---
 status: stable
 owner: core
-last_reviewed: 2026-09-02
+last_reviewed: 2026-10-07
 source_of_truth: editorial
 evidence_links: ../reference/claims/claims-ledger.md
 ---
@@ -55,13 +55,13 @@ the interface it describes remains subject to change.
 
 ## Article contract
 
-- research pages, science pages, and claim dossiers require at least seven
-  relevant bibliography sources; the repository verifier enforces this scope
+- research pages, science pages, and claim dossiers cite the bibliography
+  sources their argument depends on; there is no minimum source count
 - every claim-bearing page must preserve the strongest available internal
   anchors for repository-local truth
-- tutorials, operational guides, and implementation references should cite the
-  owning source, schema, command, or package documentation rather than add
-  unrelated external sources to satisfy a quota
+- tutorials, operational guides, and implementation references cite the
+  owning source, schema, command, or package documentation; they need no
+  external sources, and unrelated external sources should not be added
 - claim-bearing pages should include a scope or thesis statement, assumptions,
   limitations, and links to the relevant claim dossier or evidence surface
 
@@ -96,6 +96,22 @@ Every documentation review should check:
 - source relevance and source quality
 - drift against code, schemas, contracts, and package-local docs
 - at least one explicit limitation or uncertainty block
+
+## Enforced checks
+
+`npm run check:docs` (`scripts/src/docs-check.ts`) is the repository gate for
+Markdown pages under `docs/`. It checks that:
+
+- every page has frontmatter with non-empty `status`, `owner`,
+  `last_reviewed`, `source_of_truth`, and `evidence_links` keys
+- `source_of_truth` is `editorial` or names a path that exists, either
+  repository-relative (preferred) or relative to the page; `implementation`
+  is rejected
+- every relative Markdown link outside code resolves to an existing file,
+  directory, or page
+
+The remaining rules on this page are review rules. Reviewers apply them; no
+script enforces source counts, claim strength, or prose quality.
 
 ## Freshness rules
 

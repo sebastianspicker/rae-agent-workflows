@@ -2,7 +2,7 @@
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { requireProject, requireScope } from "./auth.js";
+import { projectVisible, requireProject, requireScope } from "./auth.js";
 const runInput = { run_id: z.string().uuid() };
 const idempotencyKey = z.string().regex(/^[\x21-\x7e]{1,200}$/);
 const runEnvelope = z
@@ -44,8 +44,8 @@ export async function handleStreamableMcp({
   });
   const run = async (runId: string) => {
     const value = await store.getRun(runId);
-    if (!value) throw Object.assign(new Error("run not found"), { statusCode: 404 });
-    requireProject(principal, value.projectId);
+    if (!value || !projectVisible(principal, value.projectId))
+      throw Object.assign(new Error("run not found"), { statusCode: 404 });
     return value;
   };
   server.registerTool(

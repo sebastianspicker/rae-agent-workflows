@@ -2,6 +2,7 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { homedir, tmpdir } from "node:os";
 import { basename } from "node:path";
 import type { IncomingMessage } from "node:http";
 
@@ -152,13 +153,84 @@ export function validateRunId(value: unknown): string {
   return value as string;
 }
 
-export function positiveInteger(value: unknown, fallback: number, maximum: number): number {
+export function positiveInteger(
+  value: unknown,
+  fallback: number,
+  maximum: number,
+  minimum = 0,
+): number {
   if (value === null || value === undefined || value === "") return fallback;
   const number = Number(value);
-  if (!Number.isSafeInteger(number) || number < 0 || number > maximum) {
-    throw Object.assign(new Error(`value must be an integer from 0 to ${maximum}`), {
+  if (!Number.isSafeInteger(number) || number < minimum || number > maximum) {
+    throw Object.assign(new Error(`value must be an integer from ${minimum} to ${maximum}`), {
       status: 400,
     });
   }
   return number;
+}
+
+const SCRUBBED_MESSAGE_MAX = 1024;
+const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+/**
+ * Long opaque-looking tokens are scrubbed from messages, except identifiers the console itself
+ * shows and operators need to correlate: 40- and 64-hex Git and artifact digests, UUIDs and run
+ * ids. Session tokens are base64url, so none of these patterns matches them and they are still
+ * scrubbed.
+ */
+const KEPT_IDENTIFIERS = [
+  /^[0-9a-f]{40}$/i,
+  /^[0-9a-f]{64}$/i,
+  new RegExp(`^${UUID}$`, "i"),
+  new RegExp(`^[A-Za-z][A-Za-z0-9]{0,31}-${UUID}$`, "i"),
+  /^run-[A-Za-z0-9_-]{1,124}$/,
+];
+// biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are the target.
+const CONTROL_CHARACTERS = /[\x00-\x1f\x7f]/g;
+/** OSC (ESC ] … BEL or ST), CSI (ESC [ … final) and two-byte ESC sequences. */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: matching escape sequences is the point.
+const TERMINAL_SEQUENCES = /\x1b(?:\][^\x07\x1b]*(?:\x07|\x1b\\)?|\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])/g;
+
+/** Strips terminal escapes and control characters before child or engine text is logged. */
+export function sanitizeLogText(text: string): string {
+  return text.replace(TERMINAL_SEQUENCES, "").replace(CONTROL_CHARACTERS, " ").trim();
+}
+
+function pathVariants(path: string): string[] {
+  const variants = new Set([path]);
+  try {
+    variants.add(realpathSync(path));
+  } catch {
+    // A root that no longer exists is still replaced by its recorded spelling.
+  }
+  for (const variant of [...variants]) {
+    if (variant.startsWith("/private/")) variants.add(variant.slice("/private".length));
+    else if (/^\/(?:var|tmp|etc)\//.test(variant)) variants.add(`/private${variant}`);
+  }
+  return [...variants];
+}
+
+function looksLikeSecret(token: string): boolean {
+  return !KEPT_IDENTIFIERS.some((pattern) => pattern.test(token));
+}
+
+/**
+ * Removes local paths and secret-like strings from text that is returned to the browser.
+ * Run ids, UUIDs, 40-hex commit SHAs and 64-hex digests stay readable.
+ */
+export function scrubMessage(text: string, roots: Iterable<string> = []): string {
+  let value = text;
+  const replacements: Array<[string, string]> = [
+    ...[...roots].flatMap((root) =>
+      pathVariants(root).map((variant): [string, string] => [variant, "<project>"]),
+    ),
+    ...pathVariants(homedir()).map((variant): [string, string] => [variant, "<home>"]),
+    ...pathVariants(tmpdir()).map((variant): [string, string] => [variant, "<tmp>"]),
+  ];
+  for (const [path, placeholder] of replacements.sort((a, b) => b[0].length - a[0].length)) {
+    if (path.length > 1) value = value.split(path).join(placeholder);
+  }
+  return value
+    .replace(/[A-Za-z0-9_-]{32,}/g, (token) => (looksLikeSecret(token) ? "<redacted>" : token))
+    .trim()
+    .slice(0, SCRUBBED_MESSAGE_MAX);
 }

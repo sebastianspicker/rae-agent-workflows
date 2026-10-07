@@ -172,21 +172,46 @@ export function graphRepositoryIdentity(projectRoot: string): {
   return { commonDir: canonical, repositoryId: sha256(canonical) };
 }
 
+/**
+ * Parses `git status --porcelain=v1 -z`. A rename or copy is emitted as `XY new\0old`, so the
+ * origin path is the NUL-separated field that follows and must not be read as its own entry.
+ */
+export function porcelainZEntries(
+  status: string,
+): Array<{ code: string; path: string; origin?: string }> {
+  const fields = status.split("\0");
+  const entries: Array<{ code: string; path: string; origin?: string }> = [];
+  for (let index = 0; index < fields.length; index += 1) {
+    const field = fields[index];
+    if (!field) continue;
+    const code = field.slice(0, 2);
+    const entry: { code: string; path: string; origin?: string } = { code, path: field.slice(3) };
+    if (code.includes("R") || code.includes("C")) {
+      index += 1;
+      const origin = fields[index];
+      if (origin) entry.origin = origin;
+    }
+    entries.push(entry);
+  }
+  return entries;
+}
+
 function dirtyOverlayDigest(root: string): string {
   const status = runGit(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
-  const entries = status
-    .split("\0")
-    .filter(Boolean)
-    .filter((entry) => !entry.slice(3).replaceAll("\\", "/").startsWith(".pipeline/"));
-  const parts = [entries.join("\0")];
-  for (const entry of entries.sort()) {
-    const path = entry.slice(3);
-    const finalPath = path.includes(" -> ") ? path.split(" -> ").at(-1) : path;
-    if (!finalPath) continue;
-    const absolute = resolve(root, finalPath);
+  const entries = porcelainZEntries(status).filter(
+    (entry) => !entry.path.replaceAll("\\", "/").startsWith(".pipeline/"),
+  );
+  const rows = entries.map((entry) =>
+    entry.origin === undefined
+      ? `${entry.code} ${entry.path}`
+      : `${entry.code} ${entry.path}\0${entry.origin}`,
+  );
+  const parts = [rows.join("\0")];
+  for (const entry of [...entries].sort((left, right) => left.path.localeCompare(right.path))) {
+    const absolute = resolve(root, entry.path);
     if (!safeRegularFile(absolute, root)) continue;
     const data = readFileSync(absolute);
-    parts.push(`${path}\0${sha256(data)}`);
+    parts.push(`${entry.path}\0${sha256(data)}`);
   }
   return sha256(parts.join("\0"));
 }

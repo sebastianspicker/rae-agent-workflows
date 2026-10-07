@@ -4,6 +4,9 @@ import { proposeWorkflowCandidateAsync, validateWorkflow } from "@rae/engine";
 import type { LoadedExecutionProfile } from "./profiles.js";
 import type { OperatorProject } from "./security.js";
 const MAX_JOBS = 12;
+const MAX_CONCURRENT_RUNS = 4;
+const TERMINAL_JOB_TTL_MS = 15 * 60 * 1000;
+const MAX_TERMINAL_JOBS = 50;
 const MAX_TASK_BYTES = 32 * 1024;
 const PROPOSAL_FIELDS = new Set(["task", "base_revision", "execution_profile_id"]);
 
@@ -16,6 +19,7 @@ interface ProposalInput {
 }
 interface ProposalJob {
   id: string;
+  projectId: string;
   workflowId: string;
   state: "queued" | "running" | "completed" | "failed";
   createdAt: string;
@@ -101,15 +105,29 @@ function publicJob(job: ProposalJob): PublicProposalJob {
 export class WorkflowProposalJobs {
   private readonly candidateRunner: CandidateRunner;
   private readonly maxJobs: number;
+  private readonly terminalTtlMs: number;
+  private readonly maxTerminalJobs: number;
+  private readonly maxConcurrentRuns: number;
   private readonly jobs: Map<string, ProposalJob>;
+  private readonly waiting: Array<() => Promise<void>> = [];
+  private running = 0;
 
   constructor({
     candidateRunner = defaultCandidateRunner,
     maxJobs = MAX_JOBS,
+    terminalTtlMs = TERMINAL_JOB_TTL_MS,
+    maxTerminalJobs = MAX_TERMINAL_JOBS,
+    maxConcurrentRuns = MAX_CONCURRENT_RUNS,
   }: {
     candidateRunner?: CandidateRunner;
     maxJobs?: number;
+    terminalTtlMs?: number;
+    maxTerminalJobs?: number;
+    maxConcurrentRuns?: number;
   } = {}) {
+    this.terminalTtlMs = terminalTtlMs;
+    this.maxTerminalJobs = maxTerminalJobs;
+    this.maxConcurrentRuns = maxConcurrentRuns;
     this.candidateRunner = candidateRunner;
     this.maxJobs = maxJobs;
     this.jobs = new Map<string, ProposalJob>();
@@ -130,15 +148,20 @@ export class WorkflowProposalJobs {
     if (input.executionProfileId && !executionProfile?.source) {
       throw httpError(400, "execution_profile_id must name a preloaded execution profile");
     }
-    if (this.jobs.size >= this.maxJobs) throw httpError(429, "workflow proposal queue is full");
+    this.#evict();
+    const active = [...this.jobs.values()].filter(
+      (job) => job.state === "queued" || job.state === "running",
+    ).length;
+    if (active >= this.maxJobs) throw httpError(429, "workflow proposal queue is full");
     const job: ProposalJob = {
       id: `proposal-${randomUUID()}`,
+      projectId: project.id,
       workflowId,
       state: "queued",
       createdAt: new Date().toISOString(),
     };
     this.jobs.set(job.id, job);
-    queueMicrotask(async () => {
+    this.waiting.push(async () => {
       job.state = "running";
       try {
         const candidate = await this.candidateRunner({
@@ -158,7 +181,7 @@ export class WorkflowProposalJobs {
           error instanceof Error &&
           "status" in error &&
           typeof error.status === "number" &&
-          error.status >= 500
+          error.status < 500
             ? error.message
             : "proposal could not be generated";
         job.state = "failed";
@@ -166,13 +189,49 @@ export class WorkflowProposalJobs {
         job.completedAt = new Date().toISOString();
       }
     });
+    queueMicrotask(() => this.#drain());
     return publicJob(job);
   }
 
-  get(id: string, workflowId: string | null = null): PublicProposalJob {
+  /** Starts queued provider runs while fewer than the concurrency cap are in flight. */
+  #drain(): void {
+    while (this.running < this.maxConcurrentRuns && this.waiting.length) {
+      const run = this.waiting.shift();
+      if (!run) return;
+      this.running += 1;
+      void run().finally(() => {
+        this.running -= 1;
+        this.#drain();
+      });
+    }
+  }
+
+  /** Drops terminal jobs past their TTL, then the oldest terminal jobs beyond the retention cap. */
+  #evict(): void {
+    const now = Date.now();
+    const terminal = [...this.jobs.values()].filter(
+      (job) => job.state === "completed" || job.state === "failed",
+    );
+    for (const job of terminal) {
+      if (job.completedAt && now - Date.parse(job.completedAt) > this.terminalTtlMs) {
+        this.jobs.delete(job.id);
+      }
+    }
+    const kept = terminal.filter((job) => this.jobs.has(job.id));
+    for (const job of kept.slice(0, Math.max(0, kept.length - this.maxTerminalJobs))) {
+      this.jobs.delete(job.id);
+    }
+  }
+
+  get(
+    id: string,
+    workflowId: string | null = null,
+    projectId: string | null = null,
+  ): PublicProposalJob {
     const job = this.jobs.get(id);
     if (!job) throw httpError(404, "proposal job not found");
     if (workflowId && job.workflowId !== workflowId) throw httpError(404, "proposal job not found");
+    if (projectId && job.projectId !== projectId) throw httpError(404, "proposal job not found");
     return publicJob(job);
   }
 }

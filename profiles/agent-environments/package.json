@@ -1,6 +1,16 @@
 {
-  "name": "@rae/agent-profiles", "private": true, "type": "module",
-  "engines": {"node": ">=24.0.0"},
-  "dependencies": {"@rae/fs-bridge": "file:../../packages/fs-bridge"},
-  "scripts": {"build": "tsc -p tsconfig.json", "typecheck": "tsc -p tsconfig.json --noEmit"}
+  "name": "@rae/agent-profiles",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "dependencies": {
+    "@rae/fs-bridge": "file:../../packages/fs-bridge"
+  },
+  "scripts": {
+    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test dist/test/*.test.js"
+  }
 }

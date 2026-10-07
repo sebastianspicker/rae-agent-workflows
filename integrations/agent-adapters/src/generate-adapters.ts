@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 /** Render runner guidance from the manifest, rejecting paths outside the repository. */
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
@@ -47,6 +48,15 @@ interface GenerationOptions {
   runners?: string[];
   manifest: string;
 }
+/** Whether a mirror belongs to the repository: tracked, or (without git) not ignored. */
+function mirrorIsShared(root: string, target: string): boolean {
+  const git = (args: string[]) => spawnSync("git", args, { cwd: root, stdio: "ignore" });
+  const tracked = git(["ls-files", "--error-unmatch", "--", target]);
+  if (!tracked.error && tracked.status === 0) return true;
+  if (!tracked.error && tracked.status === 1) return false;
+  const ignored = git(["check-ignore", "--quiet", "--", target]);
+  return Boolean(ignored.error) || ignored.status !== 0;
+}
 export function generate(
   root: string,
   options: GenerationOptions,
@@ -79,6 +89,10 @@ export function generate(
   function write(target: string, content: string, optional = false): void {
     const path = resolveRepoPath(root, target);
     if (optional && !existsSync(path)) return;
+    if (optional && options.check && !mirrorIsShared(root, target)) {
+      console.log(`SKIP: ${target} is untracked or ignored; not checked`);
+      return;
+    }
     const current = existsSync(path) ? readFileSync(path, "utf8") : null;
     if (current === content) return;
     if (options.check) {

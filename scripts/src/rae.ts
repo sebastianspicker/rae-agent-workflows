@@ -37,11 +37,16 @@ async function engineEntry(name: string): Promise<string> {
     throw new Error(`Compiled engine entrypoint ${name} is unavailable; run the TypeScript build`);
   return path;
 }
-async function execute(path: string, args: string[], cwd = caller): Promise<number> {
+async function execute(
+  path: string,
+  args: string[],
+  cwd = caller,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<number> {
   if (!existsSync(path))
     throw new Error(`Compiled entrypoint missing: ${path}; run the owning package build`);
   return new Promise((resolveExit, reject) => {
-    const child = spawn(process.execPath, [path, ...args], { cwd, stdio: "inherit" });
+    const child = spawn(process.execPath, [path, ...args], { cwd, env, stdio: "inherit" });
     const signals = ["SIGINT", "SIGTERM"] as const;
     const handlers = signals.map((signal) => {
       const handler = (): void => {
@@ -116,17 +121,27 @@ async function doctor(): Promise<number> {
   console.log(`VERDICT: ${failed ? "FAIL" : "PASS"}`);
   return failed ? 1 : 0;
 }
+/**
+ * Staged commands act on the caller's repository: they run with the caller's working directory
+ * and receive `--project-root <caller>` unless the user chose a root, so runs are never written
+ * to or looked up in `packages/engine`.
+ */
 async function orchestrate(args: string[]): Promise<number> {
   const [command = "help", ...rest] = args;
   if (command === "init") {
     const parameters = [...rest];
-    if (parameters[0] && !parameters[0].startsWith("--"))
-      parameters[0] = resolve(caller, parameters[0]);
-    return execute(
-      await engineEntry("pipelineInitEntrypoint"),
-      parameters,
-      packageFile("packages/engine"),
-    );
+    // pipeline-init takes the root positionally, so an explicit --project-root becomes that root.
+    const flag = parameters.indexOf("--project-root");
+    let root: string | undefined;
+    if (flag !== -1) {
+      root = parameters[flag + 1];
+      if (!root || root.startsWith("--")) throw new Error("--project-root requires a path");
+      parameters.splice(flag, 2);
+    }
+    if (root === undefined && parameters[0] && !parameters[0].startsWith("--"))
+      root = parameters.shift();
+    parameters.unshift(resolve(caller, root ?? caller));
+    return execute(await engineEntry("pipelineInitEntrypoint"), parameters, caller);
   }
   if (
     ![
@@ -145,22 +160,46 @@ async function orchestrate(args: string[]): Promise<number> {
     ].includes(command)
   )
     throw new Error(`Unknown orchestrate subcommand: ${command}`);
-  return execute(
-    await engineEntry("stagedEntrypoint"),
-    [command === "help" ? "--help" : command, ...rest],
-    packageFile("packages/engine"),
+  if (["help", "--help", "-h"].includes(command))
+    return execute(await engineEntry("stagedEntrypoint"), ["--help"], caller);
+  const hasRoot = rest.some(
+    (value) => value === "--project-root" || value.startsWith("--project-root="),
   );
+  const parameters = hasRoot ? rest : [...rest, "--project-root", caller];
+  return execute(await engineEntry("stagedEntrypoint"), [command, ...parameters], caller);
 }
 async function ralph(args: string[]): Promise<number> {
   const [command = "--help", ...rest] = args;
   const root = packageFile("packages/ralph");
-  if (["bootstrap", "bootstrap-template"].includes(command))
-    return execute(resolve(root, "dist/src/helper-cli.js"), ["bootstrap", ...rest], root);
-  return execute(
-    resolve(root, "dist/src/cli.js"),
-    [command === "help" ? "--help" : command, ...rest],
-    root,
-  );
+  // Target the caller's repository (its Git top level), not Ralph's own package; an explicit
+  // RALPH_REPO_ROOT still wins.
+  const toplevel = spawnSync("git", ["-C", caller, "rev-parse", "--show-toplevel"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  const env =
+    !process.env.RALPH_REPO_ROOT && toplevel.status === 0 && toplevel.stdout.trim()
+      ? { ...process.env, RALPH_REPO_ROOT: realpathSync(toplevel.stdout.trim()) }
+      : process.env;
+  if (["bootstrap", "bootstrap-template"].includes(command)) {
+    const parameters = [...rest];
+    const target = parameters.findIndex((argument) => !argument.startsWith("--"));
+    if (target >= 0) parameters[target] = resolve(caller, parameters[target]);
+    return execute(
+      resolve(root, "dist/src/helper-cli.js"),
+      ["bootstrap", ...parameters],
+      caller,
+      env,
+    );
+  }
+  const parameters = [command === "help" ? "--help" : command, ...rest];
+  for (let index = 0; index < parameters.length; index++) {
+    if (parameters[index] === "--import-state" && parameters[index + 1])
+      parameters[index + 1] = resolve(caller, parameters[index + 1]);
+    else if (parameters[index].startsWith("--import-state="))
+      parameters[index] = `--import-state=${resolve(caller, parameters[index].slice(15))}`;
+  }
+  return execute(resolve(root, "dist/src/cli.js"), parameters, caller, env);
 }
 async function worktree(args: string[]): Promise<number> {
   const [command = "help", ...rest] = args;
@@ -179,12 +218,13 @@ async function worktree(args: string[]): Promise<number> {
     return execute(init, ["--cleanup-worktree", resolve(caller, rest[0])]);
   }
   if (command !== "init") throw new Error(`Unknown worktree subcommand: ${command}`);
-  let root = repositoryRoot;
+  let root = caller;
   if (rest[0] && !rest[0].startsWith("--")) {
     root = resolve(caller, rest[0]);
     rest.shift();
   }
-  return execute(init, [root, "--use-worktree", ...rest], packageFile("packages/engine"));
+  // Run in the caller's directory so relative --worktree-root values resolve against it.
+  return execute(init, [root, "--use-worktree", ...rest]);
 }
 async function workflow(args: string[]): Promise<number> {
   const [family = "help", action, ...rest] = args;

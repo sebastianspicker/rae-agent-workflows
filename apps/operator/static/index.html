@@ -34,11 +34,11 @@
       </symbol>
     </svg>
 
-    <a class="skip" href="#workspace">Skip to run</a>
+    <a class="skip" href="#main">Skip to content</a>
 
     <div class="app">
       <header class="topbar">
-        <div class="brand" aria-label="RAE Operator">
+        <div class="brand">
           <svg class="mark" viewBox="0 0 64 64" aria-hidden="true">
             <rect x="1" y="1" width="62" height="62" rx="9" fill="#14232B" stroke="#F4F7F8" stroke-width="3"></rect>
             <path d="M10 17h13v15h17v15h14" fill="none" stroke="#7DA2FF" stroke-width="5" stroke-linecap="square" stroke-linejoin="miter"></path>
@@ -60,7 +60,7 @@
               <circle cx="11" cy="11" r="6.5"></circle>
               <path d="M16 16l4.5 4.5"></path>
             </svg>
-            <span class="command-search__label">Search runs</span><kbd>⌘K</kbd>
+            <span class="command-search__label">Search runs</span><kbd id="search-shortcut">Ctrl K</kbd>
           </button>
         </div>
 
@@ -69,7 +69,7 @@
             <span class="session-state__dot" aria-hidden="true"></span>
             <span><strong>Connecting</strong><small>Local session</small></span>
           </div>
-          <button id="theme-toggle" class="icon-btn" type="button" aria-label="Use light theme" aria-pressed="true">
+          <button id="theme-toggle" class="icon-btn" type="button" aria-label="Dark theme" aria-pressed="false">
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <circle cx="12" cy="12" r="7.5"></circle>
               <path d="M12 4.5v15" ></path>
@@ -79,6 +79,11 @@
         </div>
 
         <nav class="topbar__nav" aria-label="Runs">
+          <button id="decisions-pending" class="btn decisions-pending" type="button" hidden>
+            <span class="sq" aria-hidden="true"></span>
+            <span id="decisions-pending-count">0</span>
+            <span id="decisions-pending-label" class="decisions-pending__label">decisions pending</span>
+          </button>
           <button id="all-runs-button" class="nav-link" type="button">All runs</button>
           <button id="new-run-button" class="btn btn--primary new-run" type="button" disabled>
             <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -89,7 +94,7 @@
         </nav>
       </header>
 
-      <div class="body">
+      <div class="body" id="main" tabindex="-1">
         <nav id="run-index" class="index" aria-labelledby="runs-heading">
           <header class="index__head">
             <div>
@@ -110,7 +115,7 @@
           <div id="runs-loading" class="state-line index__state" role="status">
             Reading run records…
           </div>
-          <div id="runs-list" class="run-list" role="listbox" aria-label="Autonomous runs"></div>
+          <ul id="runs-list" class="run-list" aria-label="Autonomous runs"></ul>
           <button id="runs-load-more" class="btn btn--quiet index__more" type="button" hidden>Load more runs</button>
           <div id="runs-empty" class="index__empty" hidden>
             <strong>No runs yet</strong>
@@ -143,6 +148,7 @@
             <header class="ident">
               <p class="eyebrow ident__eyebrow">Task, as written</p>
               <h1 class="task human" id="run-task" tabindex="-1"></h1>
+              <button id="task-toggle" class="task-toggle" type="button" aria-expanded="false" aria-controls="run-task" hidden>Show full task</button>
               <p class="ident__line">
                 <span class="ident__k">run</span><span id="run-title"></span>
                 <span class="ident__k">branch</span><span id="run-branch"></span>
@@ -283,7 +289,7 @@
                   <header class="section-head section-head--split">
                     <div>
                       <h3 id="events-heading">Event log</h3>
-                      <p><span id="event-count">Loading…</span> <span id="stream-status" role="status"></span></p>
+                      <p><span id="event-count">Loading…</span> <span id="stream-status"></span></p>
                     </div>
                     <div class="section-head__actions">
                       <button type="button" class="btn btn--quiet" id="expand-all">Expand all</button>
@@ -394,7 +400,6 @@
                         <div class="workflow-control-row">
                           <button id="workflow-add-node" class="btn" type="button">Add node</button>
                           <button id="workflow-add-edge" class="btn" type="button">Connect selected</button>
-                          <button id="workflow-auto-layout" class="btn" type="button">Auto layout</button>
                           <button id="workflow-delete-node" class="btn btn--danger" type="button">Delete node</button>
                           <button id="workflow-delete-edge" class="btn btn--danger" type="button">Delete edge</button>
                         </div>
@@ -427,7 +432,7 @@
                         <p id="workflow-budget" class="field-help">Revision budget unavailable</p>
                         <div class="workflow-control-row">
                           <button id="workflow-draft" class="btn btn--primary" type="submit">Save draft revision</button>
-                          <button id="workflow-validate" class="btn" type="button">Validate draft</button>
+                          <button id="workflow-validate" class="btn" type="button">Validate latest revision</button>
                         </div>
                       </section>
                     </form>
@@ -464,9 +469,9 @@
                     </div>
                     <div class="workflow-checks">
                       <label><input id="workflow-node-verification" type="checkbox"> Verification</label>
-                      <label><input id="workflow-node-checkpoint" type="checkbox"> Mutation checkpoint</label>
                       <label><input id="workflow-node-ownership" type="checkbox"> Ownership plan</label>
                     </div>
+                    <label id="workflow-node-checkpoint-field" hidden>Checkpoint type<select id="workflow-node-checkpoint"><option value="mutation">mutation checkpoint</option><option value="release">release checkpoint</option></select><small>Mutation checkpoints pause under before-mutation and before-mutation-and-ship; release checkpoints pause only under before-mutation-and-ship.</small></label>
                     <dl id="workflow-details" class="workflow-details"><div><dt>Selection</dt><dd>Choose a registry entry</dd></div></dl>
                     <div class="inspector-block">
                       <div class="field-pair field-pair--action">
@@ -521,7 +526,7 @@
             <p id="start-task-help" class="field-help">State the change and the checks that prove it. Up to 32 KiB of UTF-8 text.</p>
           </div>
           <p id="start-error" class="field-error" role="alert" hidden></p>
-          <p id="start-pending" class="state-line" role="status" hidden>Starting the run…</p>
+          <p id="start-pending" class="state-line" role="status" hidden>Starting…</p>
           <div class="field-pair">
             <div class="field">
               <label for="start-checkpoint-policy">Human checkpoints</label>
@@ -561,7 +566,8 @@
         </header>
         <div class="app-dialog__body">
           <p id="confirm-message" class="dialog-message"></p>
-          <div class="field">
+          <blockquote id="confirm-rationale" class="confirm-rationale human" hidden></blockquote>
+          <div id="confirm-run-id-field" class="field">
             <label for="confirm-run-id">Type <code id="confirm-expected-id"></code> to continue</label>
             <input
               id="confirm-run-id"
@@ -574,6 +580,8 @@
             >
           </div>
           <p id="confirm-help" class="note">The action stays disabled until the run ID matches exactly.</p>
+          <p id="confirm-error" class="field-error" role="alert" hidden></p>
+          <p id="confirm-pending" class="state-line" role="status" hidden></p>
         </div>
         <footer class="app-dialog__foot">
           <button id="confirm-cancel" class="btn btn--quiet" type="button">Cancel</button>
@@ -582,6 +590,14 @@
       </form>
     </dialog>
 
-    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+    <div class="toasts">
+      <div id="error-toast" class="toast" data-tone="error" role="alert" hidden>
+        <p id="error-toast-message" class="toast__message"></p>
+        <button id="error-toast-close" class="toast__close" type="button" aria-label="Dismiss error">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>
+        </button>
+      </div>
+      <div id="toast" class="toast" data-tone="notice" role="status" aria-live="polite" hidden></div>
+    </div>
   </body>
 </html>

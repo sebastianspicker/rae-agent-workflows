@@ -1,6 +1,7 @@
 /** Purpose: transactional PostgreSQL and in-memory control-plane primitives. */
 import crypto from "node:crypto";
 import { createRequire } from "node:module";
+import { createLogger } from "./observability.js";
 
 const require = createRequire(import.meta.url);
 
@@ -32,9 +33,59 @@ export const TERMINAL_NODE_STATES: readonly NodeState[] = Object.freeze([
   NODE_STATE.FAILED,
   NODE_STATE.CANCELLED,
 ]);
+const ACTIVE_RUN_STATES: readonly RunState[] = Object.freeze([RUN_STATE.QUEUED, RUN_STATE.RUNNING]);
 const MAX_LONG_POLL_SECONDS = 25;
+/** Claim and report idempotency rows are pruned by the reconciler after this many hours. */
+export const IDEMPOTENCY_RETENTION_HOURS = 24;
+const PRUNED_IDEMPOTENCY_SCOPES = ["claim", "report"];
 function storeClosedError() {
   return Object.assign(new Error("store is shutting down"), { statusCode: 503 });
+}
+export { WORKER_UNREGISTERED };
+function errorText(error: unknown) {
+  return error instanceof Error ? error.message : "unknown error";
+}
+/** One message for every unusable rebind target, so it cannot be used to enumerate workers. */
+function rebindRefused() {
+  return Object.assign(new Error("the worker cannot be bound to this run"), { statusCode: 409 });
+}
+function unregisteredWorkerError() {
+  return Object.assign(new Error("worker must register before claiming"), {
+    statusCode: 409,
+    errorCode: WORKER_UNREGISTERED,
+  });
+}
+function assertSameRequest(stored: string | null | undefined, actual: string | null) {
+  if (stored && actual && stored !== actual)
+    throw Object.assign(new Error("Idempotency-Key was reused with a different request"), {
+      statusCode: 422,
+      errorCode: "idempotency_key_reused",
+    });
+}
+/** Digests the JSON form of a request so retries with the same key must repeat the same input. */
+export function requestDigest(value: Record<string, unknown>) {
+  return digest(JSON.parse(json(value)));
+}
+async function readIdempotent<T>(client: PgQuery, key: string, expected: string) {
+  const prior = await client.query<{ response: T; request_digest: string | null }>(
+    "SELECT response,request_digest FROM idempotency_keys WHERE key=$1",
+    [key],
+  );
+  if (!prior.rowCount) return null;
+  assertSameRequest(prior.rows[0].request_digest, expected);
+  return { response: prior.rows[0].response };
+}
+async function insertIdempotent(
+  client: PgQuery,
+  key: string,
+  scope: string,
+  response: unknown,
+  requestDigestValue: string,
+) {
+  await client.query(
+    "INSERT INTO idempotency_keys (key,scope,response,request_digest) VALUES ($1,$2,$3::jsonb,$4)",
+    [key, scope, json(response), requestDigestValue],
+  );
 }
 export function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
@@ -51,6 +102,22 @@ export function digest(value: unknown) {
   return crypto.createHash("sha256").update(canonical(value)).digest("hex");
 }
 
+export type SchemaStatus = "ready" | "stale" | "not-migrated";
+const REQUIRED_MIGRATIONS = [
+  "001_initial.sql",
+  "002_artifact_fencing.sql",
+  "003_hosted_v2.sql",
+  "004_artifact_verification_claims.sql",
+  "005_idempotency_namespaces.sql",
+  "006_idempotency_digests.sql",
+];
+
+/** Lease and heartbeat durations in seconds; defaults match the worker protocol (60 and 20). */
+export interface LeaseTiming {
+  leaseSeconds?: number;
+  heartbeatSeconds?: number;
+}
+
 export class PostgresStore {
   pool: PgPool;
   workWaiters = new Set<(wake: WorkWake) => void>();
@@ -61,9 +128,19 @@ export class PostgresStore {
   closed = false;
   closePromise: Promise<void> | null = null;
   private artifactStore: PostgresArtifactStore;
+  leaseSeconds: number;
+  heartbeatSeconds: number;
+  logger: NonNullable<PoolSettings["logger"]>;
 
-  constructor(pool: PgPool) {
+  constructor(
+    pool: PgPool,
+    { leaseSeconds = 60, heartbeatSeconds = 20 }: LeaseTiming = {},
+    logger: NonNullable<PoolSettings["logger"]> = () => {},
+  ) {
+    this.logger = logger;
     this.artifactStore = new PostgresArtifactStore(this);
+    this.leaseSeconds = leaseSeconds;
+    this.heartbeatSeconds = heartbeatSeconds;
     this.pool = pool;
     this.workWaiters = new Set();
     this.workSubscribers = new Set();
@@ -73,11 +150,38 @@ export class PostgresStore {
     this.closed = false;
     this.closePromise = null;
   }
-  static connect(url: string) {
+  static connect(
+    url: string,
+    timing: LeaseTiming = {},
+    {
+      max = 20,
+      idleTimeoutMillis = 30_000,
+      statementTimeoutMs = 30_000,
+      logger = createLogger({ service: "rae-platform" }),
+    }: PoolSettings = {},
+  ) {
     const { Pool } = require("pg") as {
-      Pool: new (options: { connectionString: string; connectionTimeoutMillis: number }) => PgPool;
+      Pool: new (options: {
+        connectionString: string;
+        connectionTimeoutMillis: number;
+        max: number;
+        idleTimeoutMillis: number;
+        options?: string;
+      }) => PgPool;
     };
-    return new PostgresStore(new Pool({ connectionString: url, connectionTimeoutMillis: 5000 }));
+    const pool = new Pool({
+      connectionString: url,
+      connectionTimeoutMillis: 5000,
+      max,
+      idleTimeoutMillis,
+      // A startup option is rejected by PgBouncer and RDS Proxy; 0 leaves the server default.
+      ...(statementTimeoutMs > 0 ? { options: `-c statement_timeout=${statementTimeoutMs}` } : {}),
+    });
+    // Idle client failures are emitted on the pool; an unhandled "error" would end the process.
+    pool.on?.("error", (error) =>
+      logger("error", "idle PostgreSQL client failed", { error: error.message }),
+    );
+    return new PostgresStore(pool, timing, logger);
   }
   async close() {
     if (this.closePromise) return this.closePromise;
@@ -200,38 +304,42 @@ export class PostgresStore {
   }
   async transaction<T>(fn: (client: PgClient) => Promise<T>): Promise<T> {
     const client = await this.pool.connect();
+    let released = false;
     try {
       await client.query("BEGIN");
       const result = await fn(client);
       await client.query("COMMIT");
       return result;
     } catch (error) {
-      await client.query("ROLLBACK");
+      try {
+        await client.query("ROLLBACK");
+      } catch (rollbackError) {
+        // A client that cannot roll back is discarded by the pool instead of being reused.
+        released = true;
+        client.release(
+          rollbackError instanceof Error ? rollbackError : new Error("ROLLBACK failed"),
+        );
+      }
       throw error;
     } finally {
-      client.release();
+      if (!released) client.release();
     }
   }
   async idempotentTransaction<T>(
     scope: string,
     idempotencyKey: string,
     operation: (client: PgClient) => Promise<T>,
+    requestDigestValue: string,
   ): Promise<T> {
     if (!idempotencyKey)
       throw Object.assign(new Error("Idempotency-Key is required"), { statusCode: 400 });
     const composite = operationKey(scope, idempotencyKey);
     return this.transaction(async (client) => {
       await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [composite]);
-      const prior = await client.query<{ response: T }>(
-        "SELECT response FROM idempotency_keys WHERE key=$1",
-        [composite],
-      );
-      if (prior.rowCount) return prior.rows[0].response;
+      const prior = await readIdempotent<T>(client, composite, requestDigestValue);
+      if (prior) return prior.response;
       const response = await operation(client);
-      await client.query(
-        "INSERT INTO idempotency_keys (key,scope,response) VALUES ($1,$2,$3::jsonb)",
-        [composite, scope, json(response)],
-      );
+      await insertIdempotent(client, composite, scope, response, requestDigestValue);
       return response;
     });
   }
@@ -268,21 +376,31 @@ export class PostgresStore {
       if (!released) client.release();
     }
   }
+  /** Reports "not-migrated" when schema_migrations is absent, "stale" when migrations are missing. */
+  async schemaStatus(signal?: AbortSignal): Promise<SchemaStatus> {
+    let result: QueryResult<Record<string, unknown>>;
+    try {
+      result = await this.managementQuery<Record<string, unknown>>(
+        signal,
+        "SELECT version FROM schema_migrations",
+      );
+    } catch (error) {
+      if ((error as { code?: string }).code === "42P01") return "not-migrated";
+      throw error;
+    }
+    return REQUIRED_MIGRATIONS.every((version) =>
+      result.rows.some((row) => row.version === version),
+    )
+      ? "ready"
+      : "stale";
+  }
   async isReady(signal?: AbortSignal) {
-    const result = await this.managementQuery<Record<string, unknown>>(
-      signal,
-      "SELECT version FROM schema_migrations",
-    );
-    return [
-      "001_initial.sql",
-      "002_artifact_fencing.sql",
-      "003_hosted_v2.sql",
-      "004_artifact_verification_claims.sql",
-      "005_idempotency_namespaces.sql",
-    ].every((version) => result.rows.some((row) => row.version === version));
+    return (await this.schemaStatus(signal)) === "ready";
   }
   async migrate(version: string, sql: string) {
     await this.transaction(async (client) => {
+      // Explicit migrations may legitimately exceed the pooled statement timeout.
+      await client.query("SET LOCAL statement_timeout=0");
       await client.query(
         "CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())",
       );
@@ -311,16 +429,19 @@ export class PostgresStore {
       throw Object.assign(new Error("Idempotency-Key is required"), { statusCode: 400 });
     if (Buffer.byteLength(JSON.stringify({ revision, nodes, request })) > MAX_ENVELOPE_BYTES)
       throw Object.assign(new Error("run envelope exceeds 256 KiB"), { statusCode: 413 });
+    const expected = requestDigest({
+      projectId,
+      revision,
+      nodes,
+      request,
+      repositoryDigest,
+      worktreeDigest,
+    });
     return this.transaction(async (client) => {
       const scope = operationKey(operationKey("run", projectId), idempotencyKey);
       await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [scope]);
-      if (idempotencyKey) {
-        const prior = await client.query<{ response: { id: string; state: RunState } }>(
-          "SELECT response FROM idempotency_keys WHERE key = $1",
-          [scope],
-        );
-        if (prior.rowCount) return prior.rows[0].response;
-      }
+      const prior = await readIdempotent<{ id: string; state: RunState }>(client, scope, expected);
+      if (prior) return prior.response;
       const actualDigest = digest(revision.definition);
       if (actualDigest !== revision.digest)
         throw Object.assign(new Error("run revision digest mismatch"), { statusCode: 409 });
@@ -370,11 +491,7 @@ export class PostgresStore {
         json({ runId, traceparent }),
       ]);
       await client.query("SELECT pg_notify('rae_platform_work','work')");
-      if (idempotencyKey)
-        await client.query(
-          "INSERT INTO idempotency_keys (key,scope,response) VALUES ($1,$2,$3::jsonb)",
-          [scope, "run", json(response)],
-        );
+      await insertIdempotent(client, scope, "run", response, expected);
       return response;
     });
   }
@@ -417,6 +534,7 @@ export class PostgresStore {
         );
         return result.rows[0];
       },
+      requestDigest({ projectId, kind, document, expectedDigest }),
     );
   }
   async getRevision(id: string): Promise<PlatformRevision | null> {
@@ -467,6 +585,7 @@ export class PostgresStore {
         );
         return { revisionId, digest: expectedDigest };
       },
+      requestDigest({ projectId, kind, revisionId, expectedDigest }),
     );
   }
   async notifyWork() {
@@ -500,7 +619,32 @@ export class PostgresStore {
     return nodeIds.length;
   }
   async reconcile() {
-    return this.transaction((client) => this.reclaimExpired(client));
+    const expired = await this.transaction((client) => this.reclaimExpired(client));
+    // A pruning failure must not hide the lease expiries that were already committed.
+    try {
+      await this.pruneIdempotencyKeys();
+    } catch (error) {
+      this.logger("error", "idempotency key pruning failed", { error: errorText(error) });
+    }
+    return expired;
+  }
+  /** Deletes a bounded batch of claim and report replies older than the retention window. */
+  async pruneIdempotencyKeys() {
+    const result = await this.query(
+      `DELETE FROM idempotency_keys WHERE key IN (
+         SELECT key FROM idempotency_keys
+         WHERE scope = ANY($1::text[]) AND created_at < now() - ($2::integer * interval '1 hour')
+         ORDER BY created_at
+         LIMIT 1000
+         FOR UPDATE SKIP LOCKED
+       )`,
+      [PRUNED_IDEMPOTENCY_SCOPES, IDEMPOTENCY_RETENTION_HOURS],
+    );
+    return result.rowCount ?? 0;
+  }
+  /** Reconciles at half the lease duration, bounded to between one and thirty seconds. */
+  reconcileIntervalMs() {
+    return Math.max(1000, Math.min(30_000, this.leaseSeconds * 500));
   }
   async startReconciler(onWake: (wake: WorkWake) => void = () => {}) {
     await this.ensureNotificationListener();
@@ -509,10 +653,11 @@ export class PostgresStore {
       try {
         const expired = await this.reconcile();
         onWake({ notified: false, expired });
-      } catch {
+      } catch (error) {
+        this.logger("error", "lease reconciliation failed", { error: errorText(error) });
         onWake({ notified: false, expired: 0, failed: true });
       }
-    }, 30_000);
+    }, this.reconcileIntervalMs());
     timer.unref?.();
     return async () => {
       clearInterval(timer);
@@ -528,6 +673,7 @@ export class PostgresStore {
     idempotencyKey,
   }: RegisterWorkerInput) {
     const effective = { ...capabilities, repositoryDigest, worktreeDigest, projects };
+    // A retried key replays its reply; a worker returning to an earlier digest uses a new key.
     return this.idempotentTransaction(
       operationKey("register", workerId),
       idempotencyKey,
@@ -538,6 +684,7 @@ export class PostgresStore {
         );
         return { workerId, repositoryDigest, worktreeDigest, projects };
       },
+      requestDigest({ workerId, repositoryDigest, worktreeDigest, capabilities }),
     );
   }
   async signalRun({ runId, kind, payload, idempotencyKey }: SignalInput) {
@@ -545,17 +692,27 @@ export class PostgresStore {
       operationKey("signal", runId),
       idempotencyKey,
       async (client) => {
-        const result = await client.query(
-          "INSERT INTO signals (id,run_id,kind,payload) VALUES ($1,$2,$3,$4::jsonb) RETURNING id,kind,payload",
+        const locked = await client.query<{ state: RunState }>(
+          "SELECT state FROM runs WHERE id=$1 FOR UPDATE",
+          [runId],
+        );
+        if (!locked.rowCount) throw Object.assign(new Error("run not found"), { statusCode: 404 });
+        if (!ACTIVE_RUN_STATES.includes(locked.rows[0].state))
+          throw Object.assign(new Error("run is no longer active"), { statusCode: 409 });
+        await client.query(
+          "INSERT INTO signals (id,run_id,kind,payload) VALUES ($1,$2,$3,$4::jsonb)",
           [id(), runId, kind, json(payload)],
         );
-        await client.query("INSERT INTO events (run_id,type,payload) VALUES ($1,$2,$3::jsonb)", [
-          runId,
-          `signal.${kind}`,
-          json(payload),
-        ]);
-        return result.rows[0];
+        // The reply is the appended event, in the shape MemoryStore returns and event pages use.
+        const event = await client.query<StoredEvent>(
+          `INSERT INTO events (run_id,type,payload) VALUES ($1,$2,$3::jsonb)
+           RETURNING id::text AS id,type,payload,traceparent,
+             to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "createdAt"`,
+          [runId, `signal.${kind}`, json(payload)],
+        );
+        return event.rows[0];
       },
+      requestDigest({ runId, kind, payload }),
     );
   }
   async cancelRun({ runId, idempotencyKey }: CancelInput) {
@@ -609,6 +766,7 @@ export class PostgresStore {
         await client.query("SELECT pg_notify('rae_platform_work','cancelled')");
         return result.rows[0];
       },
+      requestDigest({ runId }),
     );
   }
   async rebindRun({
@@ -622,28 +780,51 @@ export class PostgresStore {
       operationKey("rebind", runId),
       idempotencyKey,
       async (client) => {
+        const run = await client.query<{
+          project_id: string;
+          state: RunState;
+          repository_digest: string | null;
+          worktree_digest: string | null;
+        }>(
+          "SELECT project_id,state,repository_digest,worktree_digest FROM runs WHERE id=$1 FOR UPDATE",
+          [runId],
+        );
+        if (!run.rowCount) throw Object.assign(new Error("run not found"), { statusCode: 404 });
         const worker = await client.query<{ capabilities: WorkerCapabilities }>(
           "SELECT capabilities FROM workers WHERE id=$1",
           [workerId],
         );
-        const identity = worker.rows[0]?.capabilities || {};
+        const identity = worker.rows[0]?.capabilities;
+        const projects = identity?.projects ?? [];
+        const { project_id, state } = run.rows[0];
+        // Project membership comes first and every mismatch answers alike, so a rebind cannot be
+        // used to learn which workers other tenants have registered.
         if (
+          !identity ||
+          (!projects.includes("*") && !projects.includes(project_id)) ||
           identity.repositoryDigest !== repositoryDigest ||
-          identity.worktreeDigest !== worktreeDigest
+          identity.worktreeDigest !== worktreeDigest ||
+          // Runs submitted without digests (NULL columns) accept any matching worker.
+          (run.rows[0].repository_digest != null &&
+            run.rows[0].repository_digest !== repositoryDigest) ||
+          (run.rows[0].worktree_digest != null && run.rows[0].worktree_digest !== worktreeDigest)
         )
-          throw Object.assign(new Error("matching repository and worktree digests are required"), {
-            statusCode: 409,
-          });
-        const result = await client.query(
-          'UPDATE runs SET pinned_worker_id=$2 WHERE id=$1 AND repository_digest=$3 AND worktree_digest=$4 RETURNING id,pinned_worker_id AS "workerId"',
-          [runId, workerId, repositoryDigest, worktreeDigest],
+          throw rebindRefused();
+        if (!ACTIVE_RUN_STATES.includes(state))
+          throw Object.assign(new Error("terminal runs cannot be rebound"), { statusCode: 409 });
+        const leased = await client.query(
+          "SELECT 1 FROM leases l JOIN run_nodes n ON n.id=l.node_id WHERE n.run_id=$1 AND l.expires_at > clock_timestamp() LIMIT 1",
+          [runId],
         );
-        if (!result.rowCount)
-          throw Object.assign(new Error("matching repository and worktree digests are required"), {
-            statusCode: 409,
-          });
+        if (leased.rowCount)
+          throw Object.assign(new Error("run has an unexpired lease"), { statusCode: 409 });
+        const result = await client.query<{ runId: string; workerId: string }>(
+          'UPDATE runs SET pinned_worker_id=$2 WHERE id=$1 RETURNING id AS "runId", pinned_worker_id AS "workerId"',
+          [runId, workerId],
+        );
         return result.rows[0];
       },
+      requestDigest({ runId, workerId, repositoryDigest, worktreeDigest }),
     );
   }
   async getRun(runId: string): Promise<RunView | null> {
@@ -705,29 +886,30 @@ export class PostgresStore {
     );
     const snapshot = result.rows[0] || {};
     snapshot.activeWaits = this.workWaiters.size;
+    snapshot.poolTotal = this.pool.totalCount ?? 0;
+    snapshot.poolIdle = this.pool.idleCount ?? 0;
+    snapshot.poolWaiting = this.pool.waitingCount ?? 0;
     return snapshot;
   }
   async claimOnce({
     workerId,
     projects,
     idempotencyKey,
-    persistEmpty,
   }: {
     workerId: string;
     projects: string[];
     idempotencyKey: string;
-    persistEmpty: boolean;
-  }) {
+  }): Promise<{ found: boolean; response: Claim | null }> {
     if (this.closed) throw storeClosedError();
     const scope = operationKey(operationKey("claim", workerId), idempotencyKey);
+    const expected = requestDigest({ workerId });
     return this.transaction(async (client) => {
       await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [scope]);
       const workerResult = await client.query<{ capabilities: WorkerCapabilities }>(
         "SELECT capabilities FROM workers WHERE id=$1 FOR UPDATE",
         [workerId],
       );
-      if (!workerResult.rowCount)
-        throw Object.assign(new Error("worker must register before claiming"), { statusCode: 409 });
+      if (!workerResult.rowCount) throw unregisteredWorkerError();
       const worker = workerResult.rows[0].capabilities;
       const membership = worker.projects ?? [];
       const wildcard = projects.includes("*") && membership.includes("*");
@@ -736,23 +918,16 @@ export class PostgresStore {
         : membership.includes("*")
           ? projects
           : projects.filter((project) => membership.includes(project));
-      const prior = await client.query<{ response: Claim | null }>(
-        "SELECT response FROM idempotency_keys WHERE key=$1",
-        [scope],
-      );
-      if (prior.rowCount) {
-        const response = prior.rows[0].response;
+      const prior = await readIdempotent<Claim | null>(client, scope, expected);
+      if (prior) {
+        const response = prior.response;
         if (response) requireMembership(response.projectId, projects, membership);
         return { found: true, response };
       }
-      if (!wildcard && !permittedProjects.length) {
-        if (persistEmpty)
-          await client.query(
-            "INSERT INTO idempotency_keys (key,scope,response) VALUES ($1,'claim','null'::jsonb)",
-            [scope],
-          );
-        return { found: persistEmpty, response: null };
-      }
+      // Empty results are never persisted: a retried key may still claim newly queued work.
+      if (!wildcard && !permittedProjects.length) return { found: false, response: null };
+      // Skip-locked, bounded reclaim matches the in-memory store without stalling on locked leases.
+      await this.reclaimExpired(client);
       const candidate = await client.query<{
         id: string;
         run_id: string;
@@ -781,14 +956,7 @@ export class PostgresStore {
         ORDER BY n.id FOR UPDATE OF r SKIP LOCKED LIMIT 1`,
         [workerId, wildcard, permittedProjects, worker.repositoryDigest, worker.worktreeDigest],
       );
-      if (!candidate.rowCount) {
-        if (persistEmpty)
-          await client.query(
-            "INSERT INTO idempotency_keys (key,scope,response) VALUES ($1,'claim','null'::jsonb)",
-            [scope],
-          );
-        return { found: persistEmpty, response: null };
-      }
+      if (!candidate.rowCount) return { found: false, response: null };
       const node = candidate.rows[0];
       const fence = Number(node.attempt_count) + 1;
       const leased = await client.query(
@@ -796,9 +964,9 @@ export class PostgresStore {
         [node.id, fence],
       );
       if (!leased.rowCount) return { found: false, response: null };
-      await client.query(
-        "INSERT INTO leases (node_id,worker_id,fence,expires_at) VALUES ($1,$2,$3,now() + interval '60 seconds')",
-        [node.id, workerId, fence],
+      const lease = await client.query<{ expiresAt: Date | string }>(
+        "INSERT INTO leases (node_id,worker_id,fence,expires_at) VALUES ($1,$2,$3,now() + ($4::integer * interval '1 second')) RETURNING expires_at AS \"expiresAt\"",
+        [node.id, workerId, fence, this.leaseSeconds],
       );
       const attemptId = id();
       await client.query(
@@ -815,7 +983,7 @@ export class PostgresStore {
         "SELECT project_id FROM runs WHERE id=$1",
         [node.run_id],
       );
-      const response = {
+      const response: Claim = {
         attemptId,
         nodeId: node.id,
         runId: node.run_id,
@@ -824,13 +992,12 @@ export class PostgresStore {
         access: node.access,
         payload: node.payload,
         fence,
-        leaseSeconds: 60,
-        heartbeatSeconds: 20,
+        leaseSeconds: this.leaseSeconds,
+        heartbeatSeconds: this.heartbeatSeconds,
+        workerId,
+        expiresAt: new Date(lease.rows[0].expiresAt).toISOString(),
       };
-      await client.query(
-        "INSERT INTO idempotency_keys (key,scope,response) VALUES ($1,'claim',$2::jsonb)",
-        [scope, json(response)],
-      );
+      await insertIdempotent(client, scope, "claim", response, expected);
       return { found: true, response };
     });
   }
@@ -849,17 +1016,12 @@ export class PostgresStore {
           waiter?.cancel();
           throw storeClosedError();
         }
-        const attempt = await this.claimOnce({
-          workerId,
-          projects,
-          idempotencyKey,
-          persistEmpty: remainingMs === 0,
-        });
+        const attempt = await this.claimOnce({ workerId, projects, idempotencyKey });
         if (attempt.found) {
           waiter?.cancel();
           return attempt.response;
         }
-        if (!waiter) continue;
+        if (!waiter) return null;
         const wake = await waiter.promise;
         if (wake.cancelled || this.closed) throw storeClosedError();
       } catch (error) {
@@ -877,8 +1039,8 @@ export class PostgresStore {
       if (!owned.rowCount)
         throw Object.assign(new Error("lease missing, expired, or fenced"), { statusCode: 409 });
       const renewed = await client.query(
-        "UPDATE leases SET heartbeat_at=clock_timestamp(),expires_at=clock_timestamp() + interval '60 seconds' WHERE node_id=$1 AND expires_at > clock_timestamp() RETURNING expires_at AS \"expiresAt\"",
-        [nodeId],
+        "UPDATE leases SET heartbeat_at=clock_timestamp(),expires_at=clock_timestamp() + ($2::integer * interval '1 second') WHERE node_id=$1 AND expires_at > clock_timestamp() RETURNING expires_at AS \"expiresAt\"",
+        [nodeId, this.leaseSeconds],
       );
       if (!renewed.rowCount)
         throw Object.assign(new Error("lease missing, expired, or fenced"), { statusCode: 409 });
@@ -898,6 +1060,7 @@ export class PostgresStore {
   }: ReportInput) {
     if (!idempotencyKey)
       throw Object.assign(new Error("Idempotency-Key is required"), { statusCode: 400 });
+    const expected = requestDigest({ outcome, result });
     return this.transaction(async (client) => {
       const scope = operationKey(
         operationKey("report", nodeId, workerId, String(fence)),
@@ -920,11 +1083,8 @@ export class PostgresStore {
         projects,
         membershipRun.rows[0].capabilities.projects ?? [],
       );
-      const prior = await client.query<{ response: ReportResult }>(
-        "SELECT response FROM idempotency_keys WHERE key=$1",
-        [scope],
-      );
-      if (prior.rowCount) return prior.rows[0].response;
+      const prior = await readIdempotent<ReportResult>(client, scope, expected);
+      if (prior) return prior.response;
       const runResult = await client.query<{ id: string; state: RunState }>(
         "SELECT r.id,r.state FROM run_nodes n JOIN runs r ON r.id=n.run_id WHERE n.id=$1 FOR UPDATE OF r",
         [nodeId],
@@ -1003,10 +1163,7 @@ export class PostgresStore {
       }
       await client.query("SELECT pg_notify('rae_platform_work','reported')");
       const response = { state, runState };
-      await client.query(
-        "INSERT INTO idempotency_keys (key,scope,response) VALUES ($1,'report',$2::jsonb)",
-        [scope, json(response)],
-      );
+      await insertIdempotent(client, scope, "report", response, expected);
       return response;
     });
   }
@@ -1043,8 +1200,8 @@ export class MemoryStore {
   events = new Map<string, MemoryEvent[]>();
   revisions = new Map<string, PlatformRevision>();
   active = new Map<string, PlatformRevision>();
-  keys = new Map<string, unknown>();
-  pendingKeys = new Map<string, Promise<unknown>>();
+  keys = new Map<string, MemoryIdempotencyRecord>();
+  pendingKeys = new Map<string, { promise: Promise<unknown>; requestDigest: string | null }>();
   runLocks = new Map<string, Promise<void>>();
   artifacts = new Map<string, MemoryArtifact>();
   outbox: OutboxRecord[] = [];
@@ -1052,7 +1209,15 @@ export class MemoryStore {
   now: () => number;
   closed = false;
   schemaCurrent = true;
-  constructor({ now = () => Date.now() } = {}) {
+  leaseSeconds: number;
+  heartbeatSeconds: number;
+  constructor({
+    now = () => Date.now(),
+    leaseSeconds = 60,
+    heartbeatSeconds = 20,
+  }: { now?: () => number } & LeaseTiming = {}) {
+    this.leaseSeconds = leaseSeconds;
+    this.heartbeatSeconds = heartbeatSeconds;
     this.runs = new Map();
     this.nodes = new Map();
     this.leases = new Map();
@@ -1081,17 +1246,33 @@ export class MemoryStore {
   async isReady() {
     return this.schemaCurrent;
   }
-  async idempotent<T>(scope: string, key: string, operation: () => Promise<T>): Promise<T> {
+  async idempotent<T>(
+    scope: string,
+    key: string,
+    operation: () => Promise<T>,
+    {
+      requestDigest: expected = null,
+      retain = () => true,
+    }: { requestDigest?: string | null; retain?: (result: T) => boolean } = {},
+  ): Promise<T> {
     if (!key) throw Object.assign(new Error("Idempotency-Key is required"), { statusCode: 400 });
     const composite = operationKey(scope, key);
-    if (this.keys.has(composite)) return this.keys.get(composite) as T;
-    if (this.pendingKeys.has(composite)) return this.pendingKeys.get(composite) as Promise<T>;
+    const prior = this.keys.get(composite);
+    if (prior) {
+      assertSameRequest(prior.requestDigest, expected);
+      return prior.response as T;
+    }
+    const inFlight = this.pendingKeys.get(composite);
+    if (inFlight) {
+      assertSameRequest(inFlight.requestDigest, expected);
+      return inFlight.promise as Promise<T>;
+    }
     const pending = (async () => {
       const result = await operation();
-      this.keys.set(composite, result);
+      if (retain(result)) this.keys.set(composite, { response: result, requestDigest: expected });
       return result;
     })();
-    this.pendingKeys.set(composite, pending);
+    this.pendingKeys.set(composite, { promise: pending, requestDigest: expected });
     try {
       return await pending;
     } finally {
@@ -1181,36 +1362,50 @@ export class MemoryStore {
       throw Object.assign(new Error("run envelope exceeds 256 KiB"), { statusCode: 413 });
     if (digest(revision.definition) !== revision.digest)
       throw Object.assign(new Error("run revision digest mismatch"), { statusCode: 409 });
-    return this.idempotent(operationKey("submit", projectId), idempotencyKey, async () => {
-      const run: MemoryRun = {
-        id: id(),
-        projectId,
-        state: RUN_STATE.QUEUED,
-        request,
-        revision,
-        traceparent,
-        repositoryDigest,
-        worktreeDigest,
-        pinnedWorkerId: null,
-        createdAt: this.timestamp(),
-        updatedAt: this.timestamp(),
-      };
-      this.runs.set(run.id, run);
-      this.events.set(run.id, []);
-      this.appendEvent(run.id, "run.queued", { runId: run.id }, traceparent);
-      this.appendOutbox("run.queued", { runId: run.id, traceparent });
-      for (const node of nodes)
-        this.nodes.set(id(), {
-          runId: run.id,
-          key: node.key,
-          payload: node.payload || {},
-          access: node.access || "read",
-          state: NODE_STATE.QUEUED,
-          attempts: 0,
-        });
-      this.notifyWork();
-      return { id: run.id, state: run.state };
+    const expected = requestDigest({
+      projectId,
+      revision,
+      nodes,
+      request,
+      repositoryDigest,
+      worktreeDigest,
     });
+    // The scope matches PostgresStore, which namespaces run submissions as "run".
+    return this.idempotent(
+      operationKey("run", projectId),
+      idempotencyKey,
+      async () => {
+        const run: MemoryRun = {
+          id: id(),
+          projectId,
+          state: RUN_STATE.QUEUED,
+          request,
+          revision,
+          traceparent,
+          repositoryDigest,
+          worktreeDigest,
+          pinnedWorkerId: null,
+          createdAt: this.timestamp(),
+          updatedAt: this.timestamp(),
+        };
+        this.runs.set(run.id, run);
+        this.events.set(run.id, []);
+        this.appendEvent(run.id, "run.queued", { runId: run.id }, traceparent);
+        this.appendOutbox("run.queued", { runId: run.id, traceparent });
+        for (const node of nodes)
+          this.nodes.set(id(), {
+            runId: run.id,
+            key: node.key,
+            payload: node.payload || {},
+            access: node.access || "read",
+            state: NODE_STATE.QUEUED,
+            attempts: 0,
+          });
+        this.notifyWork();
+        return { id: run.id, state: run.state };
+      },
+      { requestDigest: expected },
+    );
   }
   async getRun(runId: string) {
     return this.runs.get(runId) || null;
@@ -1267,25 +1462,30 @@ export class MemoryStore {
         Array.isArray(document.nodes));
     if (!valid)
       throw Object.assign(new Error("workflow.nodes must be an array"), { statusCode: 400 });
-    return this.idempotent(operationKey("revision", projectId, kind), idempotencyKey, async () => {
-      const record = {
-        id: id(),
-        projectId,
-        kind,
-        digest: actual,
-        document,
-        validation: { valid, errors: [] },
-      };
-      for (const revision of this.revisions.values())
-        if (
-          revision.projectId === projectId &&
-          revision.kind === kind &&
-          revision.digest === actual
-        )
-          return revision;
-      this.revisions.set(record.id, record);
-      return record;
-    });
+    return this.idempotent(
+      operationKey("revision", projectId, kind),
+      idempotencyKey,
+      async () => {
+        const record = {
+          id: id(),
+          projectId,
+          kind,
+          digest: actual,
+          document,
+          validation: { valid, errors: [] },
+        };
+        for (const revision of this.revisions.values())
+          if (
+            revision.projectId === projectId &&
+            revision.kind === kind &&
+            revision.digest === actual
+          )
+            return revision;
+        this.revisions.set(record.id, record);
+        return record;
+      },
+      { requestDigest: requestDigest({ projectId, kind, document, expectedDigest }) },
+    );
   }
   async getRevision(revisionId: string) {
     return this.revisions.get(revisionId) || null;
@@ -1308,20 +1508,25 @@ export class MemoryStore {
     expectedDigest,
     idempotencyKey,
   }: ActivateRevisionInput) {
-    return this.idempotent(operationKey("activate", projectId, kind), idempotencyKey, async () => {
-      const revision = await this.getRevision(revisionId);
-      if (
-        !revision ||
-        revision.projectId !== projectId ||
-        revision.kind !== kind ||
-        revision.digest !== expectedDigest
-      )
-        throw Object.assign(new Error("exact revision digest confirmation required"), {
-          statusCode: 409,
-        });
-      this.active.set(`${projectId}:${kind}`, revision);
-      return { revisionId, digest: expectedDigest };
-    });
+    return this.idempotent(
+      operationKey("activate", projectId, kind),
+      idempotencyKey,
+      async () => {
+        const revision = await this.getRevision(revisionId);
+        if (
+          !revision ||
+          revision.projectId !== projectId ||
+          revision.kind !== kind ||
+          revision.digest !== expectedDigest
+        )
+          throw Object.assign(new Error("exact revision digest confirmation required"), {
+            statusCode: 409,
+          });
+        this.active.set(`${projectId}:${kind}`, revision);
+        return { revisionId, digest: expectedDigest };
+      },
+      { requestDigest: requestDigest({ projectId, kind, revisionId, expectedDigest }) },
+    );
   }
   async registerWorker({
     workerId,
@@ -1331,18 +1536,25 @@ export class MemoryStore {
     projects = [],
     idempotencyKey,
   }: RegisterWorkerInput) {
-    return this.idempotent(operationKey("register", workerId), idempotencyKey, async () => {
-      const worker = {
-        workerId,
-        repositoryDigest,
-        worktreeDigest,
-        capabilities,
-        projects,
-        lastSeenAt: new Date().toISOString(),
-      };
-      this.workers.set(workerId, worker);
-      return worker;
-    });
+    return this.idempotent(
+      operationKey("register", workerId),
+      idempotencyKey,
+      async () => {
+        const worker = {
+          workerId,
+          repositoryDigest,
+          worktreeDigest,
+          capabilities,
+          projects,
+          lastSeenAt: new Date().toISOString(),
+        };
+        this.workers.set(workerId, worker);
+        return { workerId, repositoryDigest, worktreeDigest, projects };
+      },
+      {
+        requestDigest: requestDigest({ workerId, repositoryDigest, worktreeDigest, capabilities }),
+      },
+    );
   }
   reclaimExpired() {
     let reclaimed = 0;
@@ -1359,11 +1571,10 @@ export class MemoryStore {
     if (reclaimed) this.notifyWork({ notified: true, expired: reclaimed });
     return reclaimed;
   }
-  claimOnce({ workerId, projects }: { workerId: string; projects: string[] }) {
+  claimOnce({ workerId, projects }: { workerId: string; projects: string[] }): Claim | null {
     if (this.closed) throw storeClosedError();
     const worker = this.workers.get(workerId);
-    if (!worker)
-      throw Object.assign(new Error("worker must register before claiming"), { statusCode: 409 });
+    if (!worker) throw unregisteredWorkerError();
     this.reclaimExpired();
     const wildcard = projects.includes("*") && worker.projects.includes("*");
     const permitted = projects.includes("*")
@@ -1397,7 +1608,7 @@ export class MemoryStore {
       run.pinnedWorkerId ||= workerId;
       run.state = RUN_STATE.RUNNING;
       run.updatedAt = this.timestamp();
-      const claim = {
+      const lease: MemoryLease = {
         attemptId: id(),
         nodeId,
         runId: node.runId,
@@ -1406,13 +1617,14 @@ export class MemoryStore {
         access: node.access,
         payload: node.payload,
         fence,
-        leaseSeconds: 60,
-        heartbeatSeconds: 20,
+        leaseSeconds: this.leaseSeconds,
+        heartbeatSeconds: this.heartbeatSeconds,
         workerId,
-        expiresAt: this.now() + 60000,
+        expiresAt: this.now() + this.leaseSeconds * 1000,
       };
-      this.leases.set(nodeId, claim);
-      return claim;
+      this.leases.set(nodeId, lease);
+      // The reply is a detached copy so later heartbeats never mutate a cached idempotent result.
+      return { ...lease, expiresAt: new Date(lease.expiresAt).toISOString() };
     }
     return null;
   }
@@ -1441,10 +1653,11 @@ export class MemoryStore {
           if (wake.cancelled || this.closed) throw storeClosedError();
         }
       },
+      // Empty results are never persisted: a retried key may still claim newly queued work.
+      { requestDigest: requestDigest({ workerId }), retain: (claim) => claim !== null },
     );
     const worker = this.workers.get(workerId);
-    if (!worker)
-      throw Object.assign(new Error("worker must register before claiming"), { statusCode: 409 });
+    if (!worker) throw unregisteredWorkerError();
     if (response) requireMembership(response.projectId, projects, worker.projects);
     return response;
   }
@@ -1464,7 +1677,7 @@ export class MemoryStore {
       lease.expiresAt <= this.now()
     )
       throw Object.assign(new Error("lease missing, expired, or fenced"), { statusCode: 409 });
-    lease.expiresAt = this.now() + 60000;
+    lease.expiresAt = this.now() + this.leaseSeconds * 1000;
     return { expiresAt: new Date(lease.expiresAt).toISOString() };
   }
   async report({
@@ -1531,39 +1744,57 @@ export class MemoryStore {
           return { state, runState: run.state };
         });
       },
+      { requestDigest: requestDigest({ outcome, result }) },
     );
   }
   async signalRun({ runId, kind, payload, idempotencyKey }: SignalInput) {
-    return this.idempotent(operationKey("signal", runId), idempotencyKey, async () => {
-      return this.appendEvent(runId, `signal.${kind}`, payload);
-    });
+    return this.idempotent(
+      operationKey("signal", runId),
+      idempotencyKey,
+      async () =>
+        this.withRunLock(runId, async () => {
+          const run = this.runs.get(runId);
+          if (!run) throw Object.assign(new Error("run not found"), { statusCode: 404 });
+          if (!ACTIVE_RUN_STATES.includes(run.state))
+            throw Object.assign(new Error("run is no longer active"), { statusCode: 409 });
+          const event = this.appendEvent(runId, `signal.${kind}`, payload);
+          if (!event) throw Object.assign(new Error("run not found"), { statusCode: 404 });
+          return { ...event, id: String(event.id) };
+        }),
+      { requestDigest: requestDigest({ runId, kind, payload }) },
+    );
   }
   async cancelRun({ runId, idempotencyKey }: CancelInput) {
-    return this.idempotent(operationKey("cancel", runId), idempotencyKey, async () => {
-      return this.withRunLock(runId, async () => {
-        const run = this.runs.get(runId);
-        if (!run) throw Object.assign(new Error("run not found"), { statusCode: 404 });
-        if (!([RUN_STATE.QUEUED, RUN_STATE.RUNNING] as readonly RunState[]).includes(run.state))
-          throw Object.assign(new Error("run cannot be cancelled"), { statusCode: 409 });
-        run.state = RUN_STATE.CANCELLED;
-        run.cancelledAt = this.timestamp();
-        run.updatedAt = run.cancelledAt;
-        for (const [nodeId, node] of this.nodes) {
-          if (
-            node.runId !== runId ||
-            !([NODE_STATE.QUEUED, NODE_STATE.LEASED] as readonly NodeState[]).includes(node.state)
-          )
-            continue;
-          node.state = NODE_STATE.CANCELLED;
-          this.leases.delete(nodeId);
-        }
-        const payload = { runId, state: run.state, completedAt: run.cancelledAt };
-        this.appendEvent(runId, "run.cancelled", payload, null, run.cancelledAt);
-        this.appendOutbox("run.cancelled", payload, run.cancelledAt);
-        this.notifyWork();
-        return { id: runId, state: run.state, cancelledAt: run.cancelledAt };
-      });
-    });
+    return this.idempotent(
+      operationKey("cancel", runId),
+      idempotencyKey,
+      async () => {
+        return this.withRunLock(runId, async () => {
+          const run = this.runs.get(runId);
+          if (!run) throw Object.assign(new Error("run not found"), { statusCode: 404 });
+          if (!([RUN_STATE.QUEUED, RUN_STATE.RUNNING] as readonly RunState[]).includes(run.state))
+            throw Object.assign(new Error("run cannot be cancelled"), { statusCode: 409 });
+          run.state = RUN_STATE.CANCELLED;
+          run.cancelledAt = this.timestamp();
+          run.updatedAt = run.cancelledAt;
+          for (const [nodeId, node] of this.nodes) {
+            if (
+              node.runId !== runId ||
+              !([NODE_STATE.QUEUED, NODE_STATE.LEASED] as readonly NodeState[]).includes(node.state)
+            )
+              continue;
+            node.state = NODE_STATE.CANCELLED;
+            this.leases.delete(nodeId);
+          }
+          const payload = { runId, state: run.state, completedAt: run.cancelledAt };
+          this.appendEvent(runId, "run.cancelled", payload, null, run.cancelledAt);
+          this.appendOutbox("run.cancelled", payload, run.cancelledAt);
+          this.notifyWork();
+          return { id: runId, state: run.state, cancelledAt: run.cancelledAt };
+        });
+      },
+      { requestDigest: requestDigest({ runId }) },
+    );
   }
   async rebindRun({
     runId,
@@ -1572,23 +1803,36 @@ export class MemoryStore {
     worktreeDigest,
     idempotencyKey,
   }: RebindInput) {
-    return this.idempotent(operationKey("rebind", runId), idempotencyKey, async () => {
-      const run = this.runs.get(runId);
-      const worker = this.workers.get(workerId);
-      if (
-        !run ||
-        !worker ||
-        run.repositoryDigest !== repositoryDigest ||
-        run.worktreeDigest !== worktreeDigest ||
-        worker.repositoryDigest !== repositoryDigest ||
-        worker.worktreeDigest !== worktreeDigest
-      )
-        throw Object.assign(new Error("matching repository and worktree digests are required"), {
-          statusCode: 409,
-        });
-      run.pinnedWorkerId = workerId;
-      return { runId, workerId };
-    });
+    const expected = requestDigest({ runId, workerId, repositoryDigest, worktreeDigest });
+    return this.idempotent(
+      operationKey("rebind", runId),
+      idempotencyKey,
+      async () => {
+        const run = this.runs.get(runId);
+        if (!run) throw Object.assign(new Error("run not found"), { statusCode: 404 });
+        const worker = this.workers.get(workerId);
+        // Project membership comes first and every mismatch answers alike (see PostgresStore).
+        if (
+          !worker ||
+          (!worker.projects.includes("*") && !worker.projects.includes(run.projectId)) ||
+          worker.repositoryDigest !== repositoryDigest ||
+          worker.worktreeDigest !== worktreeDigest ||
+          (run.repositoryDigest != null && run.repositoryDigest !== repositoryDigest) ||
+          (run.worktreeDigest != null && run.worktreeDigest !== worktreeDigest)
+        )
+          throw rebindRefused();
+        if (!ACTIVE_RUN_STATES.includes(run.state))
+          throw Object.assign(new Error("terminal runs cannot be rebound"), { statusCode: 409 });
+        const now = this.now();
+        if (
+          [...this.leases.values()].some((lease) => lease.runId === runId && lease.expiresAt > now)
+        )
+          throw Object.assign(new Error("run has an unexpired lease"), { statusCode: 409 });
+        run.pinnedWorkerId = workerId;
+        return { runId, workerId };
+      },
+      { requestDigest: expected },
+    );
   }
   private artifactOwner(request: ArtifactOwner): { lease: MemoryLease; node: MemoryNode } {
     const lease = this.leases.get(request.nodeId),
@@ -1633,7 +1877,30 @@ export class MemoryStore {
     request: Parameters<ArtifactStore["reserveArtifact"]>[0],
   ): Promise<ArtifactRecord> {
     const { lease, node } = this.artifactOwner(request);
-    if (this.artifacts.has(request.artifactId)) artifactConflict();
+    const existing = this.artifacts.get(request.artifactId);
+    if (existing) {
+      if (
+        existing.attemptId !== lease.attemptId ||
+        existing.workerId !== request.workerId ||
+        existing.nodeId !== request.nodeId ||
+        String(existing.fence) !== String(request.fence)
+      )
+        artifactConflict();
+      assertSameRequest(
+        requestDigest({
+          objectKey: existing.objectKey,
+          sha256: existing.expectedSha256,
+          sizeBytes: Number(existing.expectedSizeBytes),
+        }),
+        requestDigest({
+          objectKey: request.objectKey,
+          sha256: request.expectedSha256,
+          sizeBytes: request.expectedSizeBytes,
+        }),
+      );
+      if (existing.state !== "reserved") artifactConflict();
+      return { ...existing };
+    }
     const artifact: MemoryArtifact = {
       id: request.artifactId,
       runId: node.runId,
@@ -1723,9 +1990,11 @@ export class MemoryStore {
   }
 }
 
+import { WORKER_UNREGISTERED } from "./store-types.js";
 import type {
   PgPool,
   PgClient,
+  PgQuery,
   WorkWake,
   CreateRunInput,
   RegisterWorkerInput,
@@ -1760,6 +2029,16 @@ import type {
   ArtifactOwner,
   VerificationRequest,
 } from "./artifacts.js";
+interface MemoryIdempotencyRecord {
+  response: unknown;
+  requestDigest: string | null;
+}
+interface PoolSettings {
+  max?: number;
+  idleTimeoutMillis?: number;
+  statementTimeoutMs?: number;
+  logger?: (level: string, message: string, fields?: Record<string, unknown>) => unknown;
+}
 interface MemoryArtifact extends ArtifactRecord {
   attemptId: string;
   verificationAttempts: number;

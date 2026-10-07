@@ -24,7 +24,14 @@ const configSchema = z.object({
       publicBaseUrl: z.url().optional(),
     })
     .prefault({}),
-  database: z.object({ url: z.string().min(1) }),
+  database: z.object({
+    url: z.string().min(1),
+    // Permits an OIDC deployment to connect without sslmode=verify-full; never set it in hosted use.
+    allowInsecure: z.boolean().default(false),
+    // Sent as the `-c statement_timeout` startup option; 0 omits it for PgBouncer or RDS Proxy,
+    // which reject startup options.
+    statementTimeoutMs: z.coerce.number().int().min(0).max(3_600_000).default(30_000),
+  }),
   oidc: z
     .object({
       issuer: z.url(),
@@ -37,6 +44,12 @@ const configSchema = z.object({
         .default(["RS256"]),
     })
     .optional(),
+  auth: z
+    .object({
+      // Upper bound on exp - iat so a leaked long-lived token cannot be replayed indefinitely.
+      maxTokenLifetimeSeconds: z.coerce.number().int().min(60).max(604_800).default(86_400),
+    })
+    .prefault({}),
   storage: z
     .object({
       bucket: z.string().min(1),
@@ -50,9 +63,13 @@ const configSchema = z.object({
       development: z.boolean().default(false),
       allowInsecureAuth: z.boolean().default(false),
       allowInsecureHttp: z.boolean().default(false),
-      leaseSeconds: z.coerce.number().int().min(60).max(60).default(60),
-      heartbeatSeconds: z.coerce.number().int().min(20).max(20).default(20),
+      leaseSeconds: z.coerce.number().int().min(10).max(3600).default(60),
+      heartbeatSeconds: z.coerce.number().int().min(1).max(1800).default(20),
     })
+    .refine(
+      (value) => value.heartbeatSeconds < value.leaseSeconds / 2,
+      "platform.heartbeatSeconds must be less than half of platform.leaseSeconds",
+    )
     .prefault({}),
 });
 
@@ -144,6 +161,27 @@ function assertConfigurationTransport(config: PlatformConfig) {
   }
 }
 
+/** Lists the Host header names accepted by the platform listener. */
+export function platformAllowedHosts(config: PlatformConfig) {
+  const hosts = [config.server.host];
+  if (config.server.publicBaseUrl) hosts.push(new URL(config.server.publicBaseUrl).hostname);
+  return hosts.filter((host) => host.length > 0);
+}
+
+function assertDatabaseTransport(config: PlatformConfig) {
+  if (!config.oidc || config.database.allowInsecure) return;
+  let sslmode: string | null = null;
+  try {
+    sslmode = new URL(config.database.url).searchParams.get("sslmode");
+  } catch {
+    sslmode = null;
+  }
+  if (sslmode !== "verify-full")
+    throw new Error(
+      "database.url must use sslmode=verify-full with OIDC unless database.allowInsecure=true",
+    );
+}
+
 export async function loadConfig(path = process.env.RAE_PLATFORM_CONFIG) {
   if (!path) throw new Error("RAE_PLATFORM_CONFIG must point to a TOML configuration file");
   const parsed = configSchema.parse(parseToml(await fs.readFile(path, "utf8")));
@@ -155,6 +193,7 @@ export async function loadConfig(path = process.env.RAE_PLATFORM_CONFIG) {
   assertInsecureConfigurationIsDevelopment(parsed.platform);
   assertInsecureConfigurationIsLoopback(parsed);
   assertConfigurationTransport(parsed);
+  assertDatabaseTransport(parsed);
   return parsed;
 }
 

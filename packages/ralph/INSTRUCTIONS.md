@@ -31,7 +31,7 @@ You are running inside a story-driven Ralph loop.
 - No broad refactors.
 - No security/auth architecture changes unless explicitly required by the story.
 - Rerun relevant best-effort checks when possible and document outcomes.
-- If the runner requires a learnings update, append at least one reusable entry to `learnings.md`.
+- If the runner requires a learnings update, append at least one reusable entry to the `learnings.md` path named in the prompt.
 
 ## Guardrails
 

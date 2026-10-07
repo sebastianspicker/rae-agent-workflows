@@ -39,6 +39,10 @@ if (command === "doctor") {
       "platform URL, token, stable worker ID, project map, repository digest, and worktree digest are required",
     );
   const workerId = process.env.RAE_WORKER_ID;
+  // SIGTERM and SIGINT abort the poll, heartbeat and execution instead of killing mid-claim.
+  const shutdown = new AbortController();
+  process.once("SIGTERM", () => shutdown.abort());
+  process.once("SIGINT", () => shutdown.abort());
   await runWorker({
     baseUrl,
     token,
@@ -47,6 +51,7 @@ if (command === "doctor") {
     worktreeDigest: process.env.RAE_WORKTREE_DIGEST,
     allowInsecureDevelopment: process.env.RAE_PLATFORM_ALLOW_INSECURE_DEVELOPMENT === "true",
     execute: createLocalClaimExecutor({ projectMapFile: process.env.RAE_PROJECT_MAP_FILE }),
+    signal: shutdown.signal,
   });
 } else {
   throw new Error("usage: rae-platform-worker <doctor|run>");

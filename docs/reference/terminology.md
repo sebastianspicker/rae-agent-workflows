@@ -1,7 +1,7 @@
 ---
 status: stable
 owner: core
-last_reviewed: 2026-08-04
+last_reviewed: 2026-10-07
 source_of_truth: editorial
 evidence_links: claims/claims-ledger.md
 ---
@@ -68,8 +68,6 @@ benchmark interpretation, and governance claims from drifting apart.
 
 - [Diataxis](claims/bibliography.md#src-diataxis)
 - [Shannon 1948](claims/bibliography.md#src-shannon-1948)
-- [Model Cards](claims/bibliography.md#src-model-cards)
-- [Datasheets](claims/bibliography.md#src-datasheets)
 - [NIST GenAI Profile](claims/bibliography.md#src-nist-genai-profile)
 - [IEEE 1012](claims/bibliography.md#src-ieee-1012)
 - [OpenAI evals guidance](claims/bibliography.md#src-openai-evals)

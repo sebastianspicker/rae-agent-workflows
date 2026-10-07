@@ -63,6 +63,14 @@ node dist/src/cli.js --check
 node dist/src/cli.js --doctor
 node dist/src/cli.js --status
 node dist/src/cli.js --list-stories
+```
+
+`--dry-run [N]` previews up to N open stories (report paths only) without
+invoking Codex, archiving, switching branches, or recovering transactions. It
+is read-only: it takes no run lock, creates no runtime directory, and writes no
+logs, and it never prints `<promise>COMPLETE</promise>`.
+
+```bash
 node dist/src/cli.js --dry-run 3
 ```
 
@@ -73,6 +81,7 @@ node dist/src/cli.js --export-state > state.json
 node dist/src/cli.js --import-state state.json
 node dist/src/cli.js --reset-story FIX-001
 node dist/src/cli.js --retry-failed
+node dist/src/cli.js --discard-transaction <journal-id> [--force]
 node dist/src/cli.js --aggregate-reports
 ```
 
@@ -94,6 +103,29 @@ provider failure, `5` lock failure, and `6` security-preflight failure.
 - `INSTRUCTIONS.md` supplies the task rules used for every story.
 - Optional `learnings.md` updates can be required after successful fixing
   stories.
+- A fixing story may write only paths matching its `scope`, its report path,
+  and (when required) `learnings.md`. Every other path inside the Ralph package
+  (`prd.json`, `INSTRUCTIONS.md`, `prd.schema.json`, `dist/`, `node_modules/`) is
+  never writable, whatever the scope says.
+- A fixed denylist applies at any depth, independent of story scope:
+  `.github/`, `.claude/`, `.codex/`, `.husky/`, `.git/`, `AGENTS.md`,
+  `CLAUDE.md`, `.gitignore`, `.gitattributes`, `package.json` and dependency
+  lockfiles. Only the story's own report path is exempt.
+- Promoted symlinks must be relative and resolve inside the repository.
+- Story titles, scope patterns and step titles must be single lines. The prompt
+  puts `INSTRUCTIONS.md` and the mode guardrails first and passes the story as a
+  delimited JSON data block.
+- `<promise>COMPLETE</promise>` is printed only when every story in the mode
+  passed; skipped stories are reported as "N stories skipped" instead.
+- Under the umbrella CLI the target repository is the Git top level of the
+  calling directory; a bootstrapped install targets its parent repository.
+  Without either, Ralph uses a working directory that holds `prd.json` and
+  `INSTRUCTIONS.md`, then the Git top level of the working directory. Set
+  `RALPH_REPO_ROOT` to override.
+- When the Ralph package lies outside the target repository (for example
+  `npm run rae -- ralph` from another checkout), Ralph reads `prd.json` and
+  `INSTRUCTIONS.md` from the working directory, which must be inside the target
+  repository, and keeps runtime state in `<repo>/.runtime/ralph`.
 
 See `prd.json.example` and `prd.schema.json` for the supported fields.
 
@@ -105,8 +137,14 @@ Execution:
 
 - `MODE`: `audit`, `linting`, or `fixing`
 - `RALPH_REPO_ROOT`: explicit target root
-- `RALPH_MODEL`: model identifier; default `gpt-5.3`
-- `RALPH_REASONING_EFFORT`: reasoning setting; default `high`
+- `RALPH_STATE_DIR`: runtime state directory, absolute or relative to the target
+  root; it must resolve inside the target repository. Default: the package
+  `.runtime/` when the package is inside the target repository, otherwise
+  `<repo>/.runtime/ralph`
+- `RALPH_MODEL`: model identifier; overrides `defaults.model_default`, which
+  falls back to `gpt-5.3` when omitted from `prd.json`
+- `RALPH_REASONING_EFFORT`: reasoning setting; overrides
+  `defaults.reasoning_effort_default`, which falls back to `high` when omitted
 - `RALPH_TIMEOUT_SECONDS`: positive per-story deadline; default `900`
 - `RALPH_MAX_ATTEMPTS_PER_STORY`: transient-failure attempt count; default `1`
 - `RALPH_SKIP_AFTER_FAILURES`: persistent-failure threshold; default `0`
@@ -117,10 +155,13 @@ Execution:
 
 Safety and state:
 
-- `RALPH_SECURITY_PREFLIGHT`: scan for sensitive environment variables;
-  default `true`
-- `RALPH_SECURITY_PREFLIGHT_FAIL_ON_RISK`: fail when that scan finds a risk;
-  default `false`
+- `RALPH_SECURITY_PREFLIGHT`: scan the forwarded provider environment for
+  sensitive variable names and for credentials in values (user:password in
+  proxy URLs, token-shaped values); default `true`. `OPENAI_API_KEY` is
+  forwarded on purpose and logged as a note. Sensitive variables that exist
+  only in the parent environment are reported as information.
+- `RALPH_SECURITY_PREFLIGHT_FAIL_ON_RISK`: fail when the forwarded environment
+  has a risk; default `false`
 - `RALPH_STRICT_REPORT_DIR`: confine reports to `defaults.report_dir`; default
   `true`
 - `RALPH_TRANSACTION_METADATA_ROOT`: absolute private directory for fixing
@@ -175,7 +216,9 @@ repositories, and submodules are rejected.
 
 - `.runtime/events.log`: lifecycle events
 - `.runtime/run.log`: optional redacted provider output
-- `.runtime/.run.lock`: single-run lock
+- `.runtime/.run.lock`: single-run lock (PID, host name, process start time; a
+  lock from another host is never reclaimed automatically, a recycled PID is
+  detected by its start time, and PID 0 or 1 is treated as PID-less)
 - `.runtime/.fixing-quarantine/`: package-local failure evidence
 - `progress.log.md`: optional local completion log
 - `~/.local/state/ralph-fs-transactions/`: default private fixing journals,
@@ -217,8 +260,23 @@ npm --prefix ../.. run verify -- --skip-install
   `defaults.report_dir`.
 - If a lock has no live process ID, wait for
   `RALPH_STALE_LOCK_NO_PID_SECONDS` or inspect the lock with `--doctor`.
-- If a fixing run stops during promotion, preserve the private transaction
-  directory and run the documented recovery path before retrying the story.
+- If a fixing run stops during promotion, the next run recovers the journaled
+  transaction automatically. If recovery reports a conflict with concurrent live
+  changes, or a provider stopped with uncertain containment (automatic cleanup
+  is then refused), find the journal id with `--doctor` or in the recovery
+  error, inspect the evidence paths, then run
+  `--discard-transaction <journal-id>`. It moves the mirror, external quarantine
+  and journal (journal first) under `<state dir>/discarded/` and removes the
+  pointer; pieces that are already missing (for example a mirror reaped by the
+  OS) are skipped and reported, so the command can be repeated safely. If the
+  journal could not be marked uncertain, `<state dir>/containment-uncertain`
+  blocks automatic recovery until the discard clears it.
+  It is refused once promotion has started unless `--force` is added; with
+  `--force`, sibling backups stay where they are in the live tree and Ralph
+  prints every live path that may be half-promoted. Ralph never restores live
+  files during a discard.
+- If a transaction pointer references a missing journal, Ralph warns and keeps
+  the pointer; remove it with `--discard-transaction <journal-id> --force`.
 - If provider output is needed for diagnosis, enable
   `RALPH_CAPTURE_TOOL_OUTPUT=true`; review `.runtime/run.log` for private data
   before sharing it.

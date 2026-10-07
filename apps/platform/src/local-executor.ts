@@ -59,9 +59,16 @@ function prepareRequest(
     throw new Error("claim does not match the worker's snapshotted execution profile");
   if (!Object.hasOwn(loaded.profile.node_capability_sets, claim.nodeKey))
     throw new Error("claim node is absent from the execution profile's exact capability map");
+  // The worker, not the submitter, decides which nodes may write; unlisted nodes are read-only.
+  if (claim.access === "write" && !project.writeNodes.includes(claim.nodeKey))
+    throw new Error("worker configuration marks this claim node read-only; write claim refused");
   const capabilities = resolveNodeCapabilities(loaded.profile, claim.nodeKey);
   if (!capabilities) throw new Error("hosted claims require an explicit capability set");
   const execution = loaded.profile.tiers[payload.tier];
+  if (!execution)
+    throw new Error(
+      `execution profile ${project.profile} does not define logical tier ${payload.tier}`,
+    );
   const runtime = prepareHostedAttempt(
     project.root,
     claim.runId,

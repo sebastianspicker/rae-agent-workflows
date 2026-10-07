@@ -6,6 +6,13 @@ import { parse as parseToml } from "smol-toml";
 
 const MAX_MAP_BYTES = 64 * 1024;
 
+/** A mapped project; only nodes listed in writeNodes may receive write claims. */
+export type ProjectMapEntry = Readonly<{
+  root: string;
+  profile: string;
+  writeNodes: readonly string[];
+}>;
+
 /** Validates the immutable file descriptor used for the private project map. */
 export function validateProjectMapFileStat(stat: fs.Stats) {
   if (
@@ -31,10 +38,24 @@ export function assertStableProjectMapDescriptor(before: fs.Stats, after: fs.Sta
   }
 }
 
+const SAFE_ID = /^[A-Za-z0-9._-]{1,128}$/;
+
+/** Reads the node keys this worker lets write; absent means every node is read-only. */
+function writeNodeKeys(projectId: string, value: object): readonly string[] {
+  if (!("writeNodes" in value) || value.writeNodes === undefined) return Object.freeze([]);
+  const nodes = value.writeNodes;
+  if (
+    !Array.isArray(nodes) ||
+    nodes.some((node: unknown) => typeof node !== "string" || !SAFE_ID.test(node))
+  )
+    throw new Error(`invalid project map entry: ${projectId}`);
+  return Object.freeze([...new Set<string>(nodes)]);
+}
+
 /** Validates one untrusted TOML descriptor before resolving it on the worker. */
 export function validateProjectMapEntry(projectId: string, value: unknown) {
   if (
-    !/^[A-Za-z0-9._-]{1,128}$/.test(projectId) ||
+    !SAFE_ID.test(projectId) ||
     !value ||
     typeof value !== "object" ||
     !("root" in value) ||
@@ -46,7 +67,11 @@ export function validateProjectMapEntry(projectId: string, value: unknown) {
   ) {
     throw new Error(`invalid project map entry: ${projectId}`);
   }
-  return { root: value.root, profile: value.profile };
+  return {
+    root: value.root,
+    profile: value.profile,
+    writeNodes: writeNodeKeys(projectId, value),
+  };
 }
 
 function canonicalGitRoot(projectId: string, rootPath: string) {
@@ -82,11 +107,18 @@ export function loadProjectMap(filePath: string) {
     const parsed = parseToml(source);
     if (!parsed.projects || typeof parsed.projects !== "object" || Array.isArray(parsed.projects))
       throw new Error("project map must define [projects.<id>] entries");
-    const projects = new Map<string, Readonly<{ root: string; profile: string }>>();
+    const projects = new Map<string, ProjectMapEntry>();
     for (const [projectId, value] of Object.entries(parsed.projects)) {
       const entry = validateProjectMapEntry(projectId, value);
       const root = canonicalGitRoot(projectId, entry.root);
-      projects.set(projectId, Object.freeze({ root, profile: path.resolve(entry.profile) }));
+      projects.set(
+        projectId,
+        Object.freeze({
+          root,
+          profile: path.resolve(entry.profile),
+          writeNodes: entry.writeNodes,
+        }),
+      );
     }
     return projects;
   } finally {

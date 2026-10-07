@@ -5,7 +5,7 @@ import {
   validateExecutionProfile,
   type ExecutionProfile,
 } from "./execution-profile.js";
-import { validateWorkflow, type WorkflowContract } from "./workflow-contract.js";
+import { FINDING_SCHEMA, validateWorkflow, type WorkflowContract } from "./workflow-contract.js";
 
 type TemplateId =
   | "single-agent-verification"
@@ -28,7 +28,9 @@ interface TemplateOptions {
   quorum_threshold?: number;
 }
 
-type TemplateBudgets = Required<NonNullable<WorkflowsWorkflowV21["budgets"]>>;
+type TemplateBudgets = Required<
+  Pick<NonNullable<WorkflowsWorkflowV21["budgets"]>, keyof typeof DEFAULT_BUDGETS>
+>;
 interface TemplateIdentity {
   schema_version: "2.1.0";
   workflow_id: string;
@@ -200,6 +202,38 @@ function singleAgentVerification(identity: TemplateIdentity): WorkflowsWorkflowV
   };
 }
 
+const OWNERSHIP_PLAN_CONTRACT = {
+  type: "object",
+  additionalProperties: false,
+  required: ["summary", "findings", "file_ownership", "documentation"],
+  properties: {
+    summary: { type: "string", maxLength: 8000 },
+    findings: { type: "array", maxItems: 256, items: FINDING_SCHEMA },
+    file_ownership: {
+      type: "array",
+      minItems: 1,
+      maxItems: 4096,
+      uniqueItems: true,
+      items: { type: "string", minLength: 1, maxLength: 4096 },
+    },
+    documentation: {
+      type: "object",
+      additionalProperties: false,
+      required: ["required", "paths", "rationale"],
+      properties: {
+        required: { type: "boolean" },
+        paths: {
+          type: "array",
+          maxItems: 128,
+          uniqueItems: true,
+          items: { type: "string", minLength: 1, maxLength: 4096 },
+        },
+        rationale: { type: "string", minLength: 1, maxLength: 4000 },
+      },
+    },
+  },
+};
+
 function makerCheckerRepair(
   identity: TemplateIdentity,
   options: TemplateOptions,
@@ -207,6 +241,7 @@ function makerCheckerRepair(
   const iterations = integerOption(options.max_iterations, 3, 1, 5);
   return {
     ...identity,
+    payload_contracts: { "ownership-plan": OWNERSHIP_PLAN_CONTRACT },
     entry_node: "plan",
     terminal_node: "complete",
     nodes: [
@@ -216,6 +251,7 @@ function makerCheckerRepair(
         access: "read",
         tier: "judgment",
         guidance: "Produce an ownership-bounded repair plan and verification criteria.",
+        payload_contract: "ownership-plan",
         ownership_plan: true,
       },
       {
@@ -352,6 +388,7 @@ function mappedWork(identity: TemplateIdentity, options: TemplateOptions): Workf
   const maxItems = integerOption(options.max_map_items, identity.budgets.max_map_items, 1, 32);
   return {
     ...identity,
+    payload_contracts: { "ownership-plan": OWNERSHIP_PLAN_CONTRACT },
     entry_node: "inventory",
     terminal_node: "complete",
     nodes: [
@@ -376,6 +413,7 @@ function mappedWork(identity: TemplateIdentity, options: TemplateOptions): Workf
         access: "read",
         tier: "judgment",
         guidance: "Produce one ownership plan for the serialized writer.",
+        payload_contract: "ownership-plan",
         ownership_plan: true,
       },
       {

@@ -1,8 +1,8 @@
 ---
 status: stable
 owner: core
-last_reviewed: 2026-09-28
-source_of_truth: implementation
+last_reviewed: 2026-10-07
+source_of_truth: scripts/src/architecture-check.ts
 evidence_links: reference/claims/evidence-index.md
 ---
 
@@ -80,6 +80,17 @@ dependencies. Inside the engine, imports follow the arrows above: `run/` and
 `workflow/` are one layer, and `primitives/` depends on nothing else in the
 engine.
 
+`npm run check:architecture` (`scripts/src/architecture-check.ts`) enforces
+these rules. It ranks the engine layers `primitives`, `graph`, `agents`,
+`run` and `workflow`, and `cli` from lowest to highest and rejects an import
+of a higher layer. It rejects engine imports of `apps/`, Ralph, developer
+tools, profiles, maintenance tools, and their packages, and it rejects any
+import by `apps/` or Ralph source of an `@rae/engine/...` subpath or an
+engine source file. The experimental platform also imports `@rae/fs-bridge`
+directly for descriptor-relative staging and attempt files; that package is a
+native primitive outside the engine, so the import is an accepted exception
+to the "applications import only `@rae/engine`" rule.
+
 ## Autonomous run flow
 
 1. The CLI resolves an explicit workflow, an activated local revision, or
@@ -88,8 +99,10 @@ engine.
    copied into the run as an immutable snapshot.
 3. The scheduler orders typed edges, caps read concurrency, serializes shared
    resources, and drains readers before an exclusive writer.
-4. A provider worker receives the task, bounded predecessor context, node
-   guidance, and an output schema. Each attempt uses a fresh provider session.
+4. A provider worker receives the task, predecessor context, node guidance,
+   and an output schema. The default `--context-mode legacy` inlines full
+   predecessor envelopes; `--context-mode bounded` is opt-in and limits the
+   context. Each attempt uses a fresh provider session.
 5. The engine validates the returned artifact and node envelope. Read nodes are
    checked for repository mutation; writer results are checked against the
    ownership plan and Git invariants.
@@ -143,8 +156,10 @@ backend. The custom command provider is an explicitly unsafe test integration.
 
 The root lockfile installs the npm workspaces. `npm run build` validates the
 engine and compiles the TypeScript development tools; it does not build the
-platform. The platform has its own lockfile and build command. The operator's static demo is a browser-only
-mock with no repository or backend access.
+platform. The platform has its own lockfile and is built with
+`npm run build:platform`. The operator's static demo is a browser-only mock
+with no repository or backend access. The documentation site is built for the
+`/rae-agent-workflows/docs/` path under the same Pages site as the demo.
 
 The supported release artifact is a reviewed source tag or source archive.
 There is no production deployment procedure in this repository. The platform
@@ -174,6 +189,7 @@ publication.
 
 - [System overview](reference/architecture/system-overview.md)
 - [Module boundaries](reference/architecture/module-boundaries.md)
+- [Workflow 2.0 and 2.1 contract](reference/contracts/workflow-v2.md)
 - [Experimental hosted platform](reference/architecture/experimental-hosted-platform.md)
 - Engine guide (`packages/engine/README.md` at the repository root)
 - Operator guide (`apps/operator/README.md` at the repository root)

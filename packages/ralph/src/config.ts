@@ -1,6 +1,6 @@
 /** Parses Ralph CLI policy and resolves package and repository locations. */
-import { existsSync, mkdirSync, realpathSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { existsSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { RalphError } from "./errors.js";
@@ -43,6 +43,10 @@ Options:
   --import-state <file>      Import fingerprinted story state
   --reset-story <id>         Reset one story
   --retry-failed             Reset all skipped stories
+  --discard-transaction <id> Retire a pending fixing transaction by journal id (see --doctor),
+                             retaining its evidence; refused once promotion started
+  --force                    With --discard-transaction: retire a promoting transaction or a
+                             pointer whose journal is missing, without restoring live files
   -q, --quiet | -v, --verbose
   --no-color                 Disable color
   --version                  Print version
@@ -87,7 +91,7 @@ function environmentOptions(): CliOptions {
     autoSyncAgents: boolEnv("RALPH_AUTO_SYNC_AGENTS_FROM_LEARNINGS", false),
     securityPreflight: boolEnv("RALPH_SECURITY_PREFLIGHT", true),
     securityPreflightFail: boolEnv("RALPH_SECURITY_PREFLIGHT_FAIL_ON_RISK", false),
-    staleLockSeconds: uintEnv("RALPH_STALE_LOCK_NO_PID_SECONDS", 30),
+    staleLockSeconds: uintEnv("RALPH_STALE_LOCK_NO_PID_SECONDS", 30, 1),
     strictReportDir: boolEnv("RALPH_STRICT_REPORT_DIR", true),
     autoProgressRefresh: boolEnv("RALPH_AUTO_PROGRESS_REFRESH", true),
     verbosity: enumValue(
@@ -191,6 +195,13 @@ const VALUE_FLAGS = new Map<string, ValueHandler>([
     },
   ],
   [
+    "--discard-transaction",
+    ({ options }, value) => {
+      options.action = "discard-transaction";
+      options.actionValue = value;
+    },
+  ],
+  [
     "--reset-story",
     ({ options }, value) => {
       options.action = "reset-story";
@@ -247,6 +258,9 @@ function applyFlag(options: CliOptions, argument: string): boolean {
     case "--json":
       options.outputFormat = "json";
       return true;
+    case "--force":
+      options.force = true;
+      return true;
     default:
       return false;
   }
@@ -255,7 +269,10 @@ function applyInlineValue(state: ParseState, argument: string): boolean {
   const separator = argument.indexOf("=");
   if (separator < 0) return false;
   const flag = argument.slice(0, separator);
-  if (!["--status-format", "--list-stories-format", "--reset-story"].includes(flag)) return false;
+  if (
+    !["--status-format", "--list-stories-format", "--reset-story", "--import-state"].includes(flag)
+  )
+    return false;
   const handler = VALUE_FLAGS.get(flag);
   if (!handler) return false;
   handler(state, argument.slice(separator + 1));
@@ -301,55 +318,133 @@ function packageRootFromModule(): string {
   return resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 }
 
+function hasBundle(directory: string): boolean {
+  return existsSync(join(directory, "prd.json")) && existsSync(join(directory, "INSTRUCTIONS.md"));
+}
+
+function samePath(left: string, right: string): boolean {
+  try {
+    return realpathSync.native(left) === realpathSync.native(right);
+  } catch {
+    return resolve(left) === resolve(right);
+  }
+}
+
+function gitToplevel(directory: string): string {
+  return realpathSync.native(
+    execFileSync("git", ["-C", directory, "rev-parse", "--show-toplevel"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim(),
+  );
+}
+
+/** Chooses the prd.json/INSTRUCTIONS.md bundle; it must live inside the target repository. */
+function bundleRoot(packageRoot: string, repoRoot: string, cwdBundle: boolean): string {
+  const cwd = realpathSync.native(process.cwd());
+  if (cwdBundle) return cwd;
+  if (isWithin(repoRoot, realpathSync.native(packageRoot))) return packageRoot;
+  if (hasBundle(cwd) && isWithin(repoRoot, cwd)) return cwd;
+  throw new RalphError(
+    `Ralph is installed outside the target repository (${repoRoot}); run it from a directory inside that repository that holds prd.json and INSTRUCTIONS.md`,
+  );
+}
+
+/** RALPH_STATE_DIR, else the package .runtime when the package is inside the target repository. */
+function stateDirectory(packageRoot: string, repoRoot: string): string {
+  const configured = process.env.RALPH_STATE_DIR;
+  if (configured) {
+    const resolved = resolve(repoRoot, configured);
+    if (!isWithin(repoRoot, resolved) || resolved === repoRoot)
+      throw new RalphError(
+        `RALPH_STATE_DIR must be a directory inside the repository: ${configured}`,
+      );
+    return resolved;
+  }
+  return isWithin(repoRoot, realpathSync.native(packageRoot))
+    ? join(packageRoot, ".runtime")
+    : join(repoRoot, ".runtime", "ralph");
+}
+
 export function resolvePaths(readonly: boolean): RuntimePaths {
   const packageRoot = packageRootFromModule();
   let repoRoot: string;
+  let cwdBundle = false;
   if (process.env.RALPH_REPO_ROOT) {
     repoRoot = canonicalDirectory(resolve(process.env.RALPH_REPO_ROOT), "repository root");
   } else if (
-    existsSync(join(process.cwd(), "prd.json")) &&
-    existsSync(join(process.cwd(), "INSTRUCTIONS.md"))
-  ) {
-    repoRoot = realpathSync.native(process.cwd());
-  } else if (
     basename(packageRoot) === "ralph-audit" &&
     basename(dirname(packageRoot)) === ".claude" &&
-    existsSync(join(packageRoot, "prd.json")) &&
-    existsSync(join(packageRoot, "INSTRUCTIONS.md"))
+    hasBundle(packageRoot)
   ) {
     repoRoot = realpathSync.native(resolve(packageRoot, "../.."));
+  } else if (hasBundle(process.cwd()) && !samePath(process.cwd(), packageRoot)) {
+    repoRoot = realpathSync.native(process.cwd());
+    cwdBundle = true;
   } else {
     try {
-      repoRoot = realpathSync.native(
-        execFileSync("git", ["-C", packageRoot, "rev-parse", "--show-toplevel"], {
-          encoding: "utf8",
-        }).trim(),
-      );
+      // The caller's repository is the target; the package location only matters as a fallback.
+      repoRoot = gitToplevel(process.cwd());
     } catch {
-      if (
-        existsSync(join(packageRoot, "prd.json")) &&
-        existsSync(join(packageRoot, "INSTRUCTIONS.md"))
-      )
-        repoRoot = realpathSync.native(packageRoot);
+      if (hasBundle(packageRoot)) repoRoot = realpathSync.native(packageRoot);
       else
         throw new RalphError("Could not resolve repository root. Set RALPH_REPO_ROOT explicitly.");
     }
   }
-  const stateDir = join(packageRoot, ".runtime");
-  validateRuntimeState(repoRoot, stateDir, readonly);
+  const bundle = bundleRoot(packageRoot, repoRoot, cwdBundle);
+  const stateDir = stateDirectory(packageRoot, repoRoot);
+  validateRuntimeState(repoRoot, stateDir, readonly, packageRoot);
   return {
     packageRoot,
     repoRoot,
-    prdFile: join(packageRoot, "prd.json"),
+    prdFile: join(bundle, "prd.json"),
     schemaFile: join(packageRoot, "prd.schema.json"),
-    policyFile: join(packageRoot, "INSTRUCTIONS.md"),
+    policyFile: join(bundle, "INSTRUCTIONS.md"),
     stateDir,
     runLog: join(stateDir, "run.log"),
     eventLog: join(stateDir, "events.log"),
   };
 }
 
-export function validateRuntimeState(repoRoot: string, stateDir: string, readonly: boolean): void {
+/** Realpaths the nearest existing ancestor and re-appends the not-yet-created tail. */
+function resolveThroughAncestor(path: string): string {
+  let existing = path;
+  for (;;) {
+    try {
+      lstatSync(existing);
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      const parent = dirname(existing);
+      if (parent === existing) break;
+      existing = parent;
+    }
+  }
+  return join(realpathSync.native(existing), relative(existing, path));
+}
+
+/**
+ * Validates the state directory before anything is created: it must resolve (through its nearest
+ * existing ancestor) inside the repository and never be `.git`, the package `src` or the package.
+ */
+export function validateRuntimeState(
+  repoRoot: string,
+  stateDir: string,
+  readonly: boolean,
+  packageRoot?: string,
+): void {
+  const target = resolveThroughAncestor(stateDir);
+  if (!isWithin(repoRoot, target) || target === repoRoot)
+    throw new RalphError(
+      `Runtime state directory resolves outside repository: ${stateDir} -> ${target}`,
+    );
+  const realPackage = packageRoot ? realpathSync.native(packageRoot) : undefined;
+  if (
+    isWithin(join(repoRoot, ".git"), target) ||
+    (realPackage !== undefined &&
+      (isWithin(join(realPackage, "src"), target) || target === realPackage))
+  )
+    throw new RalphError(`Runtime state directory is a protected location: ${stateDir}`);
   if (!readonly) mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   if (existsSync(stateDir)) {
     const real = canonicalDirectory(stateDir, "runtime state directory");

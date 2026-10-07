@@ -42,6 +42,7 @@ export {
   type ResolvedWorkflowRoute,
 } from "../workflow/execution-profile.js";
 export { loadWorkflow, validateWorkflow, workflowDigest } from "../workflow/workflow-contract.js";
+export type { WorkflowValidationOptions } from "../workflow/workflow-contract.js";
 export { createWorkflowRegistry } from "../workflow/workflow-registry.js";
 export {
   proposeWorkflowCandidate,

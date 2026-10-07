@@ -6,7 +6,7 @@ import {
   renderSavedDecision,
   taskCompleted,
 } from "./task-view.js";
-import { currentRun, elements, state } from "./state.js";
+import { currentRun, elements, selectedSummary, state } from "./state.js";
 import {
   formatCost,
   formatDateTime,
@@ -14,10 +14,13 @@ import {
   formatTime,
   humanize,
   icon,
+  middleCut,
+  needsDecision,
   phaseLabel,
   relativeTime,
   runTone,
   shortRef,
+  spansMultipleDays,
   tone,
 } from "./format.js";
 import type { OperatorEvent, OperatorRun } from "./types.js";
@@ -85,37 +88,36 @@ export function visibleRuns(): OperatorRun[] {
 }
 
 function runRowState(run: OperatorRun): { state: string; word: string } {
-  if (
-    run.needs_human_decision === true ||
-    run.checkpoints?.some((item) => item.status === "pending")
-  )
-    return { state: "hold", word: "Needs decision" };
+  if (needsDecision(run)) return { state: "hold", word: "Needs decision" };
   if (run.status === "waiting") return { state: "active", word: "Waiting" };
   return { state: tone(run.status), word: humanize(run.status || "unknown") };
 }
 
-function runRow(run: OperatorRun): HTMLButtonElement {
+function runRow(run: OperatorRun): HTMLLIElement {
   const { state: rowState, word } = runRowState(run);
   const status = node("span", { className: "run-row__state" }, [
     node("span", { className: "sq", attrs: { "aria-hidden": "true" } }),
     word,
   ]);
-  return node(
+  const button = node(
     "button",
     {
       className: "run-row",
       attrs: {
         type: "button",
-        role: "option",
-        "aria-selected": String(run.id === state.runId),
         "data-state": rowState,
+        ...(run.id === state.runId ? { "aria-current": "true" } : {}),
       },
       dataset: { runId: run.id, tone: runTone(run) },
     },
     [
       status,
       node("span", { className: "run-row__task", text: run.task || run.id }),
-      node("span", { className: "run-row__id mono", text: run.id, attrs: { title: run.id } }),
+      node("span", {
+        className: "run-row__id mono",
+        text: middleCut(run.id, 28),
+        attrs: { title: run.id },
+      }),
       node("span", { className: "run-row__phase", text: phaseLabel(run.current_phase) }),
       node("span", {
         className: "run-row__time",
@@ -123,6 +125,39 @@ function runRow(run: OperatorRun): HTMLButtonElement {
       }),
     ],
   );
+  return node("li", {}, [button]);
+}
+
+/** Returns the run id of a focused catalogue row so a re-render can restore focus to it. */
+function focusedRunRow(): string | undefined {
+  const active = document.activeElement as HTMLElement | null;
+  if (!active?.closest?.("#runs-list")) return undefined;
+  return active.dataset.runId;
+}
+
+function restoreRunRowFocus(runId: string | undefined): void {
+  if (!runId) return;
+  for (const row of elements["runs-list"].querySelectorAll<HTMLElement>(".run-row")) {
+    if (row.dataset.runId === runId) {
+      row.focus({ preventScroll: true });
+      return;
+    }
+  }
+}
+
+let baseTitle: string | null = null;
+
+/** Shows how many runs wait on a human decision in the top bar and the document title. */
+export function renderDecisionIndicator(): void {
+  const pending = state.runs.filter(needsDecision).length;
+  baseTitle ??= String(document.title ?? "").replace(/^\(\d+\)\s*/, "");
+  document.title = pending > 0 ? `(${pending}) ${baseTitle}` : baseTitle;
+  elements["decisions-pending"].hidden = pending === 0;
+  const noun = pending === 1 ? "decision" : "decisions";
+  elements["decisions-pending-count"].textContent = String(pending);
+  elements["decisions-pending-label"].textContent = `${noun} pending`;
+  // Narrow windows show only the count; the name keeps the full meaning.
+  elements["decisions-pending"].setAttribute("aria-label", `${pending} ${noun} pending`);
 }
 
 export function renderRuns(): void {
@@ -141,31 +176,39 @@ export function renderRuns(): void {
         : "Start a bounded run for this project.";
     if (action) action.hidden = hasCatalogRuns;
   }
+  const focused = focusedRunRow();
   elements["runs-list"].replaceChildren(...visible.map(runRow));
+  restoreRunRowFocus(focused);
+  renderDecisionIndicator();
   elements["runs-load-more"].hidden = !state.runsHasMore;
   elements["runs-load-more"].disabled = state.runsLoadingMore;
   elements["runs-load-more"].textContent = state.runsLoadingMore ? "Loading…" : "Load more runs";
 }
 
+/**
+ * Event-log failures never gate controls. Stop and interrupt stay available even while the
+ * detail is loading or unavailable, because the server validates them against durable state.
+ */
 export function renderRunControls(run: OperatorRun | null): void {
+  const detailBlocked = state.detailLoading || Boolean(state.detailError);
+  const containmentSource = run ?? selectedSummary();
   for (const [element, key] of [
     [elements["stop-button"], "stop"],
     [elements["interrupt-button"], "interrupt"],
     [elements["resume-button"], "resume"],
     [elements["cleanup-button"], "cleanup"],
   ] as const) {
+    const containment = key === "stop" || key === "interrupt";
+    const source = containment ? containmentSource : run;
     element.disabled =
-      !run?.controls?.[key] ||
-      state.actionPending ||
-      state.detailLoading ||
-      Boolean(state.detailError || state.eventError);
+      !source?.controls?.[key] || state.actionPending || (!containment && detailBlocked);
   }
 }
 
 function gateWord(status: unknown): GateInfo {
   const value = tone(status);
   if (value === "pass") return { word: "pass", cls: "g-pass" };
-  if (value === "error") return { word: "fail", cls: "g-hold" };
+  if (value === "error") return { word: "fail", cls: "g-fail" };
   if (value === "active") return { word: "hold", cls: "g-hold" };
   return { word: "—", cls: "g-wait" };
 }
@@ -304,8 +347,7 @@ export function renderRun(): void {
   }
   elements["run-title"].textContent = run.id;
   elements["run-branch"].textContent = run.branch || "Not recorded";
-  const taskEl = document.getElementById("run-task");
-  if (taskEl) taskEl.textContent = run.task || "No task recorded";
+  renderTaskHeadline(run);
   elements["run-workspace"].textContent =
     run.workspace_mode === "guarded"
       ? `${run.workspace_label} · guarded phase`
@@ -320,13 +362,32 @@ export function renderRun(): void {
   renderRunSummary(run);
 }
 
+/** Clamps a long task to a few lines and offers a disclosure only when text is actually cut. */
+function renderTaskHeadline(run: OperatorRun): void {
+  const task = elements["run-task"];
+  const toggle = elements["task-toggle"];
+  const text = run.task || "No task recorded";
+  if (task.textContent !== text) {
+    task.textContent = text;
+    task.dataset.expanded = "false";
+    toggle.setAttribute("aria-expanded", "false");
+    toggle.textContent = "Show full task";
+  }
+  const expanded = task.dataset.expanded === "true";
+  toggle.hidden = !expanded && !(task.scrollHeight > task.clientHeight + 1);
+}
+
+export function toggleTaskHeadline(): void {
+  const expanded = elements["run-task"].dataset.expanded !== "true";
+  elements["run-task"].dataset.expanded = String(expanded);
+  elements["task-toggle"].setAttribute("aria-expanded", String(expanded));
+  elements["task-toggle"].textContent = expanded ? "Show less" : "Show full task";
+}
+
 function renderDecisionControls(pending: boolean): void {
   for (const button of document.querySelectorAll<HTMLButtonElement>("[data-decision]")) {
     button.disabled =
-      !pending ||
-      state.actionPending ||
-      state.detailLoading ||
-      Boolean(state.detailError || state.eventError);
+      !pending || state.actionPending || state.detailLoading || Boolean(state.detailError);
   }
 }
 
@@ -402,13 +463,21 @@ function eventToggle(
     },
   });
   toggle.append(icon("arrow"));
-  toggle.addEventListener("click", () => setEventExpanded(toggle, detail, true));
+  toggle.addEventListener("click", () =>
+    setEventExpanded(toggle, detail, toggle.getAttribute("aria-expanded") !== "true"),
+  );
   return toggle;
+}
+
+function resultIcon(statusTone: string): string {
+  // The filled square is the recorded-pass glyph; every other result uses an open mark.
+  if (statusTone === "pass") return "check";
+  return statusTone === "error" ? "reject" : "info";
 }
 
 function eventResult(status: string, statusTone: string): HTMLSpanElement {
   return node("span", { className: "result", dataset: { tone: statusTone } }, [
-    icon(statusTone === "error" ? "reject" : "check"),
+    icon(resultIcon(statusTone)),
     document.createTextNode(humanize(status)),
   ]);
 }
@@ -422,7 +491,7 @@ function eventTableRow(
   const reference =
     event.artifact_ref ?? event.gate_id ?? event.event_id ?? `Sequence ${event.seq}`;
   return node("tr", {}, [
-    tableCell([toggle, document.createTextNode(formatTime(event.ts))]),
+    tableCell([toggle, document.createTextNode(formatTime(event.ts, renderedWithDate))]),
     tableCell(node("span", { className: "category", text: phaseLabel(event.phase) })),
     tableCell(node("span", { className: "evidence-title", text: humanize(event.event) })),
     tableCell(node("span", { className: "evidence-reference", text: String(reference) })),
@@ -477,18 +546,23 @@ function setEventExpanded(toggle: Element, detail: HTMLElement, expanded: boolea
 let renderedHistory: OperatorEvent[] | null = null;
 let renderedCount = 0;
 let renderedError: string | null = null;
+let renderedWithDate = false;
 
 export function renderEvents(): void {
   renderRecentEvents(state.events, state.eventError);
+  // Rows carry the date once the history crosses a day boundary; existing rows are redrawn then.
+  const withDate = spansMultipleDays([state.events[0]?.ts, state.events.at(-1)?.ts]);
   const reset =
     renderedHistory !== state.events ||
     renderedCount > state.events.length ||
-    renderedError !== state.eventError;
+    renderedError !== state.eventError ||
+    renderedWithDate !== withDate;
   if (reset) {
     elements["event-list"].replaceChildren();
     renderedHistory = state.events;
     renderedCount = 0;
     renderedError = state.eventError;
+    renderedWithDate = withDate;
   }
   if (state.eventError) {
     elements["event-count"].textContent = "Unavailable";

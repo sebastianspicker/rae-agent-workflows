@@ -1,8 +1,8 @@
 ---
 status: stable
 owner: science
-last_reviewed: 2026-04-17
-source_of_truth: ../claims-ledger.md
+last_reviewed: 2026-10-07
+source_of_truth: docs/reference/claims/claims-ledger.md
 evidence_links: ../evidence-index.md#clm-008
 ---
 
@@ -16,7 +16,7 @@ collaboration.
 
 ## Claim class
 
-`formal`
+`engineering_heuristic`
 
 ## Proof mode
 
@@ -61,7 +61,12 @@ No frozen umbrella benchmark currently fits a topology-ablation estimate.
 
 ## Review status
 
-Adopted as a formal design argument with uncalibrated coefficients.
+Provisional as an analytical design argument. Only the edge counts are
+formal; the cost comparison assumes uniform per-edge cost and uncalibrated
+coefficients.
+No retained measurement supports it yet; the
+[claims ledger](../claims-ledger.md#metrics-for-provisional-claims) names the
+metric that would test it.
 
 ## Source note
 

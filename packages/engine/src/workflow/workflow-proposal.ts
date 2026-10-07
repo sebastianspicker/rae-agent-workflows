@@ -8,12 +8,11 @@ import { redact } from "../agents/agent-provider-runtime.js";
 import { loadExecutionProfile, resolveExecutionTier } from "./execution-profile.js";
 import { loadWorkflow, validateWorkflow } from "./workflow-contract.js";
 import { createWorkflowRegistry } from "./workflow-registry.js";
-import { contractsRoot } from "../primitives/installation-paths.js";
 import type { ExecutionProfile, CapabilitySet } from "./execution-profile.js";
 import type { WorkflowContract } from "./workflow-contract.js";
+import { proposalSchemaPath } from "./workflow-proposal-helper.js";
 import type { ProposalHelperRequest } from "./workflow-proposal-helper.js";
 
-const V21_SCHEMA = resolve(contractsRoot, "workflows/workflow-v2.1.schema.json");
 const MAX_TASK_BYTES = 128 * 1024;
 const PROTECTED_TASK_DIRECTORIES = new Set([
   "aws",
@@ -132,7 +131,7 @@ ${task}
 Base workflow:
 ${JSON.stringify(base, null, 2)}
 
-Return a complete schema_version 2.1.0 workflow JSON object. Preserve workflow_id, set revision to ${base.revision + 1}, and keep all expansion bounded. Workflow JSON is data only: never include commands, JavaScript, expressions, environment values, tools, providers, concrete model names, reasoning efforts, or remote schema references. Use only logical economy, standard, or judgment tiers. The proposal is a draft and must not claim activation or execution.
+Return a complete schema_version ${base.schema_version} workflow JSON object. Every findings payload contract must declare findings items with required severity (blocking, major, minor or info), boolean blocking, string summary and optional string evidence_ref, and every artifact edge must name its artifact. Preserve workflow_id, set revision to ${base.revision + 1}, and keep all expansion bounded. Workflow JSON is data only: never include commands, JavaScript, expressions, environment values, tools, providers, concrete model names, reasoning efforts, or remote schema references. Use only logical economy, standard, or judgment tiers. The proposal is a draft and must not claim activation or execution.
 ${correction ? `\nThe first proposal failed local validation. Correct only these errors and return a complete replacement:\n${correction}\n` : ""}`;
 }
 
@@ -142,8 +141,9 @@ function proposalRequest(
   temporary: string,
   attempt: 1 | 2,
   execution: ProposalExecutionRoute | null,
+  schemaVersion: string,
 ): ProposalHelperRequest {
-  return { projectRoot, prompt, temporary, attempt, execution };
+  return { projectRoot, prompt, temporary, attempt, execution, schemaVersion };
 }
 
 function parseHelperResponse(raw: string): Record<string, unknown> {
@@ -174,11 +174,14 @@ function runProposal(
   temporary: string,
   attempt: 1 | 2,
   execution: ProposalExecutionRoute | null,
+  schemaVersion: string,
 ): Record<string, unknown> {
   const helper = resolve(import.meta.dirname, "workflow-proposal-helper.js");
   const result = spawnSync(process.execPath, [helper], {
     cwd: projectRoot,
-    input: JSON.stringify(proposalRequest(projectRoot, prompt, temporary, attempt, execution)),
+    input: JSON.stringify(
+      proposalRequest(projectRoot, prompt, temporary, attempt, execution, schemaVersion),
+    ),
     encoding: "utf8",
     maxBuffer: 1024 * 1024,
     env: process.env,
@@ -201,13 +204,14 @@ async function runProposalAsync(
   temporary: string,
   attempt: 1 | 2,
   execution: ProposalExecutionRoute | null,
+  schemaVersion: string,
 ): Promise<Record<string, unknown>> {
   const result = await runAgentPhase({
     provider: execution?.executor ?? "codex",
     phase: `workflow-proposal-${attempt}`,
     runId: `proposal-${process.pid}`,
     workspaceRoot: projectRoot,
-    schemaPath: V21_SCHEMA,
+    schemaPath: proposalSchemaPath(schemaVersion),
     outputPath: resolve(temporary, `proposal-${attempt}.json`),
     eventLogPath: resolve(temporary, `proposal-${attempt}.events.jsonl`),
     eventLogRoot: temporary,
@@ -262,6 +266,7 @@ function generateCandidate(options: ProposalOptions): GeneratedProposal {
       temporary,
       1,
       execution,
+      base.schema_version,
     );
     let validationError: Error | null = null;
     try {
@@ -276,6 +281,7 @@ function generateCandidate(options: ProposalOptions): GeneratedProposal {
         temporary,
         2,
         execution,
+        base.schema_version,
       );
       candidate = validateWorkflow(candidate);
     }
@@ -314,6 +320,7 @@ async function generateCandidateAsync(options: ProposalOptions): Promise<Generat
       temporary,
       1,
       execution,
+      base.schema_version,
     );
     let validationError: Error | null = null;
     try {
@@ -328,6 +335,7 @@ async function generateCandidateAsync(options: ProposalOptions): Promise<Generat
         temporary,
         2,
         execution,
+        base.schema_version,
       );
       candidate = validateWorkflow(candidate);
     }

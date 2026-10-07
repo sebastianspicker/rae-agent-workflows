@@ -7,6 +7,8 @@ on:
     paths:
       - ".github/workflows/operator-demo-pages.yml"
       - "apps/operator/**"
+      - "docs/**"
+      - "scripts/src/copy-docs-site.ts"
   workflow_dispatch:
 
 concurrency:
@@ -41,6 +43,10 @@ jobs:
         uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b
       - name: Build interactive mock demo
         run: '["node", "apps/operator/dist/scripts/build-demo.js", "--out", ".runtime/operator-demo"]'
+      - name: Build documentation site
+        run: '["npm", "run", "docs:build"]'
+      - name: Add documentation site to the Pages output
+        run: '["node", "scripts/dist/copy-docs-site.js"]'
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b
         with:

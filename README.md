@@ -47,8 +47,12 @@ The command surface prints the supported entry points and their arguments:
 
 ![RAE umbrella CLI command map](docs/assets/screenshots/rae-cli.svg)
 
-Autonomous runs default to checkpoints before mutation and release, and the
-agent help surface shows the sandbox and provider boundaries:
+The agent help surface shows the sandbox and provider boundaries and the
+`--checkpoint-policy` modes. `agent run` defaults to `before-mutation`, which
+pauses for a human decision before the first writer; `before-mutation-and-ship`
+also pauses at the release checkpoint before completion, and `none` never
+pauses. Runs started from the operator console use `before-mutation-and-ship`.
+The capture is regenerated from the CLI and may lag the current help text:
 
 ![RAE autonomous agent safety defaults](docs/assets/screenshots/rae-agent-safety.svg)
 
@@ -66,6 +70,8 @@ The same editor reflows for narrow windows:
 Try the [static Pages demo](https://sebastianspicker.github.io/rae-agent-workflows/) to click
 through the interface against an in-browser mock. It has no repository or
 backend access. The full operator stays bearer-authenticated and loopback-only.
+The documentation site is published under the same Pages site at
+[`/rae-agent-workflows/docs/`](https://sebastianspicker.github.io/rae-agent-workflows/docs/).
 
 ## Requirements
 
@@ -93,8 +99,11 @@ workspace. Install and build it when that package or the complete gate is in sco
 
 ```sh
 npm ci --prefix apps/platform --ignore-scripts
-npm --prefix apps/platform run build
+npm run build:platform
 ```
+
+`npm run build:platform` runs the platform's own build
+(`npm --prefix apps/platform run build`).
 
 ## Quick start
 
@@ -110,14 +119,18 @@ Run a task against a committed target repository in an isolated worktree:
 ```bash
 npm run rae -- agent run \
   --project-root /path/to/target-repository \
+  --checkpoint-policy before-mutation \
   --task "Add a tested health endpoint and document its behavior"
 ```
 
 The command prints the worktree, run ID, and
-`.pipeline/runs/<run-id>/run-report.md`. Use `--through plan` to stop before a
-writer node. New isolated runs use a `pipeline/<run-id>` branch and place the
-worktree under the target repository's Git metadata at
-`.git/rae-worktrees/<run-id>`.
+`.pipeline/runs/<run-id>/run-report.md`. `before-mutation` is the CLI default
+and is spelled out here for clarity: the run waits before the first writer
+until the checkpoint is resolved with `agent resolve-checkpoint` or in the
+operator. Use `--checkpoint-policy before-mutation-and-ship` to also pause
+before completion, or `--through plan` to stop before a writer node. New
+isolated runs use a `pipeline/<run-id>` branch and place the worktree under the
+target repository's Git metadata at `.git/rae-worktrees/<run-id>`.
 
 Serve the local operator for explicitly allowed repositories:
 
@@ -131,6 +144,10 @@ Run Ralph after creating its package-local `prd.json`:
 npm run rae -- ralph --check
 npm run rae -- ralph --mode audit 10
 ```
+
+`rae ralph` targets the Git top level of the directory it is invoked from. Inside
+the RAE checkout its runtime state stays under `packages/ralph/.runtime`; in any
+other repository it lives under `<repository>/.runtime/ralph` (`RALPH_STATE_DIR`).
 
 See the [engine guide](packages/engine/README.md), [operator
 guide](apps/operator/README.md), and [Ralph guide](packages/ralph/README.md) for
@@ -177,21 +194,42 @@ transmit selected task and context data to the configured provider.
 ## Development and verification
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before changing behavior. The
-prepared-checkout verification command is:
+public-checkout verification command is:
 
 ```bash
-npm run verify -- --skip-install
+npm run verify -- --skip-install --skip-tests
 ```
 
 The command builds the source, checks maintained TypeScript and documentation,
-and exercises the runtime entry points. `npm run build` covers root workspaces;
-build the platform separately.
+and exercises the runtime entry points. Test sources and fixtures are private,
+gitignored local files; omit `--skip-tests` in a maintainer checkout containing them. Add
+`--skip-build` to reuse an existing build. `npm run build` covers root
+workspaces; build the platform separately with `npm run build:platform`.
 
-For a complete verification run:
+The command ends with a verdict line. `VERDICT: PASS` means every step ran and
+passed. `VERDICT: PARTIAL` means the steps that ran passed but some were
+skipped: the platform steps when `apps/platform/node_modules` is absent, or the
+documentation build with `--skip-docs`, or private tests with `--skip-tests`.
+Public CI uses `--skip-tests`. `VERDICT: FAIL` is followed by the
+command that failed.
+
+With the private local tests present, `npm test` runs every workspace suite sequentially. When the platform is not
+installed it prints `SKIPPED apps/platform: …` instead of failing. Individual
+suites are `test:engine`, `test:operator`, `test:platform`, `test:ralph`,
+`test:agent-profiles`, `test:coauthor-trailer-cleaner`,
+`test:repository-tools`, `test:dev-tools`, and `test:fs-bridge`. Narrower
+gates are `npm run check:architecture`, `npm run check:docs`,
+`npm run check:adapters`, and `npm run format:check` (`npm run format` applies
+the formatter).
+
+For a complete verification run, from a clean maintainer worktree containing the private tests:
 
 ```bash
 npm run verify -- --release-candidate
 ```
+
+`--release-candidate` installs both lockfiles, cannot be combined with the skip
+options, and fails when the worktree has uncommitted changes.
 
 ## Support, security, and license
 

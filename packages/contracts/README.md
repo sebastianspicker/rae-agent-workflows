@@ -4,6 +4,15 @@ This package owns RAE's immutable, versioned JSON Schemas. Existing schema
 files are compatibility protocols: change semantics by adding a new schema
 version, not by silently repurposing a published version.
 
+Workflow schemas 2.0.0 and 2.1.0 gained the optional run-level budgets
+`budgets.max_wall_clock_seconds` (integer, at least 60) and
+`budgets.max_provider_attempts` (integer, at least 1). The change is additive:
+no field was removed or tightened, `additionalProperties: false` still applies,
+and no new schema version was added. Stricter authoring rules (marker
+placement, finding items, named artifact edges) live in the engine's
+`validateWorkflow` authoring mode, not in these schemas, so stored workflows
+remain valid against them.
+
 The engine resolves these files through its contract catalog. Applications
 must not duplicate or patch them.
 

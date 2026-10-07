@@ -8,7 +8,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "build:benchmarks": "tsc -p tsconfig.benchmarks.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.benchmarks.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.benchmarks.json --noEmit",
+    "test": "node --test dist/*.test.js"
   },
   "dependencies": {
     "@rae/fs-bridge": "file:../packages/fs-bridge",

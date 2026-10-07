@@ -2,7 +2,8 @@
  * Instrument Record tokens. Two voices share the console: Plex Mono for what the
  * machine recorded, Newsreader for what a person wrote. Colour is semantic only:
  * trace (interaction and path), hold (a human is required), proof (recorded pass),
- * fault (failure or destructive action). See apps/operator/DESIGN_BRIEF.md.
+ * fault (failure or destructive action). See "Task and evidence review" in
+ * apps/operator/README.md.
  */
 
 @font-face {
@@ -53,7 +54,14 @@
   src: url("../fonts/newsreader-400-italic.woff2") format("woff2");
 }
 
-/* Light: cool paper and the brand ink. */
+/*
+ * Colours come in two equivalent forms. Browsers without light-dark() get the plain light
+ * block below, the dark values under the OS preference (unless a light choice is stored) or an
+ * explicit [data-theme="dark"]. Browsers with light-dark() use the @supports block further
+ * down. Both follow the OS live, or a stored choice that the theme control writes to
+ * [data-theme]. With no OS preference and no stored choice the supporting path is dark
+ * (`color-scheme: dark light` resolves to its first entry); the fallback path is light.
+ */
 :root {
   color-scheme: light;
   --bg: #f2f5f6;
@@ -74,31 +82,8 @@
   --fault-wash: #fbe9e7;
   --on-accent: #fbfcfc;
   --scrim: rgb(20 35 43 / 55%);
-  --lift: 0 1px 0 rgb(20 35 43 / 4%), 0 24px 64px -24px rgb(20 35 43 / 35%);
-}
-
-/* Dark: the mark's ink ground. Applied by stored choice or, without one, by the OS. */
-:root[data-theme="dark"] {
-  color-scheme: dark;
-  --bg: #0e171c;
-  --surface: #132028;
-  --sunk: #0a1115;
-  --ink: #ecf2f1;
-  --ink-2: #b4c3c9;
-  --mute: #8c9fa8;
-  --line: #24343d;
-  --line-strong: #5b7583;
-  --trace: #8aabff;
-  --trace-wash: #16223d;
-  --hold: #f29a74;
-  --hold-wash: #2a1c15;
-  --proof: #5ccfb1;
-  --proof-wash: #10291f;
-  --fault: #ff8f80;
-  --fault-wash: #2e1714;
-  --on-accent: #0e171c;
-  --scrim: rgb(5 10 13 / 72%);
-  --lift: 0 0 0 1px rgb(0 0 0 / 30%), 0 28px 80px -24px rgb(0 0 0 / 70%);
+  --lift:
+    0 1px 0 rgb(20 35 43 / 4%), 0 0 0 1px transparent, 0 24px 64px -24px rgb(20 35 43 / 35%);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -122,8 +107,67 @@
     --fault-wash: #2e1714;
     --on-accent: #0e171c;
     --scrim: rgb(5 10 13 / 72%);
-    --lift: 0 0 0 1px rgb(0 0 0 / 30%), 0 28px 80px -24px rgb(0 0 0 / 70%);
+    --lift: 0 1px 0 transparent, 0 0 0 1px rgb(0 0 0 / 30%), 0 24px 64px -24px rgb(0 0 0 / 70%);
   }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0e171c;
+  --surface: #132028;
+  --sunk: #0a1115;
+  --ink: #ecf2f1;
+  --ink-2: #b4c3c9;
+  --mute: #8c9fa8;
+  --line: #24343d;
+  --line-strong: #5b7583;
+  --trace: #8aabff;
+  --trace-wash: #16223d;
+  --hold: #f29a74;
+  --hold-wash: #2a1c15;
+  --proof: #5ccfb1;
+  --proof-wash: #10291f;
+  --fault: #ff8f80;
+  --fault-wash: #2e1714;
+  --on-accent: #0e171c;
+  --scrim: rgb(5 10 13 / 72%);
+  --lift: 0 1px 0 transparent, 0 0 0 1px rgb(0 0 0 / 30%), 0 24px 64px -24px rgb(0 0 0 / 70%);
+}
+
+@supports (color: light-dark(#000, #fff)) {
+:root {
+  color-scheme: dark light;
+  --bg: light-dark(#f2f5f6, #0e171c);
+  --surface: light-dark(#fbfcfc, #132028);
+  --sunk: light-dark(#e8edef, #0a1115);
+  --ink: light-dark(#14232b, #ecf2f1);
+  --ink-2: light-dark(#384c57, #b4c3c9);
+  --mute: light-dark(#566a74, #8c9fa8);
+  --line: light-dark(#cdd6db, #24343d);
+  --line-strong: light-dark(#768892, #5b7583);
+  --trace: light-dark(#1d4ed8, #8aabff);
+  --trace-wash: light-dark(#e4ebfc, #16223d);
+  --hold: light-dark(#9a3f1c, #f29a74);
+  --hold-wash: light-dark(#f7eae3, #2a1c15);
+  --proof: light-dark(#0a6b58, #5ccfb1);
+  --proof-wash: light-dark(#e0f0ea, #10291f);
+  --fault: light-dark(#b42318, #ff8f80);
+  --fault-wash: light-dark(#fbe9e7, #2e1714);
+  --on-accent: light-dark(#fbfcfc, #0e171c);
+  --scrim: light-dark(rgb(20 35 43 / 55%), rgb(5 10 13 / 72%));
+  --lift:
+    0 1px 0 light-dark(rgb(20 35 43 / 4%), transparent),
+    0 0 0 1px light-dark(transparent, rgb(0 0 0 / 30%)),
+    0 24px 64px -24px light-dark(rgb(20 35 43 / 35%), rgb(0 0 0 / 70%));
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
 }
 
 :root {
@@ -169,9 +213,4 @@
   /* The trace step: vertical drop between journey levels, as in the mark. */
   --step-drop: 0.625rem;
   --step-mark: 0.75rem;
-}
-
-/* Names kept for the static screenshot tour page. */
-:root {
-  --t-label: var(--t-xs);
 }

@@ -108,19 +108,79 @@ export function policyDigest(policy: AutonomousPolicy): string {
     .digest("hex");
 }
 
+/**
+ * Ignored-path prefixes a writer node may create or modify without a blocking finding. The v1
+ * policy schema cannot carry this key, so the optional `ignored_write_allow` array is validated
+ * here instead.
+ */
+export const DEFAULT_IGNORED_WRITE_ALLOW: readonly string[] = [
+  "dist/",
+  "build/",
+  "coverage/",
+  ".cache/",
+  "node_modules/",
+  "__pycache__/",
+  ".pytest_cache/",
+  ".mypy_cache/",
+  ".ruff_cache/",
+  "target/",
+  ".next/",
+  ".turbo/",
+];
+const MAX_IGNORED_WRITE_ALLOW = 64;
+
+function validateIgnoredWriteAllow(value: unknown): void {
+  if (value === undefined) return;
+  if (!Array.isArray(value) || value.length > MAX_IGNORED_WRITE_ALLOW) {
+    policyError(
+      `ignored_write_allow must be an array of at most ${MAX_IGNORED_WRITE_ALLOW} prefixes`,
+    );
+  }
+  for (const entry of value) {
+    const unsafe =
+      typeof entry !== "string" ||
+      !/^[A-Za-z0-9._-][A-Za-z0-9._/-]{0,255}\/$/.test(entry) ||
+      entry.includes("//") ||
+      entry
+        .split("/")
+        .slice(0, -1)
+        .some((segment) => segment === ".." || segment === ".") ||
+      entry.split("/").some((segment) => segment === ".git" || segment === ".pipeline");
+    if (unsafe) {
+      policyError(
+        "ignored_write_allow entries must be relative directory prefixes ending in '/' without '..'",
+      );
+    }
+  }
+}
+
+/** The policy's ignored-path allow prefixes, or the defaults when the policy names none. */
+export function ignoredWriteAllow(policy: unknown): readonly string[] {
+  const value = (policy as { ignored_write_allow?: unknown } | null)?.ignored_write_allow;
+  if (value === undefined) return DEFAULT_IGNORED_WRITE_ALLOW;
+  validateIgnoredWriteAllow(value);
+  return value as readonly string[];
+}
+
 function validatePolicyIdentity(policy: unknown): asserts policy is Record<string, unknown> & {
   schema_version: "1.0.0";
   policy_id: string;
   phase_guidance: Record<AutonomousPhase, unknown>;
   phase_inputs: Record<AutonomousPhase, unknown>;
 } {
-  exactKeys(policy, ["schema_version", "policy_id", "phase_guidance", "phase_inputs"], "policy");
+  const required = ["schema_version", "policy_id", "phase_guidance", "phase_inputs"];
+  const optional =
+    policy && typeof policy === "object" && Object.hasOwn(policy, "ignored_write_allow")
+      ? ["ignored_write_allow"]
+      : [];
+  exactKeys(policy, [...required, ...optional], "policy");
   if (policy.schema_version !== "1.0.0") policyError("schema_version must be 1.0.0");
   if (typeof policy.policy_id !== "string" || !/^[a-z][a-z0-9._-]{0,63}$/.test(policy.policy_id)) {
     policyError("policy_id must be a lowercase identifier of at most 64 characters");
   }
   exactKeys(policy.phase_guidance, PHASE_ORDER, "phase_guidance");
   exactKeys(policy.phase_inputs, PHASE_ORDER, "phase_inputs");
+  validateIgnoredWriteAllow(policy.ignored_write_allow);
 }
 
 function validatePhaseInputs(phase: AutonomousPhase, inputs: unknown): asserts inputs is string[] {

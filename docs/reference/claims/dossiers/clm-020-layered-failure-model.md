@@ -1,8 +1,8 @@
 ---
 status: stable
 owner: science
-last_reviewed: 2026-04-17
-source_of_truth: ../claims-ledger.md
+last_reviewed: 2026-10-07
+source_of_truth: docs/reference/claims/claims-ledger.md
 evidence_links: ../evidence-index.md#clm-020
 ---
 
@@ -61,7 +61,10 @@ yet frozen a corpus-wide taxonomy benchmark.
 
 ## Review status
 
-Adopted as a diagnostic heuristic.
+Provisional as a diagnostic heuristic.
+No retained measurement supports it yet; the
+[claims ledger](../claims-ledger.md#metrics-for-provisional-claims) names the
+metric that would test it.
 
 ## Source note
 

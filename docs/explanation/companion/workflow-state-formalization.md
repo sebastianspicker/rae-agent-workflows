@@ -1,7 +1,7 @@
 ---
 status: stable
 owner: science
-last_reviewed: 2026-04-17
+last_reviewed: 2026-10-07
 source_of_truth: ../supplementary/formal-model.md
 evidence_links: ../../reference/claims/dossiers/clm-014-staged-separation.md
 ---
@@ -18,17 +18,31 @@ main articles stay readable.
 Let the workflow be a labeled transition system:
 
 $$
-\mathcal{W} = (S, \Sigma, T, s_0)
+\mathcal{W} = (\mathcal{S}, \Sigma, T, s_0)
 $$
 
-where $S$ is the set of states, $\Sigma$ the transition labels, $T$ the allowed
-transitions, and $s_0$ the entry state.
+where $\mathcal{S}$ is the set of states, $\Sigma$ the transition labels, $T$ the
+allowed transitions, and $s_0$ the entry state.
 
-For the umbrella science model, a useful abstract state sequence is:
+This is a coarse abstraction of the workflow DAG in the
+[Formal Model](../supplementary/formal-model.md), not a separate model. Its six
+states are regions of the default graph workflow:
 
 $$
-S = (\text{intake}, \text{design}, \text{plan}, \text{build}, \text{verify}, \text{publish})
+\mathcal{S} = (\text{intake}, \text{design}, \text{plan}, \text{build}, \text{verify}, \text{release})
 $$
+
+| State | DAG region (default workflow) |
+| --- | --- |
+| intake | `requirements` |
+| design | `design`, the design critics, `design-collection`, `design-adjudication` |
+| plan | `plan` (ownership plan), `alignment-a`, `alignment-b`, `alignment-gate` |
+| build | `mutation-checkpoint`, `build` |
+| verify | `repair-loop` members (critics, `diagnose`, `repair`) and `verification` |
+| release | `release-checkpoint`, `complete`; RAE itself never publishes |
+
+The legacy ten-phase pipeline is a different refinement of the same six states
+and is documented in the Formal Model as legacy.
 
 ## Gate-mediated progression
 
@@ -37,10 +51,13 @@ Progression is allowed only when the outgoing artifact satisfies the local gate:
 $$
 (s_k \rightarrow s_{k+1}) \in T
 \iff
-G_k(A_k) \in \{\text{pass}, \text{acceptable-warn}\}
+G_k(A_k) \text{ is accepting}
 $$
 
-This formalizes the distinction between doing work and being allowed to advance.
+An accepting outcome is `passed` in graph mode and `pass` or `warn` in the
+legacy pipeline (see
+[Gate outcomes](../supplementary/formal-model.md#gate-outcomes)). This
+formalizes the distinction between doing work and being allowed to advance.
 
 ## Why the model matters
 
@@ -54,8 +71,7 @@ This formalizes the distinction between doing work and being allowed to advance.
 
 ## Interpretation limits
 
-- real workflows can loop, branch, or pause more than this simplified model
-- accepted gate states remain implementation-specific
+- real workflows loop (the verify region can send control back to its critics), branch, and pause more than this simplified model
 
 ## Source note
 

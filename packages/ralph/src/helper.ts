@@ -39,6 +39,31 @@ const EMBEDDED_DEPENDENCIES = [
   "require-from-string",
 ] as const;
 const require = createRequire(import.meta.url);
+/** Receipt written by bootstrap; --force only replaces a directory that carries it. */
+const INSTALL_MARKER = ".ralph-install.json";
+const INSTALL_KIND = "ralph-audit-embedded";
+
+/** True when the directory is a Ralph embedded install: its receipt, or a pre-receipt manifest. */
+function isRalphInstall(destination: string): boolean {
+  const entry = lstatSync(destination);
+  if (entry.isSymbolicLink() || !entry.isDirectory()) return false;
+  try {
+    const marker = join(destination, INSTALL_MARKER);
+    if (lstatSync(marker).isFile())
+      return (JSON.parse(readFileSync(marker, "utf8")) as { kind?: unknown }).kind === INSTALL_KIND;
+  } catch {
+    /* fall through to the pre-receipt manifest */
+  }
+  try {
+    const manifest = JSON.parse(readFileSync(join(destination, "package.json"), "utf8")) as {
+      name?: unknown;
+      bin?: { ralph?: unknown };
+    };
+    return manifest.name === "ralph-audit" && manifest.bin?.ralph === "dist/src/cli.js";
+  } catch {
+    return false;
+  }
+}
 
 function packageRoot(): string {
   return resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -88,8 +113,25 @@ export function bootstrap(target: string, force = false): string {
   }
   if (existsSync(destination) && !force)
     throw new RalphError(`destination already exists: ${destination} (use --force to overwrite)`);
-  if (existsSync(destination)) rmSync(destination, { recursive: true, force: true });
+  if (existsSync(destination)) {
+    if (!isRalphInstall(destination))
+      throw new RalphError(
+        `refusing to replace ${destination}: it has no Ralph install receipt (${INSTALL_MARKER})`,
+      );
+    rmSync(destination, { recursive: true, force: true });
+  }
   mkdirSync(destination, { recursive: true, mode: 0o700 });
+  const version = (
+    JSON.parse(readFileSync(join(sourceRoot, "package.json"), "utf8")) as { version: string }
+  ).version;
+  // The receipt goes down first, so --force can replace an interrupted bootstrap.
+  const writeReceipt = (state: "installing" | "installed"): void =>
+    atomicWriteRelative(
+      destination,
+      INSTALL_MARKER,
+      `${JSON.stringify({ kind: INSTALL_KIND, version, state, installed_at: isoUtc() })}\n`,
+    );
+  writeReceipt("installing");
   for (const relativePath of EMBEDDED_FILES) {
     const source = join(sourceRoot, relativePath);
     const output = join(destination, relativePath);
@@ -119,7 +161,7 @@ export function bootstrap(target: string, force = false): string {
       {
         name: "ralph-audit",
         private: true,
-        version: "0.4.0",
+        version,
         type: "module",
         engines: { node: ">=24.0.0" },
         bin: { ralph: "dist/src/cli.js", "ralph-helper": "dist/src/helper-cli.js" },
@@ -129,6 +171,7 @@ export function bootstrap(target: string, force = false): string {
       2,
     )}\n`,
   );
+  writeReceipt("installed");
   return destination;
 }
 

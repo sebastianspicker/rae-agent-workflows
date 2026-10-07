@@ -46,13 +46,20 @@ New autonomous runs resolve their workflow in this order:
 2. the locally activated workflow revision;
 3. `workflows/graph-native-default.workflow.json`.
 
-The engine validates and canonicalizes the selected definition, records its
-digest, and snapshots the workflow, guidance, and payload contracts into the
-run. Resume uses that immutable snapshot.
+The engine validates and canonicalizes the selected definition in authoring
+mode, records its digest, and snapshots the workflow, guidance, and payload
+contracts into the run. Resume uses that immutable snapshot and validates it in
+snapshot mode (structure and topology only), so rules added to authoring later
+do not strand stored runs.
 
 The default graph combines read-only requirements, design, criticism,
 adjudication, planning, and alignment nodes with one exclusive writer and a
-bounded repair loop. Read nodes may run concurrently up to the configured
+bounded repair loop. Design (with its `design-gate`) and planning (with its
+`alignment-gate`) are each bounded loops of at most three rounds, and the
+`verification` gate also sees the critics' findings. A workflow may set
+`budgets.max_wall_clock_seconds` and `budgets.max_provider_attempts`; the
+default sets 14400 and 96. Exceeding either, or exhausting a loop, ends the
+run as `repair-exhausted` with a recorded reason. Read nodes may run concurrently up to the configured
 limit. Shared command resources serialize, and a writer waits for readers
 before running alone. Every provider attempt uses a fresh session and must
 return a schema-valid node envelope.
@@ -68,6 +75,33 @@ atomically records the complete assembly evidence, context and prompt digests,
 and exact byte measurements at
 `.pipeline/runs/<run-id>/workflow/context-assemblies/<node-id>/<instance>.loop-<iteration>.attempt-<attempt>.json`.
 The record remains available when the provider fails.
+
+A repair loop runs at most `--max-repair-rounds N` repairs: its iteration cap is
+`min(max_iterations, N + 1)`. Finding identity for no-progress detection is the
+summary together with the blocking flag.
+
+Gitignored paths are fingerprinted before and after every provider node. A
+read-only node may change none. A writer's changes to ignored paths block
+unless the policy's optional `ignored_write_allow` lists them; each entry is a
+relative directory prefix ending in `/` without `..`, defaulting to `dist/`,
+`build/`, `coverage/`, `.cache/`, `node_modules/`, `__pycache__/`,
+`.pytest_cache/`, `.mypy_cache/`, `.ruff_cache/`, `target/`, `.next/` and
+`.turbo/`. Allowlisted ignored directories are not ownership-checked and are
+exactly where verification commands execute. An ignored directory too large to
+fingerprint completely (20,000 entries or 256 MiB) outside the allow list is a
+blocking finding for writers and read-only nodes alike. Ignore and attributes
+files are never allowed.
+
+Git state is compared in three scopes: `full` (initial preflight, every ref
+except other runs' `refs/heads/pipeline/*`), `phase` (per provider phase;
+sensitive refs, HEAD, index and non-benign config) and `resume` (`phase`
+without refs). The
+[engine runbook](../../docs/how-to/engine-runbook.md) describes them.
+`RAE_STATE_HOME` relocates the runner-owned guard state; an invalid or
+group-writable location is rejected, not ignored. Run budgets
+(`budgets.max_wall_clock_seconds`, `budgets.max_provider_attempts`) end a run as
+`repair-exhausted` with the budget as reason. A SIGTERM or SIGINT to a worker
+aborts its provider and kills the provider process group.
 
 The ten-stage v1 engine remains for existing v1 resumes and explicit
 `--legacy-linear` runs. Workflow 2.2 is a separate experimental local
@@ -121,10 +155,11 @@ and cannot authorize mutation, change a gate, or replace raw evidence.
 - `--context-mode legacy|bounded` controls workflow 2.0 and 2.1 provider
   context; the default is `legacy`.
 - `--checkpoint-policy none|before-mutation|before-mutation-and-ship` controls
-  human pauses.
+  human pauses; the CLI default is `before-mutation`.
 
 Provider selection and credentials do not belong in workflow data. See the
 [execution-profile reference](../../docs/reference/contracts/execution-profile-v3.md),
+[workflow 2.0 and 2.1 reference](../../docs/reference/contracts/workflow-v2.md),
 [workflow 2.2 reference](../../docs/reference/contracts/workflow-v2.2.md), and
 [graph-memory reference](../../docs/reference/contracts/graph-memory.md).
 

@@ -1,7 +1,7 @@
 ---
 status: experimental
 owner: orchestration
-last_reviewed: 2026-08-04
+last_reviewed: 2026-10-07
 source_of_truth: packages/contracts/v1/schemas/workflows/workflow-v2.1.schema.json
 evidence_links: ../reference/claims/evidence-index.md
 ---
@@ -204,8 +204,11 @@ npm run rae -- graph workflow activate \
   --rationale "Reviewed contracts, bounds, and writer path"
 ```
 
-Activation affects future runs only. Existing runs keep their immutable 2.0 or
-2.1 snapshot.
+Activation affects future runs only. Existing runs keep their immutable 2.0,
+2.1, or experimental 2.2 snapshot, which is validated under the rules of its
+original schema version. See the
+[workflow 2.0 and 2.1 reference](../reference/contracts/workflow-v2.md) and the
+[workflow 2.2 reference](../reference/contracts/workflow-v2.2.md).
 
 ## Six topology recipes
 
@@ -215,8 +218,11 @@ then pass the same file to `agent run`.
 
 ### Route auditing
 
-`route-audit.workflow.json` maps a bounded route inventory, applies specialist
-checks, and joins all results before verification.
+`route-audit.workflow.json` is a three-stage pipeline: an `inventory` agent
+returns at most 32 declared routes, the `audit-route` map node audits each
+route in its own instance, and the verification gate receives the mapped
+results directly. There is no join node; the gate fails when any route
+finding is blocking or any mapped instance did not pass.
 
 ```bash
 npm run rae -- graph workflow validate --project-root "$PWD" \
@@ -228,8 +234,11 @@ npm run rae -- agent run --project-root /path/to/target \
 
 ### Cited research
 
-`cited-research.workflow.json` separates claim collection, source checking, and
-quorum synthesis. Citations remain payload data, not executable references.
+`cited-research.workflow.json` decomposes the task into claims, checks them in
+two independent source lanes (contracts and implementation), and collects both
+lanes in a quorum join with threshold 2 before the verification gate. With two
+inputs, a quorum of 2 behaves like `join: all`; there is no separate synthesis
+node. Citations remain payload data, not executable references.
 
 ```bash
 npm run rae -- agent run --project-root /path/to/target \
@@ -242,6 +251,11 @@ npm run rae -- agent run --project-root /path/to/target \
 
 `module-migration.workflow.json` maps read-only module analysis, forms an
 ownership plan, crosses a mutation checkpoint, and uses one serialized writer.
+After the writer, two read-only critics (`critic-tests` and `critic-contracts`)
+run in parallel and a `repair-join` node reduces their findings, so the
+`verification` gate sees them. Like every writer recipe, it ends with a
+`release-checkpoint` after the verification gate, which pauses only under
+`before-mutation-and-ship`.
 
 ```bash
 npm run rae -- agent run --project-root /path/to/target \

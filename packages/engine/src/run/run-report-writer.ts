@@ -4,6 +4,7 @@ import { relative, resolve } from "node:path";
 import { PHASE_ORDER } from "./constants.js";
 import { changedPaths } from "./autonomous-git.js";
 import { documentationAssessment } from "./autonomous-phase-contract.js";
+import { readOperatorControl } from "./operator-control.js";
 import { readJsonStrict, writeJson } from "./state.js";
 import type { DocumentationAssessment } from "./autonomous-phase-contract.js";
 import type { AutonomousLifecycleContext } from "./autonomous-lifecycle.js";
@@ -78,7 +79,12 @@ function reportData(context: AutonomousLifecycleContext, outcome: RunOutcome): R
     state,
     docs,
     cleanupCommand: recordValue(state.workspace).cleanup_command ?? null,
-    status: reportStatus(outcome, gates, graphNative),
+    status: reportStatus(
+      outcome,
+      gates,
+      graphNative,
+      readOperatorControl(context.runId, context.workspaceRoot).stop_requested === true,
+    ),
     agentEventLogs: graphNative
       ? graphEventLogs(context.workspaceRoot, runDir)
       : eventLogs(context.workspaceRoot, runDir),
@@ -116,19 +122,26 @@ function readGraphPlan(
     : null;
 }
 
-function graphRows(runDir: string): GateRow[] {
-  const latest = new Map<unknown, GateRow & { attempt: number }>();
+/** Latest envelope per node instance, ordered by (loop_iteration, attempt); exported for tests. */
+export function graphRows(runDir: string): GateRow[] {
+  const latest = new Map<unknown, GateRow & { attempt: number; loopIteration: number }>();
   for (const pathValue of workflowEnvelopeFiles(runDir)) {
     const envelope = readJsonStrict(pathValue);
     const instanceId = envelope.instance_id ?? envelope.node_id;
     const prior = latest.get(instanceId);
     const attempt = typeof envelope.attempt === "number" ? envelope.attempt : 0;
-    if (!prior || attempt >= prior.attempt) {
+    const loopIteration = typeof envelope.loop_iteration === "number" ? envelope.loop_iteration : 1;
+    const newer =
+      !prior ||
+      loopIteration > prior.loopIteration ||
+      (loopIteration === prior.loopIteration && attempt >= prior.attempt);
+    if (newer) {
       latest.set(instanceId, {
         phase: String(instanceId),
         status: envelope.status,
         artifact_ref: relative(runDir, pathValue),
         attempt,
+        loopIteration,
       });
     }
   }
@@ -162,10 +175,20 @@ function graphEventLogs(workspaceRoot: string, runDir: string): string[] {
     .sort()
     .map((name) => relative(workspaceRoot, resolve(directory, name)));
 }
-function reportStatus(outcome: RunOutcome, gates: GateRow[], graphNative: boolean): string {
+/**
+ * Derives the report status. `through` means a graph run reached its requested --through node;
+ * it is distinct from an operator stop, which is read from the control file (`stopRequested`).
+ */
+export function reportStatus(
+  outcome: RunOutcome,
+  gates: GateRow[],
+  graphNative: boolean,
+  stopRequested = false,
+): string {
   if (outcome.error) return "blocked";
   if (outcome.status === "waiting") return "waiting-for-human-checkpoint";
-  if (outcome.status === "stopped") return "stopped-by-operator";
+  if (outcome.status === "through") return "stopped-at-through-node";
+  if (outcome.status === "stopped" || stopRequested) return "stopped-by-operator";
   if (graphNative) return "implemented-awaiting-human-release-review";
   return gates.filter((gate) => gate.status === "pass" || gate.status === "warn").length ===
     PHASE_ORDER.length
@@ -227,6 +250,9 @@ function reportHeader(data: ReportData): string[] {
     workspaceModeLine(state),
     branchLine(state),
     cleanupLine(cleanupCommand),
+    ...(status === "stopped-at-through-node"
+      ? ["- Stop reason: the requested `--through` node completed; resume continues the run."]
+      : []),
     providerLine(outcome),
     policyLine(context),
     "- Release action: `none` (RAE does not commit, push, publish, or deploy)",

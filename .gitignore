@@ -50,8 +50,8 @@ junit*.xml
 .cache/
 __pycache__/
 *.pyc
-/.pipeline/
-/.runtime/
+**/.pipeline/
+**/.runtime/
 /.worktrees/
 **/.worktrees/
 **/worktrees/
@@ -218,3 +218,7 @@ id_ed25519.*
 /docs/research/deep-audit-*.md
 /docs/research/scientific-proofread-notes.md
 /packages/ralph/AGENTS.md
+/.rae-profile-install.json
+/.rae-profile-backups/
+/.rae-profile-recovery-*
+/docs/agent-operator-policy.md

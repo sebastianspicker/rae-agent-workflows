@@ -8,11 +8,11 @@ export default defineConfig({
   title: "RAE",
   description: "Reliable Agentic Engineering",
   lang: "en-US",
-  base: "/rae-agent-workflows/",
+  base: "/rae-agent-workflows/docs/",
   outDir: resolve(import.meta.dirname, "../../site"),
   srcExclude: ["agent/**", "archive/**"],
   rewrites: { "INDEX.md": "index.md" },
-  head: [["link", { rel: "icon", href: "/rae-agent-workflows/assets/brand/rae-mark.svg" }]],
+  head: [["link", { rel: "icon", href: "/rae-agent-workflows/docs/assets/brand/rae-mark.svg" }]],
   markdown: { math: true },
   themeConfig: {
     logo: "/assets/brand/rae-mark.svg",
@@ -26,7 +26,9 @@ export default defineConfig({
     ],
     search: { provider: "local" },
     outline: [2, 3],
-    socialLinks: [{ icon: "github", link: "https://github.com/sebastianspicker/rae-agent-workflows" }],
+    socialLinks: [
+      { icon: "github", link: "https://github.com/sebastianspicker/rae-agent-workflows" },
+    ],
   },
   buildEnd(site) {
     cpSync(resolve(import.meta.dirname, "../assets"), resolve(site.outDir, "assets"), {

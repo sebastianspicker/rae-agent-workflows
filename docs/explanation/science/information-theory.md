@@ -1,7 +1,7 @@
 ---
 status: stable
 owner: science
-last_reviewed: 2026-04-17
+last_reviewed: 2026-10-07
 source_of_truth: editorial
 evidence_links: ../../reference/claims/evidence-index.md
 ---
@@ -27,11 +27,18 @@ it adds noise faster than task-relevant signal.
 - $N$
   Stale, weakly relevant, or irrelevant material.
 - $H(C)$
-  Context description length or entropy proxy.
+  Context description length or entropy proxy, measured in bits so that
+  $\mathcal{I}(I; C) / H(C)$ is dimensionless.
 - $\mathcal{I}(I; C)$
   Mutual information between intent and provided context.
 - $\rho(C)$
-  Informal relevance density, treated here as $\mathcal{I}(I; C) / H(C)$.
+  Informal relevance density (signal-to-noise proxy), defined as
+  $\mathcal{I}(I; C) / H(C)$. The notation page's $\mathrm{SNR}_{\text{info}}$ is
+  the same quantity.
+- $K_{\text{noise}}$
+  Count of additional weakly relevant or irrelevant tokens.
+- $\Delta$
+  Logit gap by which relevant tokens outscore irrelevant ones.
 
 ## Assumptions
 
@@ -61,18 +68,19 @@ $$
 \mathcal{I}(I; S)
 $$
 
-As noise grows, $H(C)$ can increase faster than task-relevant information. A
-useful proxy is:
-
-$$
-\mathrm{SNR}_{\text{info}} = \frac{\mathcal{I}(I; C)}{H(C)}
-$$
-
-Under those assumptions, growing $N$ tends to reduce effective signal density:
+As noise grows, $H(C)$ can increase faster than task-relevant information. The
+proxy is the relevance density:
 
 $$
 \rho(C) = \frac{\mathcal{I}(I; C)}{H(C)}
 $$
+
+Under those assumptions, growing $N$ reduces $\rho$. Argument: the numerator
+stays at $\mathcal{I}(I; S)$, while the denominator is
+$H(C) = H(S) + H(N \mid S)$, which does not decrease when material is added to
+$N$ and increases whenever the added material is not fully predictable from
+$C$. A fixed numerator over a growing denominator gives a non-increasing
+$\rho$.
 
 ## Proposition 2: attention makes irrelevant tokens operationally costly
 
@@ -84,15 +92,19 @@ $$
 
 Adding more irrelevant tokens increases the denominator and can reduce the mass
 available to relevant tokens, even when the model is theoretically capable of
-processing the full sequence. A simple intuition is:
+processing the full sequence. Suppose relevant tokens score a logit gap $\Delta$
+above irrelevant ones. A simple intuition is:
 
 $$
 \mathbb{E}\left[\sum_{i \in S} a_i\right]
 \approx
-\frac{|S|}{|S| + K}
+\frac{|S| e^{\Delta}}{|S| e^{\Delta} + K_{\text{noise}}}
 $$
 
-where $K$ is the count of additional weakly relevant or irrelevant tokens.
+where $K_{\text{noise}}$ is the count of additional weakly relevant or
+irrelevant tokens. The equal-logit case $\Delta = 0$ gives
+$|S| / (|S| + K_{\text{noise}})$. For any finite $\Delta$ the mass still falls
+as $K_{\text{noise}}$ grows, though a large gap slows the decline.
 
 ## Proposition 3: long context is also a compute and error-surface decision
 

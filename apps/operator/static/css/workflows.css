@@ -85,8 +85,9 @@
 }
 
 /* Systems map */
+/* The map draws at its viewBox size; this frame scrolls rather than shrinking the labels. */
 .graph-scroll {
-  overflow-x: auto;
+  overflow: auto;
   border: var(--hair);
   background-color: var(--sunk);
   background-image: radial-gradient(circle, var(--line) 1px, transparent 1.2px);
@@ -95,10 +96,9 @@
 
 #workflow-graph {
   display: block;
-  width: 100%;
-  min-width: 40rem;
-  height: auto;
-  min-height: 12rem;
+  width: var(--graph-width, 640px);
+  max-width: none;
+  height: var(--graph-height, 250px);
   stroke-width: 1;
   font-family: var(--mono);
 }
@@ -166,6 +166,8 @@
   font-size: 9.5px;
   font-weight: 400;
   text-anchor: middle;
+  dominant-baseline: middle;
+  /* The halo keeps a label legible where it crosses its own path or a neighbouring line. */
   paint-order: stroke;
   stroke: var(--sunk);
   stroke-width: 4px;

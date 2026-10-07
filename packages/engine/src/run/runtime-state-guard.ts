@@ -19,8 +19,9 @@ import {
 } from "node:fs";
 import type { Stats } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
-import { basename, dirname, resolve } from "node:path";
+import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { isWithinRoot } from "../primitives/paths.js";
+import { processAlive } from "../primitives/stale-lock.js";
 import { gitOutput, sha256, validateConcurrentOperatorChanges } from "./autonomous-git.js";
 
 const GUARD_SCHEMA = "1.0.0";
@@ -180,18 +181,66 @@ function assertGuardOutsideWritableRoots(pathValue: string, identity: Repository
   }
 }
 
+/**
+ * The state root that holds the guards: `RAE_STATE_HOME` when set, otherwise `~/.local/state`. An
+ * override must be an absolute path that neither contains nor lies inside the workspace and does
+ * not lie inside any provider-writable root; anything else throws instead of being ignored.
+ */
+function guardStateHome(identity: RepositoryIdentity): { path: string; overridden: boolean } {
+  const override = process.env.RAE_STATE_HOME;
+  if (!override) {
+    return {
+      path: resolve(realpathSync(userInfo().homedir), ".local", "state"),
+      overridden: false,
+    };
+  }
+  const reject = (reason: string): never => {
+    throw new Error(`RAE_STATE_HOME ${JSON.stringify(override)} is invalid: ${reason}`);
+  };
+  if (!isAbsolute(override)) reject("it must be an absolute path");
+  const planned = canonicalPlannedPath(override);
+  if (isWithinRoot(identity.workspace, planned)) reject("it is inside the workspace");
+  if (isWithinRoot(planned, identity.workspace)) reject("it contains the workspace");
+  const writable = writableRoots(identity).find((root) => isWithinRoot(root, planned));
+  if (writable) reject(`it is inside the provider-writable root ${writable}`);
+  return { path: planned, overridden: true };
+}
+
+/**
+ * Every directory from the state home down to `pipeline-guards` must belong to this user, not be a
+ * symlink, and not be writable by group or others, so no one else can swap a path component.
+ */
+function assertTrustedStateChain(stateHome: string, base: string): void {
+  if (typeof process.getuid !== "function") return;
+  const chain = [base];
+  for (let current = base; current !== stateHome; ) {
+    current = dirname(current);
+    chain.push(current);
+    if (current === dirname(current)) break;
+  }
+  for (const directory of chain) {
+    const stat = lstatSync(directory);
+    if (
+      !stat.isDirectory() ||
+      stat.isSymbolicLink() ||
+      stat.uid !== process.getuid() ||
+      (stat.mode & 0o022) !== 0
+    ) {
+      throw new Error(
+        `RAE_STATE_HOME component is not an owner-only directory (owned by this user, not a symlink, not group or world writable): ${directory}`,
+      );
+    }
+  }
+}
+
 function guardPaths(workspaceRoot: string): GuardPaths {
   const identity = repositoryIdentity(workspaceRoot);
-  const intendedBase = resolve(
-    realpathSync(userInfo().homedir),
-    ".local",
-    "state",
-    "rae",
-    "pipeline-guards",
-  );
+  const stateHome = guardStateHome(identity);
+  const intendedBase = resolve(stateHome.path, "rae", "pipeline-guards");
   const plannedBase = canonicalPlannedPath(intendedBase);
   assertGuardOutsideWritableRoots(plannedBase, identity);
   privateDirectory(plannedBase);
+  if (stateHome.overridden) assertTrustedStateChain(stateHome.path, plannedBase);
   const base = realpathSync(plannedBase);
   if (base !== plannedBase) {
     throw new Error("pipeline state guard location changed while it was being prepared");
@@ -411,7 +460,8 @@ function validManifestOwner(manifest: Partial<GuardManifest>): boolean {
 }
 
 function validManifestPhase(phase: unknown): phase is string | null {
-  return phase === null || (typeof phase === "string" && ["build", "post-build"].includes(phase));
+  // Phases are workflow node ids (for example build, repair, migrate); legacy phases match the same pattern.
+  return phase === null || (typeof phase === "string" && /^[a-z][a-z0-9._-]{0,63}$/.test(phase));
 }
 
 function validManifestRefs(manifest: Partial<GuardManifest>): boolean {
@@ -677,15 +727,7 @@ function replaceRuntimeFile(pipelineRoot: string, ref: string, file: RuntimeFile
   chmodSync(pathValue, file.mode);
 }
 
-function processAlive(pid: number | null | undefined): boolean {
-  if (typeof pid !== "number" || !Number.isSafeInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error instanceof Error && "code" in error && error.code === "EPERM";
-  }
-}
+export { processAlive };
 
 function activeGuardError(
   manifest: Pick<GuardManifest, "phase">,

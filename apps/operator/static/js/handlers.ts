@@ -1,10 +1,10 @@
 /** Wire DOM controls to operator actions. */
 
-import { showError, showToast } from "./api.js";
+import { dismissError, showError, showToast } from "./api.js";
 import { closeConfirmation, openConfirmation, postAction, submitConfirmation } from "./actions.js";
 import { loadExecutionProfiles, loadMoreRuns, loadRuns, selectRun } from "./data.js";
 import { humanize } from "./format.js";
-import { renderRuns, setEvidenceExpanded } from "./render.js";
+import { renderRuns, setEvidenceExpanded, toggleTaskHeadline } from "./render.js";
 import { loadWorkflows } from "./workflows.js";
 import { elements, state } from "./state.js";
 
@@ -23,6 +23,9 @@ function bindProjects(): void {
   elements["project-select"].addEventListener("change", async () => {
     state.projectId = elements["project-select"].value;
     state.runId = null;
+    // Workflow ids are per project; the registry reload selects the new project's first entry.
+    state.workflowId = null;
+    state.workflow = null;
     state.runQuery = "";
     elements["run-search-input"].value = "";
     await loadRuns(false).catch(showError);
@@ -31,7 +34,41 @@ function bindProjects(): void {
   });
 }
 
+const FILTERS = ["all", "active", "decision", "proof", "blocked"];
+const FILTER_LABELS: Readonly<Record<string, string>> = {
+  decision: "Needs decision",
+  proof: "Completed",
+};
+
+function setRunFilter(filter: string): void {
+  state.runFilter = FILTERS.includes(filter) ? filter : "all";
+  const label = FILTER_LABELS[state.runFilter] ?? humanize(state.runFilter);
+  elements["filter-label"].textContent = label;
+  elements["cycle-filter"].dataset.active = String(state.runFilter !== "all");
+  elements["cycle-filter"].setAttribute("aria-label", `Filter runs: ${label.toLowerCase()}`);
+  renderRuns();
+}
+
+function isApplePlatform(): boolean {
+  const platform =
+    (navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData?.platform ??
+    navigator.platform;
+  return /mac|iphone|ipad|ipod/i.test(platform ?? "");
+}
+
+/** Opens the search field when it is closed and moves focus into it; it never toggles closed. */
+function focusRunSearch(): void {
+  elements["toggle-search"].setAttribute("aria-expanded", "true");
+  elements["run-search"].hidden = false;
+  showRunCatalogue();
+  elements["run-search-input"].focus();
+  (elements["run-search-input"] as unknown as HTMLInputElement).select();
+}
+
 function bindRunSearch(): void {
+  const apple = isApplePlatform();
+  elements["search-shortcut"].textContent = apple ? "⌘K" : "Ctrl K";
+  elements["toggle-search"].setAttribute("aria-keyshortcuts", apple ? "Meta+K" : "Control+K");
   elements["toggle-search"].addEventListener("click", () => {
     const expanded = elements["toggle-search"].getAttribute("aria-expanded") !== "true";
     elements["toggle-search"].setAttribute("aria-expanded", String(expanded));
@@ -43,9 +80,9 @@ function bindRunSearch(): void {
   });
 
   document.addEventListener("keydown", (event) => {
-    if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "k") return;
+    if (!(apple ? event.metaKey : event.ctrlKey) || event.key.toLowerCase() !== "k") return;
     event.preventDefault();
-    elements["toggle-search"].click();
+    focusRunSearch();
   });
 
   elements["run-search-input"].addEventListener("input", () => {
@@ -54,13 +91,12 @@ function bindRunSearch(): void {
   });
 
   elements["cycle-filter"].addEventListener("click", () => {
-    const filters = ["all", "active", "proof", "blocked"];
-    state.runFilter = filters[(filters.indexOf(state.runFilter) + 1) % filters.length] ?? "all";
-    const label = state.runFilter === "proof" ? "Completed" : humanize(state.runFilter);
-    elements["filter-label"].textContent = label;
-    elements["cycle-filter"].dataset.active = String(state.runFilter !== "all");
-    elements["cycle-filter"].setAttribute("aria-label", `Filter runs: ${label.toLowerCase()}`);
-    renderRuns();
+    setRunFilter(FILTERS[(FILTERS.indexOf(state.runFilter) + 1) % FILTERS.length] ?? "all");
+  });
+
+  elements["decisions-pending"].addEventListener("click", () => {
+    setRunFilter("decision");
+    showRunCatalogue();
   });
 }
 
@@ -134,6 +170,11 @@ function bindConfirmations(): void {
   });
 }
 
+function bindNotices(): void {
+  elements["error-toast-close"].addEventListener("click", dismissError);
+  elements["task-toggle"].addEventListener("click", toggleTaskHeadline);
+}
+
 function bindEvidenceControls(): void {
   elements["expand-all"].addEventListener("click", () => setEvidenceExpanded(true));
   elements["collapse-all"].addEventListener("click", () => setEvidenceExpanded(false));
@@ -153,4 +194,5 @@ export function bindHandlers(): void {
   bindRunActions();
   bindConfirmations();
   bindEvidenceControls();
+  bindNotices();
 }

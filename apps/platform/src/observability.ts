@@ -29,6 +29,17 @@ export function createLogger(base: Record<string, unknown> = {}) {
     );
 }
 
+const SNAPSHOT_GAUGES = [
+  "queueDepth",
+  "activeWaits",
+  "workerFreshnessSeconds",
+  "outboxPending",
+  "activeEventStreams",
+  "poolTotal",
+  "poolIdle",
+  "poolWaiting",
+] as const;
+
 export class Metrics {
   requests = new Map<string, number>();
   requestDurationMs = new Map<string, number>();
@@ -41,6 +52,10 @@ export class Metrics {
   queueDepth = 0;
   activeWaits = 0;
   workerFreshnessSeconds = 0;
+  activeEventStreams = 0;
+  poolTotal = 0;
+  poolIdle = 0;
+  poolWaiting = 0;
   signalLatencySeconds = 0;
   contextIncludedBytes = 0;
   contextOmittedItems = 0;
@@ -59,17 +74,8 @@ export class Metrics {
       (this.requestDurationMs.get(key) || 0) + nonnegative(durationMs),
     );
   }
-  applySnapshot(
-    snapshot: Partial<
-      Record<"queueDepth" | "activeWaits" | "workerFreshnessSeconds" | "outboxPending", number>
-    > = {},
-  ) {
-    for (const key of [
-      "queueDepth",
-      "activeWaits",
-      "workerFreshnessSeconds",
-      "outboxPending",
-    ] as const)
+  applySnapshot(snapshot: Partial<Record<(typeof SNAPSHOT_GAUGES)[number], number>> = {}) {
+    for (const key of SNAPSHOT_GAUGES)
       if (typeof snapshot[key] === "number" && Number.isFinite(snapshot[key]))
         this[key] = snapshot[key];
   }
@@ -111,6 +117,10 @@ export class Metrics {
       `rae_platform_queue_depth ${this.queueDepth}`,
       `rae_platform_active_waits ${this.activeWaits}`,
       `rae_platform_worker_freshness_seconds ${this.workerFreshnessSeconds}`,
+      `rae_platform_active_event_streams ${this.activeEventStreams}`,
+      `rae_platform_db_pool_total ${this.poolTotal}`,
+      `rae_platform_db_pool_idle ${this.poolIdle}`,
+      `rae_platform_db_pool_waiting ${this.poolWaiting}`,
       `rae_platform_signal_latency_seconds ${this.signalLatencySeconds}`,
       `rae_platform_context_included_bytes_total ${this.contextIncludedBytes}`,
       `rae_platform_context_omitted_items_total ${this.contextOmittedItems}`,

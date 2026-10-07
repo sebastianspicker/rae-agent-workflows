@@ -1,8 +1,8 @@
 ---
 status: stable
 owner: science
-last_reviewed: 2026-04-17
-source_of_truth: ../claims-ledger.md
+last_reviewed: 2026-10-07
+source_of_truth: docs/reference/claims/claims-ledger.md
 evidence_links: ../evidence-index.md#clm-007
 ---
 
@@ -64,7 +64,10 @@ No frozen repo-local artifact calibrates the coefficients on this page yet.
 
 ## Review status
 
-Adopted as a scoped heuristic, not as a universal law.
+Provisional as a scoped heuristic, not a universal law.
+No retained measurement supports it yet; the
+[claims ledger](../claims-ledger.md#metrics-for-provisional-claims) names the
+metric that would test it.
 
 ## Source note
 

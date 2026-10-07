@@ -310,6 +310,10 @@
   color: var(--hold);
 }
 
+.g-fail {
+  color: var(--fault);
+}
+
 .g-wait {
   color: var(--mute);
 }

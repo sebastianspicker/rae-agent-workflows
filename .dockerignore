@@ -13,3 +13,18 @@ site
 **/.pipeline
 **/.runtime
 **/.characterization
+
+# Private tests, fixtures, and local test helpers
+**/test
+**/tests
+**/__tests__
+**/fixtures
+**/__snapshots__
+**/*.test.*
+**/*.spec.*
+**/vitest.config.*
+**/jest.config.*
+**/pytest.ini
+**/conftest.py
+scripts/src/test-*.ts
+packages/ralph/src/test-cli.ts

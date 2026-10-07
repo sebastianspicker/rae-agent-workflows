@@ -1126,6 +1126,8 @@ export type WorkflowsWorkflowV21 = {
     max_dynamic_instances?: number;
     max_pipeline_depth?: number;
     max_map_items?: number;
+    max_wall_clock_seconds?: number;
+    max_provider_attempts?: number;
   };
 };
 
@@ -1221,6 +1223,8 @@ export type WorkflowsWorkflowV2 = {
     max_concurrency?: number;
     max_repair_rounds?: number;
     max_attempts_per_node?: number;
+    max_wall_clock_seconds?: number;
+    max_provider_attempts?: number;
   };
 };
 
@@ -1321,9 +1325,9 @@ export const schemaDigests = {
   "workflows/node-envelope-v2.schema.json":
     "97bb56a3ec5ab98e2fe2208cf2df8ed2342ca83942d3b97b5f96fd85b64a7315",
   "workflows/workflow-v2.1.schema.json":
-    "0c3e550e866be7f86fab86e5fa306618e3c599a450ed3461eb826902774f6d80",
+    "82ecd3d1dfd00a034bd9aa2039a4f99591f0089dbc33fef5cfffb8d3946035cf",
   "workflows/workflow-v2.2.schema.json":
     "8923e5350ed75117a0db86b024c4dfd4400dfd1ddf8b70f9e5abf052cd2dc643",
   "workflows/workflow-v2.schema.json":
-    "82918ce6d4a876ac99c5d20eba919a01470c3040e12b8a7973e0177b2d784272",
+    "df55459b61b4ebdae3a6240a3a990268f541ccdfe7a04b0eb32be764aba9b725",
 } as const;

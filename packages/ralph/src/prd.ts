@@ -1,6 +1,6 @@
 /** Validates PRD contracts and resolves story scope and report destinations. */
 import { existsSync, realpathSync } from "node:fs";
-import { dirname, relative, resolve } from "node:path";
+import { basename, dirname, relative, resolve } from "node:path";
 import { createRequire } from "node:module";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { EXIT, RalphError } from "./errors.js";
@@ -8,7 +8,7 @@ import { readRelative } from "./safe-fs.js";
 import { isWithin, safeRelativePath } from "./util.js";
 import type { Mode, Prd, RuntimePaths, Story } from "./types.js";
 
-const CREATED = /^Created\s+`?[^`\s]+`?(?:\s+.*)?$/;
+const CREATED = /^Created\s+(`?[^`\s]+`?)(?:\s+.*)?$/;
 const HIDDEN_CONTROL_RANGES = [
   [0, 8],
   [11, 12],
@@ -68,25 +68,46 @@ export function loadPrd(paths: RuntimePaths): Prd {
   ] as const) {
     if (!existsSync(path)) throw new RalphError(`Missing ${label} file: ${path}`, EXIT.prd);
   }
-  const packagePrefix = relative(paths.repoRoot, paths.packageRoot).split("\\").join("/");
-  const fromRepo = (name: string): Buffer =>
-    readRelative(
-      paths.repoRoot,
-      packagePrefix ? `${safeRelativePath(packagePrefix)}/${name}` : name,
-      4 * 1024 * 1024,
-    );
-  const value = parsePrd(fromRepo("prd.json"));
+  const value = parsePrd(readRuntimeFile(paths, paths.prdFile));
   let schema: object;
   try {
-    schema = JSON.parse(fromRepo("prd.schema.json").toString("utf8")) as object;
+    schema = JSON.parse(readRuntimeFile(paths, paths.schemaFile).toString("utf8")) as object;
   } catch (error) {
     throw new RalphError(`Invalid PRD schema JSON: ${String(error)}`, EXIT.prd);
   }
   try {
-    fromRepo("INSTRUCTIONS.md");
+    readRuntimeFile(paths, paths.policyFile);
   } catch (error) {
     throw new RalphError(`Invalid policy file: ${String(error)}`, EXIT.prd);
   }
+  return checkPrd(paths, value, schema);
+}
+
+/** Reads a bundle file confined to the repository, or the schema from an external package. */
+function readRuntimeFile(paths: RuntimePaths, file: string): Buffer {
+  const limit = 4 * 1024 * 1024;
+  if (!isWithin(paths.repoRoot, resolve(file)))
+    return readRelative(realpathSync.native(dirname(file)), basename(file), limit);
+  return readRelative(
+    paths.repoRoot,
+    safeRelativePath(relative(paths.repoRoot, file).split("\\").join("/")),
+    limit,
+  );
+}
+
+/** Validates an in-memory PRD with the shipped schema and story rules. */
+export function validatePrdValue(paths: RuntimePaths, value: unknown): Prd {
+  let schema: object;
+  try {
+    schema = JSON.parse(readRuntimeFile(paths, paths.schemaFile).toString("utf8")) as object;
+  } catch (error) {
+    throw new RalphError(`Invalid PRD schema JSON: ${String(error)}`, EXIT.prd);
+  }
+  assertVisibleValues(value);
+  return checkPrd(paths, value, schema);
+}
+
+function checkPrd(paths: RuntimePaths, value: unknown, schema: object): Prd {
   const ajv = new Ajv2020({ allErrors: true, strict: true, strictRequired: false });
   addFormats(ajv);
   const validate = ajv.compile(schema);
@@ -102,6 +123,7 @@ export function loadPrd(paths: RuntimePaths): Prd {
   for (const story of prd.stories) {
     if (ids.has(story.id)) throw new RalphError(`Duplicate story id: ${story.id}`, EXIT.prd);
     ids.add(story.id);
+    assertSingleLine(story);
     const created = story.acceptance_criteria.filter((line) => CREATED.test(line));
     if (created.length !== 1)
       throw new RalphError(
@@ -111,6 +133,16 @@ export function loadPrd(paths: RuntimePaths): Prd {
     extractReportPath(created[0] ?? "", prd, paths, false);
   }
   return prd;
+}
+
+/** Titles, scope patterns, and step titles must be single lines so they cannot forge prompt text. */
+function assertSingleLine(story: Story): void {
+  const values = [story.title, ...story.scope, ...(story.steps ?? []).map((step) => step.title)];
+  if (values.some((value) => /[\r\n]/u.test(value)))
+    throw new RalphError(
+      `Story ${story.id} title, scope, and step titles must be single lines`,
+      EXIT.prd,
+    );
 }
 
 export function openStories(prd: Prd, mode: Mode): Story[] {
@@ -141,7 +173,7 @@ export function extractReportPath(
   paths: RuntimePaths,
   strict = true,
 ): string {
-  let first = line.slice("Created ".length).split(/\s/u)[0] ?? "";
+  let first = CREATED.exec(line)?.[1] ?? "";
   first = first.replace(/^`|`$/gu, "").replace(/^\.\//u, "");
   const relativePath = safeRelativePath(first, "Report path");
   if (!relativePath.endsWith(".md"))

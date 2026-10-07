@@ -1,7 +1,7 @@
 ---
 status: stable
 owner: profiles
-last_reviewed: 2026-04-12
+last_reviewed: 2026-10-07
 source_of_truth: profiles/agent-environments
 evidence_links: ../reference/claims/assumptions-register.md
 ---
@@ -23,7 +23,7 @@ Public profile material must be:
 3. Keep the committed public surface auditable with:
 
    ```bash
-   find profiles/agent-environments -maxdepth 3 -type f | sort
+   git ls-files profiles/agent-environments
    ```
 
 4. Add or update explanatory docs so the public lane states exactly what is
@@ -45,7 +45,6 @@ The repo ships:
 - `profiles/agent-environments/templates/codex/config.toml`
 - `profiles/agent-environments/templates/claude/settings.json`
 - `profiles/agent-environments/shared/policy/operator-policy.md`
-- `scripts/src/verify.ts --skip-install`
 
 ## What does not belong here
 

@@ -1,7 +1,7 @@
 ---
 status: experimental
 owner: orchestration
-last_reviewed: 2026-08-04
+last_reviewed: 2026-10-07
 source_of_truth: apps/platform/src/http.ts
 evidence_links: ../reference/claims/claims-ledger.md
 ---
@@ -17,8 +17,11 @@ insecure authentication must remain loopback-only.
 Configure the control process with `RAE_PLATFORM_CONFIG` and apply migrations
 before serving. Hosted callers need a bearer token accepted by the configured
 OIDC issuer, audience, and signing-algorithm policy. The token must contain an
-unexpired `exp`, a bounded `iat`, a subject, the required `rae.*` scope, and an authorized
-`projects` or `project_ids` claim.
+unexpired `exp`, an `iat`, a subject, the required `rae.*` scope, and an
+authorized `projects` or `project_ids` claim. `exp - iat` may not exceed
+`auth.maxTokenLifetimeSeconds`, which is at most seven days. Every route,
+including the health and readiness probes, rejects a `Host` header outside the
+configured allowlist.
 
 The control process exposes unauthenticated `GET /healthz` and `GET /readyz`.
 Readiness uses a bounded background snapshot and returns `503` when stale or
@@ -37,7 +40,7 @@ resource when OIDC is configured.
 | `GET /api/v2/runs/<id>` and `/events` | `rae.run.read` | Reads an authorized run or cursor-paged events; `?stream=true&from=<id>` opens bounded SSE. |
 | `POST /api/v2/runs/<id>/cancel` | `rae.run.cancel` | Requires `Idempotency-Key`. |
 | `POST /api/v2/runs/<id>/signals` | `rae.run.signal` | Requires `Idempotency-Key`. |
-| `POST /api/v2/runs/<id>/rebind` | `rae.run.cancel` | Requires `Idempotency-Key`, an operator decision, and matching digests. |
+| `POST /api/v2/runs/<id>/rebind` | `rae.run.rebind` | Requires `Idempotency-Key`, an operator decision, matching digests, and a worker registered for the run's project. |
 | Worker register, claim, and heartbeat | `rae.work.claim` | Worker subject must equal the supplied stable worker identifier. |
 | Worker report, failure, and artifact upload | `rae.work.report` | Reports require the current fenced lease. |
 | Artifact download | `rae.run.read` | Available only for authorized projects when storage is configured. |
@@ -90,8 +93,6 @@ For the deployment boundary, see
 ## Source note
 
 - [NIST GenAI Profile](../reference/claims/bibliography.md#src-nist-genai-profile)
-- [Model Cards](../reference/claims/bibliography.md#src-model-cards)
-- [Datasheets](../reference/claims/bibliography.md#src-datasheets)
 - [OpenAI evals guidance](../reference/claims/bibliography.md#src-openai-evals)
 - [PaperBench](../reference/claims/bibliography.md#src-openai-paperbench)
 - [IEEE 1012](../reference/claims/bibliography.md#src-ieee-1012)

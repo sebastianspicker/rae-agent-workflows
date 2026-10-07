@@ -4,7 +4,7 @@
   "defaults": {
     "mode_default": "audit",
     "max_stories_default": "all_open",
-    "model_default": "sonnet",
+    "model_default": "gpt-5.3",
     "reasoning_effort_default": "high",
     "report_dir": ".claude/ralph-audit/audit",
     "sandbox_by_mode": {
@@ -168,8 +168,8 @@
       "mode": "fixing",
       "scope": [
         "README.md",
-        "lib/ralph/*.sh",
-        "tests/*.sh",
+        "src/**/*.ts",
+        "tests/**/*.ts",
         "!**/vendor/**"
       ],
       "acceptance_criteria": [

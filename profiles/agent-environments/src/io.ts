@@ -17,16 +17,22 @@ export interface FileState {
   data: Buffer;
 }
 export const absent = (): FileState => ({ exists: false, data: Buffer.alloc(0) });
+/** Managed profile files and backups are small configuration files. */
+export const READ_LIMIT = 16 * 1024 * 1024;
 export function code(error: unknown): string | undefined {
   return error instanceof Error && "code" in error ? String(error.code) : undefined;
 }
 export function same(left: FileState, right: FileState): boolean {
   return left.exists === right.exists && left.data.equals(right.data);
 }
-export function readNamed(parent: number, name: PathBytes): FileState {
+/**
+ * Reads a regular file without following links. Live targets use a single-link open; `linked`
+ * is only for transaction-owned quarantine aliases, which share an inode with the live name.
+ */
+export function readNamed(parent: number, name: PathBytes, linked = true): FileState {
   let fd: number;
   try {
-    fd = openLinkedFileAt(parent, name);
+    fd = linked ? openLinkedFileAt(parent, name) : openFileAt(parent, name, "read");
   } catch (error) {
     if (code(error) === "ENOENT") return absent();
     throw error;
@@ -35,11 +41,15 @@ export function readNamed(parent: number, name: PathBytes): FileState {
     const metadata = fstatSync(fd);
     if (process.getuid && metadata.uid !== process.getuid())
       throw new Error("Managed file is owned by another user");
+    if (metadata.size > READ_LIMIT) throw new Error("Managed file exceeds the profile size limit");
     const chunks: Buffer[] = [];
+    let total = 0;
     for (;;) {
       const chunk = Buffer.allocUnsafe(1024 * 1024);
       const length = readSync(fd, chunk, 0, chunk.length, null);
       if (!length) break;
+      total += length;
+      if (total > READ_LIMIT) throw new Error("Managed file exceeds the profile size limit");
       chunks.push(chunk.subarray(0, length));
     }
     return { exists: true, data: Buffer.concat(chunks) };
@@ -56,12 +66,17 @@ export function fileState(root: number, relative: string): FileState {
     throw error;
   }
   try {
-    return readNamed(parent.fd, parent.name);
+    return readNamed(parent.fd, parent.name, false);
   } finally {
     closeSync(parent.fd);
   }
 }
-export function writeNoClobber(parent: number, name: PathBytes, payload: Buffer): void {
+export function writeNoClobber(
+  parent: number,
+  name: PathBytes,
+  payload: Buffer,
+  replace = false,
+): void {
   const temporary = `.profile-${randomUUID()}.new`;
   let present = false;
   try {
@@ -78,7 +93,7 @@ export function writeNoClobber(parent: number, name: PathBytes, payload: Buffer)
     } finally {
       closeSync(fd);
     }
-    renameAt(parent, temporary, parent, name);
+    renameAt(parent, temporary, parent, name, !replace);
     present = false;
     fsyncSync(parent);
   } finally {

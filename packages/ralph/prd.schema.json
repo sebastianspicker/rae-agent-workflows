@@ -6,8 +6,6 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "schema_version",
-    "project",
     "defaults",
     "stories"
   ],
@@ -48,13 +46,8 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "mode_default",
-        "max_stories_default",
-        "model_default",
-        "reasoning_effort_default",
         "report_dir",
-        "sandbox_by_mode",
-        "lint_detection_order"
+        "sandbox_by_mode"
       ],
       "properties": {
         "mode_default": {
@@ -106,6 +99,7 @@
           }
         },
         "lint_detection_order": {
+          "description": "Ordered check ecosystems for linting/fixing prompts; entries naming package.json, pyproject/requirements, go.mod, Cargo.toml, or Makefile select those checks. Omitted means all, in that order.",
           "type": "array",
           "minItems": 1,
           "items": {
@@ -134,7 +128,8 @@
         },
         "title": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "pattern": "^[^\\r\\n]+$"
         },
         "priority": {
           "type": "integer",
@@ -149,7 +144,8 @@
           "minItems": 1,
           "items": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "pattern": "^[^\\r\\n]+$"
           }
         },
         "acceptance_criteria": {
@@ -311,7 +307,8 @@
         },
         "title": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "pattern": "^[^\\r\\n]+$"
         },
         "actions": {
           "type": "array",

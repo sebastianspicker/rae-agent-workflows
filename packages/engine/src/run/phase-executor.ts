@@ -18,6 +18,7 @@ import { enforceCommandEvidence } from "./autonomous-evidence.js";
 import {
   assertGitStateInvariant,
   assertRuntimeNamespaceInvariant,
+  ignoredPathChanges,
   runtimeNamespaceSnapshot,
   validateConcurrentOperatorChanges,
 } from "./autonomous-git.js";
@@ -112,6 +113,7 @@ export async function runOnePhase(
   throwProviderError(execution.error, context, phase, options, state.sandboxMode);
   if (!execution.result) throw new Error(`${phase} provider returned no result`);
   const assessment = assessArtifact(execution.result, state, context, phase);
+  recordIgnoredPathFinding(context, phase);
   persistArtifact(assessment.artifact, state);
   recordAgentCall(execution.result, assessment, state, context, phase);
   assertGitStateInvariant(context.workspaceRoot, context.initialGitState, phase);
@@ -434,6 +436,24 @@ function recordProviderError(
     context.workspaceRoot,
   );
   assertGitStateInvariant(context.workspaceRoot, context.initialGitState, phase);
+}
+
+/** Ignored paths never block ownership; surface new or modified ones as a non-blocking finding. */
+function recordIgnoredPathFinding(context: AutonomousRunContext, phase: AutonomousPhase): void {
+  if (phase !== "build" && phase !== "post-build") return;
+  const paths = ignoredPathChanges(context.workspaceRoot, context.initialGitState);
+  if (paths.length === 0) return;
+  appendTraceEvent(
+    context.runId,
+    {
+      event: "workflow_ignored_paths_changed",
+      phase,
+      status: "warn",
+      message: "new or modified gitignored paths were observed; they are excluded from ownership",
+      metadata: { count: paths.length, paths: paths.slice(0, 50) },
+    },
+    context.workspaceRoot,
+  );
 }
 
 function assessArtifact(

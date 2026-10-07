@@ -1,5 +1,6 @@
 /** Git and runtime-namespace invariants for autonomous workflow execution. */
 import {
+  existsSync,
   lstatSync,
   readFileSync,
   readlinkSync,
@@ -7,12 +8,12 @@ import {
   readdirSync,
   statSync,
 } from "node:fs";
-import type { Dirent, Stats } from "node:fs";
+import type { BigIntStats, Dirent, Stats } from "node:fs";
 import { spawnSync } from "node:child_process";
 import type { SpawnSyncReturns } from "node:child_process";
 import { createHash } from "node:crypto";
 import type { BinaryLike } from "node:crypto";
-import { relative, resolve } from "node:path";
+import { basename, relative, resolve } from "node:path";
 import { PHASE_ORDER } from "./constants.js";
 
 interface ProcessOptions {
@@ -32,10 +33,37 @@ export interface GitStateSnapshot {
   head_reflog: string;
   branch_reflog: string | null;
   index: Record<string, string>;
-  refs: { all: string; sensitive: string };
-  repository_config: { local: string; worktree: string };
+  /** `comparable` is `all` without other runs' `refs/heads/pipeline/*`; absent in older snapshots. */
+  refs: { all: string; sensitive: string; comparable?: string };
+  /** `safe` digests every non-benign local key and config.worktree; absent in older snapshots. */
+  repository_config: { local: string; worktree: string; safe?: string };
   private_info: { exclude: string; attributes: string };
+  /** Ignored entries at run start with a recursive metadata digest; absent in older runs. */
+  ignored_paths?: Record<string, string>;
 }
+
+/**
+ * Local config keys that only describe upstream tracking. Every other key, including filters,
+ * textconv and merge drivers, pagers, editors, askpass, signing, aliases and hook paths, can
+ * change what Git runs or exposes and is therefore safety-relevant.
+ */
+const BENIGN_CONFIG_KEY = /^(branch\..+\.(merge|remote|rebase|pushremote)|remote\..+\.fetch)$/i;
+/** Tracking keys whose value must name a configured remote; any other value can reach a URL. */
+const REMOTE_NAMING_KEY = /^branch\..+\.(remote|pushremote)$/i;
+const REMOTE_DEFINITION_KEY = /^remote\.(.+)\.(url|pushurl|fetch|push)$/i;
+/** Other runs' branches; never part of this run's Git-state comparison. */
+const PIPELINE_BRANCH_PREFIX = "refs/heads/pipeline/";
+/** Files whose creation or edit changes what Git ignores or how it transforms content. */
+const IGNORE_CONTROL_FILES = [".gitignore", ".gitattributes"] as const;
+/** Bounds for the recursive fingerprint of ignored directories. */
+export interface IgnoredWalkLimits {
+  maxEntries: number;
+  maxBytes: number;
+}
+export const DEFAULT_IGNORED_WALK_LIMITS: IgnoredWalkLimits = {
+  maxEntries: 20_000,
+  maxBytes: 256 * 1024 * 1024,
+};
 
 export function requireDirectory(pathValue: string, label: string): string {
   const resolvedPath = realpathSync(resolve(pathValue));
@@ -133,17 +161,285 @@ export function configDigest(root: string, scope: string): string {
   throw new Error(`could not inspect ${scope} Git configuration: ${proc.stderr.trim()}`);
 }
 
-export function refsSnapshot(root: string): { all: string; sensitive: string } {
+/** True for local config keys that only describe upstream tracking (see BENIGN_CONFIG_KEY). */
+export function benignConfigKey(key: string): boolean {
+  return BENIGN_CONFIG_KEY.test(key);
+}
+
+/**
+ * A benign key is benign for this value: `branch.<n>.remote` and `.pushremote` only count when
+ * they name a remote defined in the same config.
+ */
+function benignConfigEntry(key: string, value: string, remotes: ReadonlySet<string>): boolean {
+  if (!benignConfigKey(key)) return false;
+  // "." is Git's spelling for a local tracking branch and cannot reach a URL.
+  return !REMOTE_NAMING_KEY.test(key) || value === "." || remotes.has(value);
+}
+
+function configuredRemotes(entries: readonly string[]): Set<string> {
+  const names = new Set<string>();
+  for (const entry of entries) {
+    const match = REMOTE_DEFINITION_KEY.exec(entry.split("\n", 1)[0]);
+    if (match) names.add(match[1]);
+  }
+  return names;
+}
+
+/**
+ * Digest of every shared local config entry except the benign tracking keys, plus the
+ * worktree-private config file. Unknown keys count as safety-relevant.
+ */
+export function safeConfigDigest(root: string): string {
+  const proc = runProcess("git", ["-C", root, "config", "--local", "--null", "--list"], {
+    label: "git config --local --list",
+    allowFailure: true,
+  });
+  if (proc.status !== 0) {
+    if (proc.status === 1 || proc.status === 128) return "local-config-unavailable";
+    throw new Error(`could not inspect local Git configuration: ${proc.stderr.trim()}`);
+  }
+  const all = splitNullList(proc.stdout);
+  const remotes = configuredRemotes(all);
+  const entries = all.filter((entry) => {
+    const separator = entry.indexOf("\n");
+    const key = separator < 0 ? entry : entry.slice(0, separator);
+    const value = separator < 0 ? "" : entry.slice(separator + 1);
+    return !benignConfigEntry(key, value, remotes);
+  });
+  return sha256([...entries.sort(), `worktree:${worktreeConfigFileDigest(root)}`].join("\0"));
+}
+
+/** `git config --worktree` reads the shared local config unless extensions.worktreeConfig is set. */
+function worktreeConfigFileDigest(root: string): string {
+  const pathValue = gitOutput(root, [
+    "rev-parse",
+    "--path-format=absolute",
+    "--git-path",
+    "config.worktree",
+  ]).trim();
+  try {
+    return sha256(readFileSync(pathValue));
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return "missing";
+    throw error;
+  }
+}
+
+function listIgnoredEntries(root: string): string[] {
+  return splitNullList(
+    gitOutput(root, [
+      "ls-files",
+      "--others",
+      "--ignored",
+      "--exclude-standard",
+      "--directory",
+      "-z",
+      "--",
+    ]),
+  ).filter((entry) => entry !== ".pipeline/" && !entry.startsWith(".pipeline/"));
+}
+
+/** Identity and content-change metadata of one non-directory entry, without reading content. */
+function entryMetadata(pathValue: string, stat: BigIntStats): string {
+  if (stat.isSymbolicLink()) return `link:${readlinkSync(pathValue)}`;
+  const kind = stat.isFile() ? "file" : "special";
+  return `${kind}:${stat.mode}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+}
+
+/**
+ * Digests every entry below an ignored directory by lstat metadata (size, mtime, ctime, inode),
+ * so an edit deep inside `node_modules/pkg/index.js` changes the directory fingerprint. The walk
+ * stops at `limits.maxEntries` entries or `limits.maxBytes` of file size and marks the
+ * fingerprint `tree-truncated`; changes beyond the cap are then not detected.
+ */
+function ignoredTreeFingerprint(directory: string, limits: IgnoredWalkLimits): string {
+  const hash = createHash("sha256");
+  let entries = 0;
+  let bytes = 0;
+  let truncated = false;
+  const visit = (relativePath: string): void => {
+    if (truncated) return;
+    if (entries >= limits.maxEntries || bytes >= limits.maxBytes) {
+      truncated = true;
+      return;
+    }
+    entries++;
+    const absolute = relativePath ? resolve(directory, relativePath) : directory;
+    let stat: BigIntStats;
+    try {
+      stat = lstatSync(absolute, { bigint: true });
+    } catch {
+      hash.update(`${relativePath}\0unreadable\0`);
+      return;
+    }
+    if (!stat.isDirectory()) {
+      bytes += Number(stat.size);
+      hash.update(`${relativePath}\0${entryMetadata(absolute, stat)}\0`);
+      return;
+    }
+    hash.update(`${relativePath}\0directory:${stat.mode}:${stat.ino}\0`);
+    let names: string[];
+    try {
+      names = readdirSync(absolute).sort();
+    } catch {
+      hash.update("unreadable\0");
+      return;
+    }
+    for (const name of names) visit(relativePath ? `${relativePath}/${name}` : name);
+  };
+  visit("");
+  return `${truncated ? "tree-truncated" : "tree"}:${hash.digest("hex")}`;
+}
+
+function ignoredEntryFingerprint(root: string, entry: string, limits: IgnoredWalkLimits): string {
+  const pathValue = resolve(root, entry.replace(/\/$/, ""));
+  try {
+    const stat = lstatSync(pathValue, { bigint: true });
+    return stat.isDirectory()
+      ? ignoredTreeFingerprint(pathValue, limits)
+      : entryMetadata(pathValue, stat);
+  } catch {
+    return "unreadable";
+  }
+}
+
+/** Fingerprints recorded before recursive digests: own size and mtime only. */
+function legacyIgnoredFingerprint(root: string, entry: string): string {
+  try {
+    const stat = lstatSync(resolve(root, entry));
+    return stat.isDirectory()
+      ? `dir:${Math.trunc(stat.mtimeMs)}`
+      : `file:${stat.size}:${Math.trunc(stat.mtimeMs)}`;
+  } catch {
+    return "unreadable";
+  }
+}
+
+/** Current gitignored entries (directories collapsed) with their recursive fingerprints. */
+export function ignoredPathFingerprints(
+  root: string,
+  limits: Partial<IgnoredWalkLimits> = {},
+): Record<string, string> {
+  const resolved = { ...DEFAULT_IGNORED_WALK_LIMITS, ...limits };
+  return Object.fromEntries(
+    listIgnoredEntries(root).map((entry) => [
+      entry,
+      ignoredEntryFingerprint(root, entry, resolved),
+    ]),
+  );
+}
+
+/** Ignored entries added, removed, or modified between two fingerprint maps. */
+export function changedIgnoredPaths(
+  before: Readonly<Record<string, string>>,
+  after: Readonly<Record<string, string>>,
+): string[] {
+  return [...new Set([...Object.keys(before), ...Object.keys(after)])]
+    .filter((entry) => before[entry] !== after[entry])
+    .sort();
+}
+
+/** Ignored entries whose fingerprint stopped at the walk cap. */
+export function truncatedIgnoredPaths(fingerprints: Readonly<Record<string, string>>): string[] {
+  return Object.keys(fingerprints)
+    .filter((entry) => fingerprints[entry]?.startsWith("tree-truncated:"))
+    .sort();
+}
+
+/** Ignored paths added, removed, or modified since the run baseline. */
+export function ignoredPathChanges(
+  root: string,
+  baseline: GitStateSnapshot,
+  limits: Partial<IgnoredWalkLimits> = {},
+): string[] {
+  const recorded = baseline.ignored_paths;
+  if (!recorded) return [];
+  const current = ignoredPathFingerprints(root, limits);
+  // Older baselines stored own-mtime fingerprints; compare those entries in the same format.
+  const comparable = Object.fromEntries(
+    Object.entries(current).map(([entry, value]) => [
+      entry,
+      /^(dir:\d+|file:\d+:\d+)$/.test(recorded[entry] ?? "")
+        ? legacyIgnoredFingerprint(root, entry)
+        : value,
+    ]),
+  );
+  return changedIgnoredPaths(recorded, comparable);
+}
+
+/** True when a path names a `.gitignore` or `.gitattributes` file. */
+export function isIgnoreControlFile(pathValue: string): boolean {
+  return IGNORE_CONTROL_FILES.some((name) => basename(pathValue) === name);
+}
+
+/** True when an ignored directory entry carries its own top-level ignore or attributes file. */
+export function ignoredDirectoryHasControlFile(root: string, entry: string): boolean {
+  if (!entry.endsWith("/")) return false;
+  return IGNORE_CONTROL_FILES.some((name) => existsSync(resolve(root, entry, name)));
+}
+
+/**
+ * `.gitignore` and `.gitattributes` files that are themselves ignored outside any wholly ignored
+ * directory, and so invisible to `--exclude-standard` while able to hide sibling files. Tracked
+ * edits already appear in `git diff`; control files inside a wholly ignored directory are covered
+ * by that directory's ignored-path fingerprint instead.
+ */
+export function exposedIgnoredControlFiles(root: string): string[] {
+  const collapsed = listIgnoredEntries(root).filter((entry) => entry.endsWith("/"));
+  return ignoredControlFiles(root).filter(
+    (entry) => !collapsed.some((directory) => entry.startsWith(directory)),
+  );
+}
+
+/** Every ignored `.gitignore` and `.gitattributes` file in the worktree. */
+export function ignoredControlFiles(root: string): string[] {
+  return splitNullList(
+    gitOutput(root, [
+      "ls-files",
+      "--others",
+      "--ignored",
+      "--exclude-standard",
+      "-z",
+      "--",
+      ...IGNORE_CONTROL_FILES.map((name) => `:(glob)**/${name}`),
+    ]),
+  ).filter(
+    (entry) =>
+      entry !== ".pipeline" && !entry.startsWith(".pipeline/") && isIgnoreControlFile(entry),
+  );
+}
+
+/**
+ * Sensitive refs are the replace, bisect, rewritten and worktree namespaces, every tag, and every
+ * local branch except the run branch, whose own movement the HEAD and reflog checks cover, and
+ * the `refs/heads/pipeline/*` namespace, which belongs to other runs.
+ */
+export function refsSnapshot(
+  root: string,
+  runBranch: string | null = null,
+): { all: string; sensitive: string; comparable: string } {
   const output = gitOutput(root, [
     "for-each-ref",
     "--format=%(refname)%00%(objectname)%00%(symref)",
   ]);
-  const sensitive = output
-    .split("\n")
-    .filter((line) => /^(refs\/(replace|bisect|rewritten|worktree)\/)/.test(line.split("\0", 1)[0]))
+  const lines = output.split("\n");
+  const refName = (line: string): string => line.split("\0", 1)[0];
+  const sensitive = lines
+    .filter((line) => {
+      const ref = refName(line);
+      if (/^refs\/(replace|bisect|rewritten|worktree|tags)\//.test(ref)) return true;
+      return (
+        ref.startsWith("refs/heads/") &&
+        ref !== runBranch &&
+        !ref.startsWith(PIPELINE_BRANCH_PREFIX)
+      );
+    })
     .sort()
     .join("\n");
-  return { all: sha256(output), sensitive: sha256(sensitive) };
+  const comparable = lines
+    .filter((line) => !refName(line).startsWith(PIPELINE_BRANCH_PREFIX))
+    .join("\n");
+  return { all: sha256(output), sensitive: sha256(sensitive), comparable: sha256(comparable) };
 }
 
 export function gitInfoEntrySnapshot(root: string, name: string): string {
@@ -194,19 +490,60 @@ export function gitStateSnapshot(root: string): GitStateSnapshot {
     head_reflog: reflogDigest(root, "HEAD"),
     branch_reflog: headRef ? reflogDigest(root, headRef) : null,
     index: indexDigests(root),
-    refs: refsSnapshot(root),
+    refs: refsSnapshot(root, headRef),
     repository_config: {
       local: configDigest(root, "local"),
       worktree: configDigest(root, "worktree"),
+      safe: safeConfigDigest(root),
     },
     private_info: gitPrivateInfoSnapshot(root),
+    ignored_paths: ignoredPathFingerprints(root),
   };
+}
+
+/**
+ * `full` (initial run preflight) compares every ref except other runs' `refs/heads/pipeline/*`
+ * and the whole local and worktree config. `phase` ignores remote-tracking refs and benign
+ * upstream-tracking config: it compares sensitive refs (other local branches outside
+ * `refs/heads/pipeline/*`, tags, replace and bisect state), HEAD and the run branch reflog, the
+ * worktree-private config file, and every other local config key. `resume` is `phase` without the
+ * refs comparison: nothing ran during the pause, so user ref activity is legitimate.
+ */
+export type GitStateScope = "full" | "phase" | "resume";
+
+const REFS_MESSAGE = "Git refs changed outside the run-owned HEAD transition";
+const CONFIG_MESSAGE = "Git local or worktree configuration changed";
+
+function scopedValue(
+  key: "refs" | "repository_config",
+  snapshot: GitStateSnapshot,
+  scope: GitStateScope,
+  legacySafe: boolean,
+  baselineComparable: boolean,
+): unknown {
+  const config = snapshot.repository_config;
+  // Full scope uses only the raw digests, so it also compares snapshots whose derived
+  // `sensitive` and `safe` digests were computed by an older rule.
+  if (scope === "full") {
+    return key === "refs"
+      ? baselineComparable
+        ? snapshot.refs?.comparable
+        : snapshot.refs?.all
+      : { local: config?.local, worktree: config?.worktree };
+  }
+  if (key === "refs") return snapshot.refs?.sensitive;
+  return legacySafe ? config : { safe: config?.safe };
 }
 
 export function gitStateDifferences(
   baseline: GitStateSnapshot,
   current: GitStateSnapshot,
+  scope: GitStateScope = "full",
 ): string[] {
+  // Snapshots from before `safe` existed fall back to the full config comparison.
+  const legacySafe = baseline.repository_config?.safe === undefined;
+  // Snapshots from before `comparable` existed compare the raw digest of every ref.
+  const baselineComparable = baseline.refs?.comparable !== undefined;
   const comparisons: Array<[keyof GitStateSnapshot, string]> = [
     ["top_level", "Git top-level identity changed; repository ownership is no longer trustworthy"],
     [
@@ -217,26 +554,38 @@ export function gitStateDifferences(
     ["head_reflog", "worktree HEAD reflog changed; a checkout, commit, or reset occurred"],
     ["branch_reflog", "current branch reflog changed; the run branch moved"],
     ["index", "Git index state changed; this can conceal tracked changes from ownership checks"],
-    ["refs", "Git refs changed outside the run-owned HEAD transition"],
-    ["repository_config", "Git local or worktree configuration changed"],
+    ["refs", REFS_MESSAGE],
+    ["repository_config", CONFIG_MESSAGE],
     ["private_info", "Git private exclude or attributes state changed"],
   ];
-  return comparisons.flatMap(([key, message]) =>
-    JSON.stringify(baseline[key]) === JSON.stringify(current[key]) ? [] : [message],
-  );
+  return comparisons.flatMap(([key, message]) => {
+    if (key === "refs" && scope === "resume") return [];
+    const [left, right] =
+      key === "refs" || key === "repository_config"
+        ? [
+            scopedValue(key, baseline, scope, legacySafe, baselineComparable),
+            scopedValue(key, current, scope, legacySafe, baselineComparable),
+          ]
+        : [baseline[key], current[key]];
+    return JSON.stringify(left) === JSON.stringify(right) ? [] : [message];
+  });
 }
 
-export function changedGitState(baseline: GitStateSnapshot, current: GitStateSnapshot): string[] {
+export function changedGitState(
+  baseline: GitStateSnapshot,
+  current: GitStateSnapshot,
+  scope: GitStateScope = "full",
+): string[] {
   if (baseline.schema_version !== current.schema_version) {
     return ["Git-state snapshot schema changed; start a new autonomous run"];
   }
   if (baseline.head_ref !== current.head_ref) {
     return [
       `HEAD ref changed from ${baseline.head_ref ?? "detached"} to ${current.head_ref ?? "detached"}`,
-      ...gitStateDifferences(baseline, current),
+      ...gitStateDifferences(baseline, current, scope),
     ];
   }
-  return gitStateDifferences(baseline, current);
+  return gitStateDifferences(baseline, current, scope);
 }
 
 /**
@@ -246,8 +595,9 @@ export function assertGitStateInvariant(
   root: string,
   baseline: GitStateSnapshot,
   phase: string,
+  scope: GitStateScope = "phase",
 ): void {
-  const changes = changedGitState(baseline, gitStateSnapshot(root));
+  const changes = changedGitState(baseline, gitStateSnapshot(root), scope);
   if (changes.length > 0) {
     throw new Error(
       `prohibited Git-state change after ${phase}: ${changes.join("; ")}. ` +
@@ -258,22 +608,19 @@ export function assertGitStateInvariant(
 
 export function refreshResumeRefBaseline(root: string, baseline: GitStateSnapshot): void {
   const current = gitStateSnapshot(root);
-  const changes = changedGitState(baseline, current);
-  const ordinarySharedRefChange =
-    baseline.refs?.sensitive === current.refs?.sensitive &&
-    changes.includes("Git refs changed outside the run-owned HEAD transition");
-  const blocking = changes.filter(
-    (change) =>
-      change !== "Git refs changed outside the run-owned HEAD transition" ||
-      !ordinarySharedRefChange,
-  );
+  // Refs are not compared: the agent was not running while paused, so user ref activity is
+  // legitimate. HEAD, the run branch, the index and safety-relevant config still block.
+  const blocking = changedGitState(baseline, current, "resume");
   if (blocking.length > 0) {
     throw new Error(
       `prohibited Git-state change after resume preflight: ${blocking.join("; ")}. ` +
-        "Agents must leave run-owned HEAD/current-branch state, remotes, sensitive refs, and index visibility unchanged.",
+        "Resume requires run-owned HEAD/current-branch state, configuration, and index visibility to be unchanged.",
     );
   }
+  // Refs and benign tracking config may have changed legitimately while paused; later per-phase
+  // checks compare against the state at resume.
   baseline.refs = current.refs;
+  baseline.repository_config = current.repository_config;
 }
 
 export function splitNullList(value: string): string[] {
@@ -287,6 +634,7 @@ export function untrackedPaths(root: string): string[] {
       "--others",
       "--directory",
       "--no-empty-directory",
+      "--exclude-standard",
       "--exclude=/.pipeline/",
       "-z",
       "--",
@@ -299,7 +647,11 @@ export function untrackedPaths(root: string): string[] {
       paths.push(entry);
       continue;
     }
-    paths.push(...splitNullList(gitOutput(root, ["ls-files", "--others", "-z", "--", entry])));
+    paths.push(
+      ...splitNullList(
+        gitOutput(root, ["ls-files", "--others", "--exclude-standard", "-z", "--", entry]),
+      ),
+    );
   }
   return paths;
 }
@@ -308,11 +660,15 @@ export function changedPaths(root: string): string[] {
   const paths = new Set<string>([
     ...splitNullList(gitOutput(root, ["diff", "--name-only", "-z", "--relative"])),
     ...splitNullList(gitOutput(root, ["diff", "--cached", "--name-only", "-z", "--relative"])),
-    // Do not consult .gitignore, $GIT_DIR/info/exclude, or global excludes here:
-    // ownership checks must discover every untracked path an agent could hide with mutable Git state.
-    // Collapse wholly untracked directories first. The sole fixed exclude prunes the runtime-owned
-    // .pipeline subtree; that namespace is independently covered by its tamper snapshot.
+    // Ignored files are excluded here so build output and dependencies do not count as changes;
+    // ignoredPathChanges() reports new or modified ignored paths separately, and the private
+    // exclude file and config keys that decide what is ignored are covered by the Git-state
+    // snapshot. Collapse wholly untracked directories first. The sole fixed exclude prunes the
+    // runtime-owned .pipeline subtree; that namespace is independently covered by its tamper
+    // snapshot.
     ...untrackedPaths(root),
+    // A new .gitignore or .gitattributes that hides itself is still an ownership-relevant change.
+    ...exposedIgnoredControlFiles(root),
   ]);
   return [...paths]
     .filter((pathValue) => pathValue !== ".pipeline" && !pathValue.startsWith(".pipeline/"))
@@ -444,7 +800,9 @@ export function validateConcurrentTraceEvent(
     event.event === "run_stop_requested",
     event.run_id === runId,
     event.status === "ok",
-    typeof event.phase === "string" && PHASE_ORDER.some((phase) => phase === event.phase),
+    typeof event.phase === "string" &&
+      (PHASE_ORDER.some((phase) => phase === event.phase) ||
+        (expectedPhase !== null && /^[a-z][a-z0-9._-]{0,63}$/.test(event.phase))),
     expectedPhase === null || event.phase === expectedPhase,
     typeof event.ts === "string" && Number.isFinite(Date.parse(event.ts)),
   ].every(Boolean);

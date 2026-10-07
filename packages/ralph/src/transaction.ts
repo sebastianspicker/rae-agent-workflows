@@ -1,6 +1,7 @@
 /** Implements journaled fixing promotion with descriptor-relative filesystem access. */
 import {
   closeSync,
+  cpSync,
   fchmodSync,
   fstatSync,
   fsyncSync,
@@ -31,7 +32,7 @@ import {
   unlinkAt,
 } from "@rae/fs-bridge";
 import { EXIT, RalphError, errorMessage } from "./errors.js";
-import { atomicJson, canonicalDirectory, isWithin, sha256 } from "./util.js";
+import { atomicJson, canonicalDirectory, isoUtcCompact, isWithin, sha256 } from "./util.js";
 import type {
   Identity,
   ManifestEntry,
@@ -178,9 +179,15 @@ function validateOperation(operation: TransactionOperation): void {
   if (
     !operation ||
     typeof operation.path !== "string" ||
-    !["pending", "quarantining", "quarantined", "installed", "recovered", "conflict"].includes(
-      operation.state,
-    )
+    ![
+      "pending",
+      "quarantining",
+      "quarantined",
+      "installing",
+      "installed",
+      "recovered",
+      "conflict",
+    ].includes(operation.state)
   )
     throw new RalphError("transaction operation is invalid", EXIT.scope);
   decoded(operation.path);
@@ -196,6 +203,7 @@ function validateJournalOperations(journal: TransactionJournal): void {
     "applying",
     "recovering",
     "conflicted",
+    "contained_uncertain",
     "committed",
     "recovered",
   ];
@@ -409,10 +417,15 @@ function copyEntries(sourceRoot: string, targetRoot: string, entries: ManifestEn
   }
 }
 
-function metadataRoot(): string {
-  const configured =
+function configuredMetadataRoot(): string {
+  return (
     process.env.RALPH_TRANSACTION_METADATA_ROOT ??
-    join(homedir(), ".local/state/ralph-fs-transactions");
+    join(homedir(), ".local/state/ralph-fs-transactions")
+  );
+}
+
+function metadataRoot(): string {
+  const configured = configuredMetadataRoot();
   if (!isAbsolute(configured) || resolve(configured) !== configured)
     throw new RalphError(
       "RALPH_TRANSACTION_METADATA_ROOT must be absolute and normalized",
@@ -444,7 +457,11 @@ export function pointerPath(paths: RuntimePaths): string {
   );
 }
 
-function assertBound(paths: RuntimePaths, journalPath: string): TransactionJournal {
+function assertBound(
+  paths: RuntimePaths,
+  journalPath: string,
+  tolerateMissingMirror = false,
+): TransactionJournal {
   const meta = metadataRoot();
   const expectedTransactions = join(meta, "transactions");
   if (
@@ -478,13 +495,21 @@ function assertBound(paths: RuntimePaths, journalPath: string): TransactionJourn
   validateManifest(journal.baseline, "baseline");
   if (journal.prepared !== null) validateManifest(journal.prepared, "prepared");
   validateJournalOperations(journal);
-  for (const [actual, expected, label] of [
-    [identityPath(journal.root), journal.root_identity, "repository"],
-    [identityPath(journal.runtime), journal.runtime_identity, "runtime"],
-    [identityPath(journal.metadata_root), journal.metadata_root_identity, "metadata root"],
-    [identityPath(journal.mirror), journal.mirror_identity, "mirror"],
-    [identityPath(journal.baseline_store), journal.baseline_store_identity, "baseline store"],
+  for (const [path, expected, label] of [
+    [journal.root, journal.root_identity, "repository"],
+    [journal.runtime, journal.runtime_identity, "runtime"],
+    [journal.metadata_root, journal.metadata_root_identity, "metadata root"],
+    [journal.mirror, journal.mirror_identity, "mirror"],
+    [journal.baseline_store, journal.baseline_store_identity, "baseline store"],
   ] as const) {
+    let actual: Identity;
+    try {
+      actual = identityPath(path);
+    } catch (error) {
+      // The provider temp tree may be reaped by the OS; cleanup and discard must still work.
+      if (tolerateMissingMirror && label === "mirror" && code(error) === "ENOENT") continue;
+      throw error;
+    }
     if (!equal(actual, expected)) throw new RalphError(`${label} identity changed`, EXIT.scope);
   }
   if (!equal(makeManifest(journal.baseline_store), journal.baseline))
@@ -635,12 +660,36 @@ export function transactionDiff(paths: RuntimePaths, journalPath: string): strin
     .map((key) => decoded(key).toString());
 }
 
+/** Rejects a symlink whose target is absolute or resolves outside the repository root. */
+function assertContainedSymlink(entry: ManifestEntry): void {
+  const path = decoded(entry.path);
+  const target = Buffer.from(entry.target ?? "", "base64url");
+  const parts = path.toString("binary").split("/").slice(0, -1);
+  let escapes = target[0] === 47;
+  for (const part of target.toString("binary").split("/")) {
+    if (escapes) break;
+    if (part === "" || part === ".") continue;
+    if (part === "..") escapes = parts.pop() === undefined;
+    else parts.push(part);
+  }
+  if (escapes)
+    throw new RalphError(
+      `promoted symlink target is absolute or escapes the repository: ${path.toString()}`,
+      EXIT.scope,
+    );
+}
+
 export function prepareTransaction(paths: RuntimePaths, journalPath: string): void {
   const journal = assertBound(paths, journalPath);
   if (journal.state !== "mirrored")
     throw new RalphError("transaction is not ready for preparation", EXIT.scope);
   journal.prepared = makeManifest(journal.mirror);
   journal.changed = changed(journal.baseline, journal.prepared);
+  const prepared = maps(journal.prepared);
+  for (const key of journal.changed) {
+    const entry = prepared.get(key);
+    if (entry?.kind === "symlink") assertContainedSymlink(entry);
+  }
   journal.state = "prepared";
   writeJournal(journalPath, journal);
 }
@@ -901,6 +950,9 @@ function promoteOne(journalPath: string, journal: TransactionJournal, key: strin
         }
       }
       if (after.length && operation.staging) {
+        // Recovery must know the staged entry may already be live before the rename can be journaled.
+        operation.state = "installing";
+        persistOperation(journalPath, journal, operation);
         try {
           renameAt(storageFd, Buffer.from(operation.staging), live.fd, live.name, true);
           fsyncSync(live.fd);
@@ -937,7 +989,6 @@ function promoteOne(journalPath: string, journal: TransactionJournal, key: strin
 }
 
 function cleanup(paths: RuntimePaths, journalPath: string, journal: TransactionJournal): void {
-  const pointer = pointerPath(paths);
   const rootFd = openRoot(journal.root);
   try {
     for (const operation of journal.evidence) {
@@ -956,13 +1007,7 @@ function cleanup(paths: RuntimePaths, journalPath: string, journal: TransactionJ
   } finally {
     closeSync(rootFd);
   }
-  const pointerParent = openRoot(dirname(pointer));
-  try {
-    unlinkAt(pointerParent, Buffer.from(basename(pointer)), false);
-    fsyncSync(pointerParent);
-  } finally {
-    closeSync(pointerParent);
-  }
+  removePointer(paths);
   makeDirectoriesWritable(journal.mirror);
   makeDirectoriesWritable(journal.quarantine_root);
   makeDirectoriesWritable(journal.baseline_store);
@@ -1058,6 +1103,20 @@ function restoreOperation(
         writeJournal(journalPath, journal);
         return true;
       }
+      if (
+        ["quarantining", "conflict"].includes(operation.state) &&
+        !backupExists &&
+        !operation.recovery &&
+        current.length &&
+        !equal(current, operation.after)
+      ) {
+        // No quarantine entry exists, so this operation never moved live data; the live change is not ours to restore.
+        operation.state = "recovered";
+        journal.active = null;
+        journal.active_started = false;
+        writeJournal(journalPath, journal);
+        return true;
+      }
       if (current.length && !equal(current, operation.after)) {
         operation.state = "conflict";
         persistOperation(journalPath, journal, operation);
@@ -1102,30 +1161,112 @@ function restoreOperation(
   }
 }
 
-export function recoverTransaction(paths: RuntimePaths): void {
-  const pointer = pointerPath(paths);
-  if (!statOptional(pointer)) return;
-  const data = readPrivateJson<{ format: number; journal: string; root: string; runtime: string }>(
-    pointer,
-    "transaction pointer",
-  );
+interface TransactionPointer {
+  format: number;
+  id?: string;
+  journal: string;
+  root: string;
+  runtime: string;
+}
+
+function readPointer(paths: RuntimePaths): { path: string; data: TransactionPointer } | undefined {
+  const path = pointerPath(paths);
+  if (!statOptional(path)) return undefined;
+  const data = readPrivateJson<TransactionPointer>(path, "transaction pointer");
   if (
     data.format !== FORMAT ||
     data.root !== paths.repoRoot ||
     data.runtime !== realpathSync.native(paths.stateDir)
   )
     throw new RalphError("transaction pointer is bound to a different repository", EXIT.scope);
+  return { path, data };
+}
+
+/** Removes the transaction pointer through its parent descriptor. */
+export function removePointer(paths: RuntimePaths): void {
+  const pointer = pointerPath(paths);
+  const pointerParent = openRoot(dirname(pointer));
+  try {
+    unlinkAt(pointerParent, Buffer.from(basename(pointer)), false);
+    fsyncSync(pointerParent);
+  } finally {
+    closeSync(pointerParent);
+  }
+  clearContainmentSentinel(paths);
+}
+
+/** Operations that may have moved live data and therefore need restoring on recovery. */
+function needsRestore(journal: TransactionJournal, operation: TransactionOperation): boolean {
+  if (
+    ["quarantining", "quarantined", "installing", "installed", "conflict"].includes(operation.state)
+  )
+    return true;
+  // A pending new path whose live entry already equals the prepared result was installed.
+  return (
+    operation.state === "pending" &&
+    operation.before.length === 0 &&
+    operation.after.length > 0 &&
+    equal(manifestAt(journal.root, operation.path), operation.after)
+  );
+}
+
+const CONTAINMENT_SENTINEL = "containment-uncertain";
+
+/** Sentinel next to the runtime state that blocks automatic cleanup after uncertain containment. */
+function containmentSentinel(paths: RuntimePaths): string {
+  return join(paths.stateDir, CONTAINMENT_SENTINEL);
+}
+
+/** Records uncertain containment outside the journal, for when the journal itself cannot be marked. */
+export function writeContainmentSentinel(paths: RuntimePaths, journalPath: string): void {
+  atomicJson(containmentSentinel(paths), { format: FORMAT, journal: journalPath });
+}
+
+/** Removes the containment sentinel; true when one existed. */
+export function clearContainmentSentinel(paths: RuntimePaths): boolean {
+  const path = containmentSentinel(paths);
+  if (!statOptional(path)) return false;
+  const parent = openRoot(dirname(path));
+  try {
+    unlinkAt(parent, Buffer.from(basename(path)), false);
+    fsyncSync(parent);
+  } finally {
+    closeSync(parent);
+  }
+  return true;
+}
+
+export function recoverTransaction(paths: RuntimePaths): void {
+  if (statOptional(containmentSentinel(paths)))
+    throw new RalphError(
+      `Fixing transaction stopped with uncertain provider containment (${containmentSentinel(paths)}); confirm the provider process group has exited, then run --discard-transaction <journal-id>`,
+      EXIT.scope,
+    );
+  recoverPending(paths);
+}
+
+function recoverPending(paths: RuntimePaths): void {
+  const pointer = readPointer(paths);
+  if (!pointer) return;
+  const { data } = pointer;
   if (!statOptional(data.journal)) {
-    rmSync(pointer, { force: true });
+    process.stderr.write(
+      `[ralph][WARN] transaction pointer ${pointer.path} references missing journal ${data.journal}; the pointer is kept. Inspect it, then run --discard-transaction ${data.id ?? "<journal-id>"} --force to remove it.\n`,
+    );
     return;
   }
-  const journal = assertBound(paths, data.journal);
+  const journal = assertBound(paths, data.journal, true);
+  if (journal.state === "contained_uncertain")
+    throw new RalphError(
+      `Fixing transaction ${journal.id} stopped with uncertain provider containment; confirm the provider process group has exited, inspect ${data.journal} and ${journal.mirror}, then run --discard-transaction ${journal.id}`,
+      EXIT.scope,
+    );
   if (["applying", "recovering", "conflicted"].includes(journal.state)) {
     journal.state = "recovering";
     writeJournal(data.journal, journal);
     let okay = true;
     for (const operation of [...journal.evidence].reverse())
-      if (["quarantining", "quarantined", "installed", "conflict"].includes(operation.state))
+      if (needsRestore(journal, operation))
         okay = restoreOperation(data.journal, journal, operation) && okay;
     if (!okay) {
       journal.state = "conflicted";
@@ -1141,13 +1282,278 @@ export function recoverTransaction(paths: RuntimePaths): void {
   cleanup(paths, data.journal, journal);
 }
 
-export function discardTransaction(paths: RuntimePaths, journalPath: string): void {
+/** Marks a transaction whose provider may still be running; automatic cleanup is refused. */
+export function markContainmentUncertain(paths: RuntimePaths, journalPath: string): void {
   const journal = assertBound(paths, journalPath);
+  journal.state = "contained_uncertain";
+  writeJournal(journalPath, journal);
+}
+
+export function discardTransaction(paths: RuntimePaths, journalPath: string): void {
+  const journal = assertBound(paths, journalPath, true);
   if (["applying", "recovering", "conflicted"].includes(journal.state)) {
-    recoverTransaction(paths);
+    recoverPending(paths);
     return;
   }
   cleanup(paths, journalPath, journal);
+}
+
+/** Journal states in which nothing has been promoted into the live repository. */
+const UNPROMOTED_STATES = ["mirrored", "prepared", "contained_uncertain"];
+
+function displayPath(root: string, path: Buffer): string {
+  const text = path.toString("utf8");
+  return Buffer.from(text, "utf8").equals(path)
+    ? join(root, text)
+    : `${root}/<base64url:${path.toString("base64url")}>`;
+}
+
+/** Live paths a promoting transaction may have half-promoted, and sibling backups left in place. */
+function livePromotionPaths(journal: TransactionJournal): string[] {
+  const result: string[] = [];
+  const rootFd = openRoot(journal.root);
+  try {
+    for (const operation of journal.evidence) {
+      if (operation.state !== "recovered")
+        result.push(displayPath(journal.root, decoded(operation.path)));
+      if (operation.placement !== "sibling") continue;
+      let parent: { fd: number; name: Buffer };
+      try {
+        parent = openParent(rootFd, decoded(operation.path), false);
+      } catch (error) {
+        if (code(error) === "ENOENT") continue;
+        throw error;
+      }
+      try {
+        if (operation.parent_identity && !equal(identity(parent.fd), operation.parent_identity))
+          throw new RalphError("transaction operation parent identity changed", EXIT.scope);
+        for (const name of [operation.staging, operation.quarantine, operation.recovery])
+          if (name && entryExistsAt(parent.fd, name))
+            result.push(displayPath(journal.root, decoded(siblingKey(operation.path, name))));
+      } finally {
+        closeSync(parent.fd);
+      }
+    }
+  } finally {
+    closeSync(rootFd);
+  }
+  return [...new Set(result)];
+}
+
+function openVerifiedRoot(path: string, expected: Identity | undefined, label: string): number {
+  const fd = openRoot(path);
+  if (expected && !equal(identity(fd), expected)) {
+    closeSync(fd);
+    throw new RalphError(`${label} identity changed`, EXIT.scope);
+  }
+  return fd;
+}
+
+/** Outcome of moving one evidence tree: whether it was already gone, plus entries left behind. */
+interface Relocation {
+  missing: boolean;
+  warnings: string[];
+}
+
+/** Moves one evidence tree with descriptor-relative no-clobber renames; copies only across devices. */
+function relocate(
+  base: string,
+  expected: Identity | undefined,
+  relativePath: Buffer,
+  destinationFd: number,
+  destination: string,
+  target: string,
+): Relocation {
+  let baseFd: number;
+  try {
+    baseFd = openVerifiedRoot(base, expected, base);
+  } catch (error) {
+    if (code(error) === "ENOENT") return { missing: true, warnings: [] };
+    throw error;
+  }
+  try {
+    let parent: { fd: number; name: Buffer };
+    try {
+      parent = openParent(baseFd, relativePath, false);
+    } catch (error) {
+      if (code(error) === "ENOENT") return { missing: true, warnings: [] };
+      throw error;
+    }
+    try {
+      renameAt(parent.fd, parent.name, destinationFd, Buffer.from(target), true);
+      fsyncSync(parent.fd);
+      fsyncSync(destinationFd);
+      return { missing: false, warnings: [] };
+    } catch (error) {
+      if (code(error) === "ENOENT") return { missing: true, warnings: [] };
+      if (code(error) !== "EXDEV") throw error;
+    } finally {
+      closeSync(parent.fd);
+    }
+  } finally {
+    closeSync(baseFd);
+  }
+  // Cross-device moves only touch private metadata or provider temp trees, never the live checkout.
+  const source = join(base, relativePath.toString("utf8"));
+  const warnings: string[] = [];
+  cpSync(source, join(destination, target), {
+    recursive: true,
+    errorOnExist: true,
+    force: false,
+    preserveTimestamps: true,
+    filter: (entry) => {
+      const stat = lstatSync(entry);
+      if (!stat.isFIFO() && !stat.isSocket()) return true;
+      warnings.push(`${target}: skipped special file ${entry}`);
+      return false;
+    },
+  });
+  makeDirectoriesWritable(source);
+  rmSync(source, { recursive: true, force: true });
+  return { missing: false, warnings };
+}
+
+/**
+ * Retires a pending transaction without deleting evidence. The journal moves first into a
+ * timestamped directory under the runtime state directory, then the mirror and external
+ * quarantine; pieces that are already gone or cannot be moved are skipped and reported, so a
+ * retried discard never wedges. A transaction that may have promoted live entries is refused
+ * unless forced; when forced, sibling backups stay in place in the live tree and the possibly
+ * half-promoted live paths are returned for the operator to inspect.
+ */
+export function retainTransaction(
+  paths: RuntimePaths,
+  journalPath: string,
+  force = false,
+): {
+  destination: string;
+  live: string[];
+  skipped: string[];
+  promotion: "none" | "completed" | "partial";
+} {
+  const journal = assertBound(paths, journalPath, true);
+  if (!UNPROMOTED_STATES.includes(journal.state) && !force)
+    throw new RalphError(
+      `transaction ${journal.id} is in state ${journal.state} and may have modified live files; let recovery run, or re-run --discard-transaction ${journal.id} --force to retire it without restoring live files`,
+      EXIT.scope,
+    );
+  const unpromoted = UNPROMOTED_STATES.includes(journal.state);
+  const live = unpromoted ? [] : livePromotionPaths(journal);
+  const promotion = unpromoted
+    ? "none"
+    : ["committed", "recovered"].includes(journal.state)
+      ? "completed"
+      : "partial";
+  const name = `${journal.id}-${isoUtcCompact()}`;
+  const runtimeFd = openVerifiedRoot(journal.runtime, journal.runtime_identity, "runtime");
+  let destinationFd: number;
+  try {
+    const discarded = openDirectoryAt(runtimeFd, Buffer.from("discarded"), true);
+    try {
+      mkdirAt(discarded, Buffer.from(name), 0o700);
+      destinationFd = openDirectoryAt(discarded, Buffer.from(name));
+    } finally {
+      closeSync(discarded);
+    }
+  } finally {
+    closeSync(runtimeFd);
+  }
+  const destination = join(journal.runtime, "discarded", name);
+  const skipped: string[] = [];
+  const move = (label: string, run: () => Relocation, required = false): void => {
+    try {
+      const result = run();
+      if (result.missing) skipped.push(`${label}: already missing, nothing to retain`);
+      skipped.push(...result.warnings);
+    } catch (error) {
+      if (required) throw error;
+      skipped.push(`${label}: not moved (${errorMessage(error)}); inspect it in place`);
+    }
+  };
+  try {
+    // The journal goes first: if a later piece fails, a discoverable journal is already retained.
+    move(
+      "journal",
+      () =>
+        relocate(
+          journal.metadata_root,
+          journal.metadata_root_identity,
+          Buffer.from(relative(journal.metadata_root, dirname(journalPath))),
+          destinationFd,
+          destination,
+          "journal",
+        ),
+      true,
+    );
+    const provider = dirname(journal.mirror);
+    move("mirror", () =>
+      relocate(
+        dirname(provider),
+        undefined,
+        Buffer.from(basename(provider)),
+        destinationFd,
+        destination,
+        "mirror",
+      ),
+    );
+    if (statOptional(journal.quarantine_root))
+      move("quarantine", () =>
+        relocate(
+          journal.runtime,
+          journal.runtime_identity,
+          Buffer.from(relative(journal.runtime, journal.quarantine_root)),
+          destinationFd,
+          destination,
+          "quarantine",
+        ),
+      );
+  } finally {
+    closeSync(destinationFd);
+  }
+  removePointer(paths);
+  return { destination, live, skipped, promotion };
+}
+
+/** Describes the pending transaction, if any, and the paths that retain its recovery evidence. */
+export function pendingTransaction(
+  paths: RuntimePaths,
+): { journalPath: string; id: string; state: string; evidence: string[] } | undefined {
+  const pointer = readPointer(paths);
+  if (!pointer || !statOptional(pointer.data.journal)) return undefined;
+  const { data } = pointer;
+  const journal = assertBound(paths, data.journal, true);
+  const evidence = [data.journal, journal.mirror, journal.quarantine_root];
+  for (const operation of journal.evidence)
+    for (const name of [operation.staging, operation.quarantine, operation.recovery])
+      if (name)
+        evidence.push(
+          operation.placement === "sibling"
+            ? displayPath(journal.root, decoded(siblingKey(operation.path, name)))
+            : join(journal.quarantine_root, name),
+        );
+  return { journalPath: data.journal, id: journal.id, state: journal.state, evidence };
+}
+
+/** Read-only summary for --doctor: never creates the metadata root or runtime directory. */
+export function transactionStatus(
+  paths: RuntimePaths,
+): { id: string | null; state: string; journal: string } | null {
+  if (!statOptional(configuredMetadataRoot()) || !statOptional(paths.stateDir)) return null;
+  const pending = pendingTransaction(paths);
+  if (pending) return { id: pending.id, state: pending.state, journal: pending.journalPath };
+  const orphan = orphanedPointer(paths);
+  return orphan
+    ? { id: orphan.id ?? null, state: "journal_missing", journal: orphan.journal }
+    : null;
+}
+
+/** Describes a pointer whose journal is missing; it is only removed by a forced discard. */
+export function orphanedPointer(
+  paths: RuntimePaths,
+): { pointer: string; journal: string; id: string | undefined } | undefined {
+  const pointer = readPointer(paths);
+  if (!pointer || statOptional(pointer.data.journal)) return undefined;
+  return { pointer: pointer.path, journal: pointer.data.journal, id: pointer.data.id };
 }
 
 export function transactionForTests(paths: RuntimePaths): {

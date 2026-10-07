@@ -28,6 +28,11 @@ const SAFE_WORKFLOW_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const SAFE_REVISION = /^[1-9][0-9]{0,8}$/;
 const SAFE_PROPOSAL_JOB_ID = /^proposal-[a-f0-9-]{36}$/;
 const SAFE_QUERY_VALUE = /^[A-Za-z0-9._-]{1,128}$/;
+const JSON_MEDIA_TYPES: ReadonlySet<string> = new Set(["application/json"]);
+const STREAM_MEDIA_TYPES: ReadonlySet<string> = new Set([
+  "application/x-ndjson",
+  "text/event-stream",
+]);
 
 const SEGMENTS: Readonly<Record<string, RegExp>> = Object.freeze({
   projectId: SAFE_PROJECT_ID,
@@ -294,6 +299,21 @@ async function readResponseBody(response: Response): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
+/** Maps a failed or timed-out upstream exchange to a gateway status without its raw message. */
+function upstreamFailure(error: unknown): HttpError {
+  if (error instanceof Error && "status" in error && typeof error.status === "number") {
+    return error as HttpError;
+  }
+  const name = error instanceof Error ? error.name : "";
+  return name === "TimeoutError" || name === "AbortError"
+    ? remoteError("remote operator timed out", 504)
+    : remoteError("remote operator is unreachable", 502);
+}
+
+function mediaType(contentType: string | null): string {
+  return (contentType ?? "").split(";")[0]?.trim().toLowerCase() ?? "";
+}
+
 function assertResponseLength(response: Response): void {
   const declared = Number(response.headers.get("content-length") ?? 0);
   if (!Number.isFinite(declared) || declared < 0 || declared > MAX_REMOTE_RESPONSE_BYTES) {
@@ -327,25 +347,44 @@ export function createRemoteOperatorProxy({
       const body = ["POST", "PUT", "PATCH"].includes(req.method ?? "")
         ? await readRequestBody(req)
         : null;
-      const response = await fetchImpl(target, {
-        method: req.method ?? "GET",
-        headers: {
-          authorization: `Bearer ${readRemoteTokenFile(tokenFile)}`,
-          ...(body ? { "content-type": "application/json" } : {}),
-        },
-        body: body?.length ? new Uint8Array(body) : undefined,
-        redirect: "manual",
-        signal: AbortSignal.timeout(15_000),
-      });
+      const authorization = `Bearer ${readRemoteTokenFile(tokenFile)}`;
+      let response: Response;
+      try {
+        response = await fetchImpl(target, {
+          method: req.method ?? "GET",
+          headers: {
+            authorization,
+            ...(body ? { "content-type": "application/json" } : {}),
+          },
+          body: body?.length ? new Uint8Array(body) : undefined,
+          redirect: "manual",
+          signal: AbortSignal.timeout(15_000),
+        });
+      } catch (error) {
+        throw upstreamFailure(error);
+      }
       if (response.status >= 300 && response.status < 400) {
+        await response.body?.cancel().catch(() => {});
         throw remoteError("remote operator redirect rejected");
       }
-      const contentType = response.headers.get("content-type") ?? "application/octet-stream";
-      if (url.pathname.endsWith("/events/stream")) {
+      const contentType = response.headers.get("content-type") ?? "";
+      const media = mediaType(contentType);
+      const streamRoute = url.pathname.endsWith("/events/stream");
+      if (streamRoute && STREAM_MEDIA_TYPES.has(media)) {
         assertResponseLength(response);
         return { status: response.status, contentType, stream: response.body };
       }
-      const responseBody = await readResponseBody(response);
+      // Error bodies on the stream route are JSON; anything else is not a console response.
+      if (!JSON_MEDIA_TYPES.has(media)) {
+        await response.body?.cancel().catch(() => {});
+        throw remoteError("remote operator returned an unsupported content type");
+      }
+      let responseBody: Buffer;
+      try {
+        responseBody = await readResponseBody(response);
+      } catch (error) {
+        throw upstreamFailure(error);
+      }
       return {
         status: response.status,
         contentType,

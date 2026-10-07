@@ -116,6 +116,24 @@ export function s3ArtifactStorage(
 function conflict(message: string): Error {
   return Object.assign(new Error(message), { statusCode: 409 });
 }
+/** Derives a stable reservation UUID from its owner and Idempotency-Key, or a fresh one without a key. */
+export function reservationId(owner: ArtifactOwner, idempotencyKey?: string): string {
+  if (!idempotencyKey) return crypto.randomUUID();
+  const hex = crypto
+    .createHash("sha256")
+    .update(
+      JSON.stringify([
+        "artifact-reservation",
+        owner.workerId,
+        owner.nodeId,
+        String(owner.fence),
+        idempotencyKey,
+      ]),
+    )
+    .digest("hex");
+  const variant = ((Number.parseInt(hex[16], 16) & 0x3) | 0x8).toString(16);
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-${variant}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
 function validate(sha256: string, sizeBytes: number): void {
   if (
     !/^[a-f0-9]{64}$/.test(sha256) ||
@@ -143,11 +161,18 @@ export function createArtifactService({
   )
     throw new Error("Invalid artifact verification deadline");
   return {
-    async reserve(
-      request: ArtifactOwner & { sha256: string; sizeBytes: number; contentType?: string },
-    ) {
+    async reserve({
+      idempotencyKey,
+      ...request
+    }: ArtifactOwner & {
+      sha256: string;
+      sizeBytes: number;
+      contentType?: string;
+      idempotencyKey?: string;
+    }) {
       validate(request.sha256, request.sizeBytes);
-      const artifactId = crypto.randomUUID();
+      // A retried key maps to the same (workerId, nodeId, fence, key) reservation.
+      const artifactId = reservationId(request, idempotencyKey);
       const objectKey = `reservations/${artifactId}/${request.sha256}`;
       const artifact = await store.reserveArtifact({
         ...request,

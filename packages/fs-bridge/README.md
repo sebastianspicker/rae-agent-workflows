@@ -11,7 +11,9 @@ a C compiler:
 npm --workspace @rae/fs-bridge run build
 ```
 
-CMake.js builds the C Node-API module without a Python build dependency. The
+CMake.js builds the C Node-API module without a Python build dependency and compiles against the bundled
+`node-api-headers`, so the build needs no network access to nodejs.org and
+survives Node version switches. The
 TypeScript package loads the compiled module lazily. A missing module or an
 unsupported native operation throws; there is no path-based fallback.
 

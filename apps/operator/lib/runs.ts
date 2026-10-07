@@ -37,6 +37,10 @@ export interface InternalRun extends OperatorRun {
   checkpoints?: Array<JsonRecord & { status?: string }>;
   phase_order?: string[];
   completed_gates?: string[];
+  /** Internal: the run was started in graph-native workflow mode. */
+  graphNative?: boolean;
+  /** Internal: phase_order/completed_gates came from this run's own pipeline-state. */
+  gatesKnown?: boolean;
 }
 interface RunCursor {
   v: 1;
@@ -556,7 +560,13 @@ export function projectRunDetails(project: OperatorProject, run: InternalRun): I
 }
 
 export function publicRunSummary(run: InternalRun): OperatorRun {
-  const { workspaceRoot: _root, state: _state, ...summary } = run;
+  const {
+    workspaceRoot: _root,
+    state: _state,
+    graphNative: _graph,
+    gatesKnown: _gates,
+    ...summary
+  } = run;
   return summary;
 }
 
@@ -693,8 +703,14 @@ function addLatestInstance(latest: Map<string, JsonRecord>, envelope: JsonRecord
   if (!envelope || envelope.workflow_digest === undefined) return;
   const instanceId = String(envelope.instance_id ?? envelope.node_id ?? "");
   const prior = latest.get(instanceId);
-  if (!prior || Number(envelope.attempt) >= Number(prior.attempt))
+  if (!prior || compareAttemptOrder(envelope, prior) >= 0)
     latest.set(instanceId, publicInstance(envelope, instanceId));
+}
+
+/** Orders attempts by (loop_iteration, attempt); attempts reset for every loop iteration. */
+function compareAttemptOrder(left: JsonRecord, right: JsonRecord): number {
+  const iteration = (value: JsonRecord): number => Number(value.loop_iteration ?? 1) || 1;
+  return iteration(left) - iteration(right) || Number(left.attempt) - Number(right.attempt);
 }
 
 function publicInstance(envelope: JsonRecord, instanceId: string): JsonRecord {
@@ -706,6 +722,7 @@ function publicInstance(envelope: JsonRecord, instanceId: string): JsonRecord {
     item_digest: nullableProperty(envelope, "item_digest"),
     status: envelope.status,
     attempt: envelope.attempt,
+    loop_iteration: envelope.loop_iteration ?? 1,
     execution_tier: propertyOr(envelope, "execution_tier", "runtime"),
     selection: nullableProperty(envelope, "selection"),
     quorum: nullableProperty(envelope, "quorum"),
@@ -772,6 +789,8 @@ function runIdentity(
     current_phase: runPhase(run, events),
     phase_order: runPhaseOrder(run),
     completed_gates: runCompletedGates(run),
+    graphNative: record(request.workflow).mode === "graph-native",
+    gatesKnown: run.state.run_id === run.id,
   };
 }
 function runTask(request: JsonRecord, runId: string): string {
@@ -783,10 +802,14 @@ function runPhase(run: DiscoveredDirectory, events: OperatorEvent[]): string {
     : (events.at(-1)?.phase ?? "arm");
 }
 function runPhaseOrder(run: DiscoveredDirectory): string[] {
-  return Array.isArray(run.state.phase_order) ? run.state.phase_order : PHASES;
+  return run.state.run_id === run.id && Array.isArray(run.state.phase_order)
+    ? run.state.phase_order
+    : PHASES;
 }
 function runCompletedGates(run: DiscoveredDirectory): string[] {
-  return Array.isArray(run.state.completed_gates) ? run.state.completed_gates : [];
+  return run.state.run_id === run.id && Array.isArray(run.state.completed_gates)
+    ? run.state.completed_gates
+    : [];
 }
 function runWorkspace(run: DiscoveredDirectory): JsonRecord {
   return {
@@ -796,11 +819,39 @@ function runWorkspace(run: DiscoveredDirectory): JsonRecord {
   };
 }
 
+/**
+ * Mirrors the engine: graph-native runs refuse resume once completed; legacy runs may resume a
+ * completed run only while gates recorded by that same run remain open.
+ */
+export function isResumableStatus(
+  run: Pick<
+    InternalRun,
+    "status" | "graphNative" | "gatesKnown" | "phase_order" | "completed_gates"
+  >,
+): boolean {
+  const status = run.status ?? "";
+  if (run.graphNative && status === "completed") return false;
+  if (["running", "waiting", "stopped", "blocked", "interrupted"].includes(status)) return true;
+  return (
+    status === "completed" &&
+    !run.graphNative &&
+    run.gatesKnown === true &&
+    (run.phase_order ?? []).some((phase) => !(run.completed_gates ?? []).includes(`${phase}-gate`))
+  );
+}
+
 export function publicRun(
-  run: OperatorRun & Partial<Pick<InternalRun, "workspaceRoot" | "state">>,
+  run: OperatorRun &
+    Partial<Pick<InternalRun, "workspaceRoot" | "state" | "graphNative" | "gatesKnown">>,
   ownedRunId: string | null = null,
 ): OperatorRun {
-  const { workspaceRoot: _private, state: _state, ...value } = run;
+  const {
+    workspaceRoot: _private,
+    state: _state,
+    graphNative: _graph,
+    gatesKnown: _gates,
+    ...value
+  } = run;
   const pendingCheckpoint = (run.checkpoints ?? []).some((item) => item.status === "pending");
   const deniedCheckpoint = (run.checkpoints ?? []).some((item) =>
     ["rejected", "escalated"].includes(item.status ?? ""),
@@ -816,11 +867,7 @@ export function publicRun(
         !run.runtime_active &&
         !pendingCheckpoint &&
         !deniedCheckpoint &&
-        (["running", "waiting", "stopped", "blocked", "interrupted"].includes(run.status ?? "") ||
-          (run.status === "completed" &&
-            (run.phase_order ?? []).some(
-              (phase) => !(run.completed_gates ?? []).includes(`${phase}-gate`),
-            ))),
+        isResumableStatus(run),
       cleanup:
         !run.guarded &&
         ["stopped", "blocked", "interrupted", "completed"].includes(run.status ?? ""),

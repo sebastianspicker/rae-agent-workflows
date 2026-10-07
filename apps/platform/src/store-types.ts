@@ -1,4 +1,6 @@
 /** Explicit hosted store records keep unconstrained wire JSON outside typed control state. */
+/** Error code returned with a claim 409 when the worker must register again. */
+export const WORKER_UNREGISTERED = "worker_unregistered";
 export type RunState = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 export type NodeState = "queued" | "leased" | "succeeded" | "failed" | "cancelled";
 export type Access = "read" | "write";
@@ -88,8 +90,11 @@ export interface Claim {
   fence: number;
   leaseSeconds: number;
   heartbeatSeconds: number;
+  /** Both stores return the claiming worker and the ISO lease expiry. */
+  workerId?: string;
+  expiresAt?: string;
 }
-export interface MemoryLease extends Claim {
+export interface MemoryLease extends Omit<Claim, "expiresAt"> {
   workerId: string;
   expiresAt: number;
 }
@@ -190,4 +195,8 @@ export interface PgClient extends PgQuery {
 export interface PgPool extends PgQuery {
   connect(): Promise<PgClient>;
   end(): Promise<void>;
+  on?(event: "error", listener: (error: Error) => void): unknown;
+  readonly totalCount?: number;
+  readonly idleCount?: number;
+  readonly waitingCount?: number;
 }

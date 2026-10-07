@@ -1,7 +1,7 @@
 ---
 status: stable
 owner: science
-last_reviewed: 2026-04-12
+last_reviewed: 2026-10-07
 source_of_truth: editorial
 evidence_links: ../../reference/claims/evidence-index.md
 ---
@@ -12,8 +12,16 @@ Not every phase deserves the same reasoning budget, autonomy, or review burden.
 
 ## Claim
 
-Cognition is a budgeted control decision, not a fixed global maximum. Each phase
-gets the reasoning, autonomy, and review its risk can justify.
+Cognition is a budgeted control decision, not a fixed global maximum. The
+doctrine is that each phase should get the reasoning, autonomy, and review its
+risk can justify.
+
+In the engine, tiering is applied only through an execution profile
+(`--execution-profile`). No node in the default workflow declares a `tier`, and
+without a profile the tier is `runtime`, so the default run does not
+differentiate phases. On the legacy path the reasoning tier is only a trace
+label. Treat the rest of this page as policy guidance, not a description of
+default behavior.
 
 ## 1. Tiering idea
 
@@ -51,7 +59,11 @@ An informal routing rule is:
 
 $$
 \operatorname{tier}(\tau) \uparrow \text{ as } a \uparrow, r \uparrow, m \downarrow
+\text{ and } c \downarrow
 $$
+
+so high cost sensitivity $c$ pulls the tier down unless ambiguity or consequence
+of error outweighs it.
 
 ## 3. Why this matters
 

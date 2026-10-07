@@ -11,6 +11,7 @@ import {
 } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { getRunDir, readJson, writeJson } from "./state.js";
+import { acquireExclusiveLock } from "../primitives/stale-lock.js";
 import { badInput } from "../primitives/errors.js";
 import type { ArtifactsOperatorCheckpoint, ArtifactsOperatorControl } from "@rae/contracts";
 
@@ -79,7 +80,7 @@ function checkpointIdentity(
   requestKey: string;
   checkpointId: string;
 } {
-  if (!/^[a-z][a-z0-9-]*$/.test(phase) || !/^[a-z][a-z0-9-]*$/.test(purpose)) {
+  if (!/^[a-z][a-z0-9._-]{0,63}$/.test(phase) || !/^[a-z][a-z0-9-]*$/.test(purpose)) {
     throw badInput("checkpoint phase and purpose must be lowercase identifiers");
   }
   const requestKey = createHash("sha256").update(`${runId}\0${phase}\0${purpose}`).digest("hex");
@@ -118,22 +119,14 @@ export function readOperatorControl(runId: string, root: string): OperatorContro
 
 function withControlLock<T>(runId: string, root: string, callback: () => T): T {
   const controlPath = getOperatorControlPath(runId, root);
-  const lockPath = `${controlPath}.lock`;
   mkdirSync(dirname(controlPath), { recursive: true, mode: 0o700 });
-  let fd: number | null | undefined;
-  try {
-    fd = openSync(lockPath, "wx", 0o600);
-  } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "EEXIST") {
-      throw badInput(`operator control is being updated for run: ${runId}`);
-    }
-    throw error;
-  }
+  // A lock whose recorded owner is dead is retired; a live owner's lock is never replaced.
+  const lock = acquireExclusiveLock(`${controlPath}.lock`);
+  if (!lock) throw badInput(`operator control is being updated for run: ${runId}`);
   try {
     return callback();
   } finally {
-    closeSync(fd);
-    unlinkSync(lockPath);
+    lock.release();
   }
 }
 
@@ -169,6 +162,27 @@ export function setRunStatus(
   return withControlLock(runId, root, () =>
     writeRunStatus(runId, status, root, extras, readOperatorControl(runId, root)),
   );
+}
+
+/**
+ * Clears a recorded stop request so a stopped run can resume. A `stop-requested` status is also
+ * cleared when the caller holds the run lock, which proves the process that was asked to stop is
+ * gone. Any other status is left untouched.
+ */
+export function clearStopRequest(
+  runId: string,
+  root: string,
+  { lockOwnerConfirmedDead = false }: { lockOwnerConfirmedDead?: boolean } = {},
+): OperatorControl {
+  return withControlLock(runId, root, () => {
+    const current = readOperatorControl(runId, root);
+    if (current.stop_requested !== true) return current;
+    const clearable =
+      current.status === "stopped" ||
+      (lockOwnerConfirmedDead && current.status === "stop-requested");
+    if (!clearable) return current;
+    return writeRunStatus(runId, "stopped", root, { stop_requested: false }, current);
+  });
 }
 
 export function requestStop(runId: string, root: string): OperatorControl {

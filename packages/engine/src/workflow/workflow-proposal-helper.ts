@@ -8,6 +8,18 @@ import type { CapabilitySet } from "./execution-profile.js";
 import { contractsRoot } from "../primitives/installation-paths.js";
 
 const MAX_REQUEST_BYTES = 512 * 1024;
+const PROPOSAL_SCHEMAS = new Map([
+  ["2.0.0", "workflows/workflow-v2.schema.json"],
+  ["2.1.0", "workflows/workflow-v2.1.schema.json"],
+  ["2.2.0", "workflows/workflow-v2.2.schema.json"],
+]);
+
+/** Resolves the output schema for a proposal; it keeps the base workflow's schema version. */
+export function proposalSchemaPath(schemaVersion: string): string {
+  const relativePath = PROPOSAL_SCHEMAS.get(schemaVersion);
+  if (!relativePath) throw new Error("proposal helper schemaVersion is unsupported");
+  return resolve(contractsRoot, relativePath);
+}
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 
 interface ProposalExecutionRoute extends Record<string, unknown> {
@@ -24,6 +36,8 @@ export interface ProposalHelperRequest {
   temporary: string;
   attempt: 1 | 2;
   execution: ProposalExecutionRoute | null;
+  /** Schema version of the base workflow; defaults to 2.1.0. */
+  schemaVersion?: string;
 }
 
 interface ProposalHelperResponse {
@@ -59,25 +73,28 @@ export function parseProposalHelperRequest(value: unknown): ProposalHelperReques
   ) {
     throw new Error("proposal helper executor must be codex or opencode");
   }
+  const schemaVersion = value.schemaVersion;
+  if (schemaVersion !== undefined) proposalSchemaPath(String(schemaVersion));
   return {
     projectRoot: requiredString(value, "projectRoot", 16 * 1024),
     prompt: requiredString(value, "prompt", 256 * 1024),
     temporary: requiredString(value, "temporary", 16 * 1024),
     attempt,
     execution,
+    ...(schemaVersion === undefined ? {} : { schemaVersion: String(schemaVersion) }),
   };
 }
 
 export async function executeProposalHelperRequest(
   request: ProposalHelperRequest,
 ): Promise<ProposalHelperResponse> {
-  const { projectRoot, prompt, temporary, attempt, execution } = request;
+  const { projectRoot, prompt, temporary, attempt, execution, schemaVersion = "2.1.0" } = request;
   const result = await runAgentPhase({
     provider: execution?.executor ?? "codex",
     phase: `workflow-proposal-${attempt}`,
     runId: `proposal-${process.pid}`,
     workspaceRoot: projectRoot,
-    schemaPath: resolve(contractsRoot, "workflows/workflow-v2.1.schema.json"),
+    schemaPath: proposalSchemaPath(schemaVersion),
     outputPath: resolve(temporary, `proposal-${attempt}.json`),
     eventLogPath: resolve(temporary, `proposal-${attempt}.events.jsonl`),
     eventLogRoot: temporary,

@@ -1,11 +1,15 @@
 /** Schedules the local v2.2 wait-and-signal workflow subset deterministically. */
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { canonicalJson, validateWorkflow, workflowDigest } from "./workflow-contract.js";
 import { assembleWorkflowContextV22 } from "./workflow-context-v22.js";
 import { applyWorkflowV22Event, readWorkflowV22State } from "./workflow-v22-reducer.js";
-import { validateNodeEnvelope } from "./workflow-envelope.js";
+import {
+  abortOnStop,
+  checkpointResumable,
+  conditionMatches as edgeConditionMatches,
+  noProgressMessage,
+  persistEnvelope,
+} from "./workflow-scheduler-common.js";
 import type {
   JsonValue,
   WorkflowsNodeEnvelopeV22,
@@ -60,6 +64,8 @@ interface ScheduleV22Options {
   execute: (context: Record<string, unknown>) => Promise<ExecutionResult>;
   runDir?: string | null;
   resumeEnvelopes?: WorkflowsNodeEnvelopeV22[];
+  maxConcurrency?: number;
+  stopRequested?: () => boolean;
   through?: string | null;
   onEvent?: (event: Record<string, unknown>) => void;
   now?: () => string;
@@ -80,20 +86,9 @@ function payloadField(payload: JsonValue, key: string): JsonValue | undefined {
 
 const digest = (value: unknown): string =>
   createHash("sha256").update(canonicalJson(value)).digest("hex");
-const successful = (envelope: WorkflowsNodeEnvelopeV22): boolean => envelope.status === "passed";
 
 function conditionMatches(edge: WorkflowEdge, envelope: WorkflowsNodeEnvelopeV22): boolean {
-  if (!edge.condition || edge.condition === "success") return successful(envelope);
-  if (edge.condition === "failure") return ["failed", "blocked"].includes(envelope.status);
-  if (edge.condition === "budget-available") {
-    return payloadField(envelope.payload, "budget_available") !== false;
-  }
-  if (edge.condition === "blocking-findings") {
-    return (envelope.findings ?? []).some(
-      (finding) => finding.blocking === true || finding.severity === "blocking",
-    );
-  }
-  return false;
+  return edgeConditionMatches("2.2.0", edge, envelope);
 }
 
 function inputsFor(
@@ -115,35 +110,56 @@ function predecessors(workflow: WorkflowsWorkflowV22, nodeId: string): WorkflowE
   return workflow.edges.filter((edge) => edge.to === nodeId);
 }
 
+const edgeActive = (
+  edge: WorkflowEdge,
+  completed: Map<string, Readonly<WorkflowsNodeEnvelopeV22>>,
+): boolean => {
+  const envelope = completed.get(edge.from);
+  return envelope ? conditionMatches(edge, envelope) : false;
+};
+
+/** Nodes whose incoming edges are all resolved but none is active are skipped, transitively. */
+function disabledNodes(
+  workflow: WorkflowsWorkflowV22,
+  completed: Map<string, Readonly<WorkflowsNodeEnvelopeV22>>,
+): Set<string> {
+  const disabled = new Set<string>();
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const node of workflow.nodes) {
+      if (completed.has(node.id) || disabled.has(node.id)) continue;
+      const incoming = predecessors(workflow, node.id);
+      if (!incoming.length) continue;
+      if (!incoming.every((edge) => completed.has(edge.from) || disabled.has(edge.from))) continue;
+      if (incoming.some((edge) => edgeActive(edge, completed))) continue;
+      disabled.add(node.id);
+      changed = true;
+    }
+  }
+  return disabled;
+}
+
 function ready(
   workflow: WorkflowsWorkflowV22,
   node: WorkflowNode,
   completed: Map<string, Readonly<WorkflowsNodeEnvelopeV22>>,
+  disabled: Set<string>,
 ): boolean {
-  if (completed.has(node.id)) return false;
+  if (completed.has(node.id) || disabled.has(node.id)) return false;
   if (node.id === workflow.entry_node) return true;
   const incoming = predecessors(workflow, node.id);
-  if (!incoming.length || !incoming.every((edge) => completed.has(edge.from))) return false;
-  const active = inputsFor(workflow, node.id, completed);
-  if (node.kind === "join" && node.join === "all") return active.length === incoming.length;
+  if (!incoming.length) return false;
+  const active = incoming.filter((edge) => edgeActive(edge, completed));
+  if (node.kind === "join" && node.join === "any") return active.length > 0;
+  if (!incoming.every((edge) => completed.has(edge.from) || disabled.has(edge.from))) return false;
+  if (node.kind === "join" && node.join === "all") {
+    return (
+      active.length > 0 &&
+      active.length === incoming.filter((edge) => !disabled.has(edge.from)).length
+    );
+  }
   return active.length > 0;
-}
-
-function persistEnvelope(runDir: string | null, envelope: WorkflowsNodeEnvelopeV22): void {
-  validateNodeEnvelope(envelope);
-  if (!runDir) return;
-  const directory = resolve(runDir, "workflow", "attempts", envelope.node_id);
-  mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const instance = envelope.instance_id.replaceAll(/[^a-zA-Z0-9._-]/g, "_");
-  writeFileSync(
-    resolve(directory, `${instance}.${envelope.attempt}.json`),
-    `${JSON.stringify(envelope, null, 2)}\n`,
-    {
-      encoding: "utf8",
-      mode: 0o600,
-      flag: "wx",
-    },
-  );
 }
 
 function freezeEnvelope(
@@ -217,10 +233,12 @@ function failureEnvelope({
   attempt,
   error,
   context,
-}: EnvelopeArguments & { error: unknown }): Readonly<WorkflowsNodeEnvelopeV22> {
+  terminal = false,
+}: EnvelopeArguments & { error: unknown; terminal?: boolean }): Readonly<WorkflowsNodeEnvelopeV22> {
   const failure = {
     type: error instanceof Error ? error.name : "Error",
     message: error instanceof Error ? error.message : String(error),
+    ...(terminal ? { terminal: true } : {}),
   };
   const payload = { status: "failed", failure };
   return freezeEnvelope({
@@ -360,6 +378,8 @@ export async function scheduleWorkflowV22({
   execute,
   runDir,
   resumeEnvelopes = [],
+  maxConcurrency,
+  stopRequested = () => false,
   through = null,
   onEvent = () => {},
   now = () => new Date().toISOString(),
@@ -371,15 +391,27 @@ export async function scheduleWorkflowV22({
   admittedMemory = [],
   contextPolicy = {},
 }: ScheduleV22Options): Promise<Record<string, unknown>> {
-  const workflow = validateWorkflow(suppliedWorkflow) as WorkflowsWorkflowV22;
+  // Stored snapshots validate structurally so newer authoring rules cannot strand a resumed run.
+  const workflow = validateWorkflow(suppliedWorkflow, { mode: "snapshot" }) as WorkflowsWorkflowV22;
   if (workflow.schema_version !== "2.2.0") throw new Error("v2.2 scheduler requires schema 2.2.0");
   if (!runDir) throw new Error("v2.2 scheduler requires durable run directory");
   const durableRunDir = runDir;
   const workflowHash = workflowDigest(workflow);
   const attemptsLimit = Math.min(workflow.budgets?.max_attempts_per_node ?? 3, 3);
+  const concurrency = Math.min(maxConcurrency ?? workflow.budgets?.max_concurrency ?? 4, 4);
+  if (!Number.isInteger(concurrency) || concurrency < 1)
+    throw new Error("max concurrency must be from 1 to 4");
   const completed = new Map<string, Readonly<WorkflowsNodeEnvelopeV22>>();
   const attempts = new Map<string, number>();
+  const nodeKinds = new Map<string, string>(workflow.nodes.map((node) => [node.id, node.kind]));
   for (const entry of resumeEnvelopes) {
+    // A non-terminal checkpoint failure is re-evaluated once per resume, continuing the attempt
+    // numbering; a final human decision or an exhausted checkpoint stays failed.
+    if (entry.status === "failed" && nodeKinds.get(entry.node_id) === "checkpoint") {
+      if (checkpointResumable(entry) === true) attempts.set(entry.node_id, entry.attempt);
+      else completed.set(entry.node_id, Object.freeze(entry));
+      continue;
+    }
     if (entry.status === "failed" && entry.attempt < attemptsLimit) {
       attempts.set(entry.node_id, entry.attempt);
     } else {
@@ -387,6 +419,7 @@ export async function scheduleWorkflowV22({
     }
   }
   let sequence = 0;
+  const abort = new AbortController();
   const emit = (event: string, metadata: Record<string, unknown> = {}): void =>
     onEvent({ seq: ++sequence, event, ...metadata });
   const contextFor = (node: WorkflowNode, inputs: WorkflowInput[]): WorkflowContext =>
@@ -407,10 +440,12 @@ export async function scheduleWorkflowV22({
     context: WorkflowContext,
   ): Promise<Readonly<WorkflowsNodeEnvelopeV22>> {
     let envelope: Readonly<WorkflowsNodeEnvelopeV22>;
+    let retry = false;
     do {
       const attempt = (attempts.get(node.id) ?? 0) + 1;
       attempts.set(node.id, attempt);
       emit("node_instance_started", { node_id: node.id, instance_id: node.id, attempt });
+      let terminal = false;
       try {
         const execution = resolveTier(node.tier ?? "standard", node.id);
         const result = await execute({
@@ -420,6 +455,7 @@ export async function scheduleWorkflowV22({
           sessionId: randomUUID(),
           context,
           execution,
+          signal: abort.signal,
         });
         envelope = ordinaryEnvelope({
           runId,
@@ -431,7 +467,20 @@ export async function scheduleWorkflowV22({
           context,
         });
       } catch (error) {
-        envelope = failureEnvelope({ runId, workflowHash, node, inputs, attempt, error, context });
+        // A wait is resumable and an attempt aborted by a stop is not recorded.
+        if ((error as { workflowWaiting?: unknown } | null)?.workflowWaiting === true) throw error;
+        if (abort.signal.aborted) throw error;
+        terminal = (error as { workflowTerminal?: unknown } | null)?.workflowTerminal === true;
+        envelope = failureEnvelope({
+          runId,
+          workflowHash,
+          node,
+          inputs,
+          attempt,
+          error,
+          context,
+          terminal,
+        });
       }
       persistEnvelope(durableRunDir, envelope);
       emit("node_instance_completed", {
@@ -440,10 +489,16 @@ export async function scheduleWorkflowV22({
         status: envelope.status,
         attempt,
       });
-      if (envelope.status === "failed" && attempt < attemptsLimit) {
+      // Checkpoints are evaluated once per pass; a resume re-evaluates them.
+      retry =
+        envelope.status === "failed" &&
+        !terminal &&
+        node.kind !== "checkpoint" &&
+        attempt < attemptsLimit;
+      if (retry) {
         emit("node_instance_retrying", { node_id: node.id, instance_id: node.id, attempt });
       }
-    } while (envelope.status === "failed" && envelope.attempt < attemptsLimit);
+    } while (retry);
     return envelope;
   }
 
@@ -511,43 +566,80 @@ export async function scheduleWorkflowV22({
     return { envelope };
   }
 
-  while (!completed.has(workflow.terminal_node)) {
-    const readyNodes = workflow.nodes.filter((node) => ready(workflow, node, completed));
-    if (!readyNodes.length) {
-      throw new Error(
-        `workflow cannot make progress; completed: ${[...completed.keys()].sort().join(", ")}`,
-      );
-    }
-    const wait = readyNodes.find((node) => node.kind === "wait");
-    const writer = readyNodes.find((node) => node.access === "write");
-    const batch = wait ? [wait] : writer ? [writer] : readyNodes.slice(0, 4);
-    const settled = await Promise.all(
-      batch.map(async (node) => {
-        const inputs = inputsFor(workflow, node.id, completed);
-        const context = contextFor(node, inputs);
-        return {
-          node,
-          result:
-            node.kind === "wait"
-              ? executeWait(node, inputs, context)
-              : { envelope: await executeOrdinary(node, inputs, context) },
-        };
-      }),
+  const cannotProgress = (): Error =>
+    new Error(
+      noProgressMessage(
+        [...completed.values()]
+          .filter((envelope) => envelope.status === "failed" || envelope.status === "blocked")
+          .map((envelope) => ({
+            id: envelope.node_id,
+            kind: nodeKinds.get(envelope.node_id) ?? "node",
+            status: "failed",
+            message: (envelope as { failure?: { message?: unknown } }).failure?.message,
+          })),
+        completed.keys(),
+      ),
     );
-    for (const { node, result } of settled) {
-      if (result.waiting) {
-        return {
-          status: "waiting",
-          completed,
-          workflow_digest: workflowHash,
-          wait: result.waiting,
-        };
+
+  async function mainLoop(): Promise<Record<string, unknown>> {
+    while (!completed.has(workflow.terminal_node)) {
+      if (stopRequested()) {
+        emit("workflow_stopped");
+        return { status: "stopped", completed, workflow_digest: workflowHash };
       }
-      completed.set(node.id, result.envelope);
-      if (through === node.id)
-        return { status: "through", completed, workflow_digest: workflowHash };
+      const disabled = disabledNodes(workflow, completed);
+      if (disabled.has(workflow.terminal_node)) throw cannotProgress();
+      const readyNodes = workflow.nodes.filter((node) =>
+        ready(workflow, node, completed, disabled),
+      );
+      if (!readyNodes.length) throw cannotProgress();
+      const wait = readyNodes.find((node) => node.kind === "wait");
+      const writer = readyNodes.find((node) => node.access === "write");
+      const batch = wait ? [wait] : writer ? [writer] : readyNodes.slice(0, concurrency);
+      // Every batch member settles before any outcome is acted on, so none is abandoned.
+      const outcomes = await Promise.allSettled(
+        batch.map(async (node) => {
+          const inputs = inputsFor(workflow, node.id, completed);
+          const context = contextFor(node, inputs);
+          return {
+            node,
+            result:
+              node.kind === "wait"
+                ? executeWait(node, inputs, context)
+                : { envelope: await executeOrdinary(node, inputs, context) },
+          };
+        }),
+      );
+      const rejected = outcomes.find((outcome) => outcome.status === "rejected");
+      // A stop aborts running providers; the loop head then reports the stop.
+      if (rejected && abort.signal.aborted && stopRequested()) continue;
+      if (rejected) throw rejected.reason;
+      const settled = outcomes.flatMap((outcome) =>
+        outcome.status === "fulfilled" ? [outcome.value] : [],
+      );
+      for (const { node, result } of settled) {
+        if (result.waiting) {
+          return {
+            status: "waiting",
+            completed,
+            workflow_digest: workflowHash,
+            wait: result.waiting,
+          };
+        }
+        completed.set(node.id, result.envelope);
+        if (through === node.id)
+          return { status: "through", completed, workflow_digest: workflowHash };
+      }
     }
+    emit("workflow_completed", { node_id: workflow.terminal_node });
+    return { status: "completed", completed, workflow_digest: workflowHash };
   }
-  emit("workflow_completed", { node_id: workflow.terminal_node });
-  return { status: "completed", completed, workflow_digest: workflowHash };
+
+  // Batches always settle completely, so nothing is left running when the loop throws.
+  const stopWatch = abortOnStop(stopRequested, abort);
+  try {
+    return await mainLoop();
+  } finally {
+    stopWatch();
+  }
 }

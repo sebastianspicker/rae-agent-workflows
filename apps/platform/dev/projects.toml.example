@@ -2,3 +2,5 @@
 [projects.example-project]
 root = "/absolute/canonical/git/root"
 profile = "/absolute/path/to/snapshotted-execution-profile-v2.json"
+# Node keys this worker accepts write claims for; omitted or empty means every node is read-only.
+writeNodes = []

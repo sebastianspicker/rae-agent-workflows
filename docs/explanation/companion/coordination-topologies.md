@@ -1,7 +1,7 @@
 ---
 status: stable
 owner: science
-last_reviewed: 2026-04-17
+last_reviewed: 2026-10-07
 source_of_truth: ../science/coordination-cost.md
 evidence_links: ../../reference/claims/dossiers/clm-008-coordination-topology.md
 ---
@@ -25,7 +25,10 @@ $$
 E_{\text{star}}(n) = n-1
 $$
 
-The gap grows linearly for the star and quadratically for the complete graph.
+The star's edge count grows linearly and the complete graph's grows
+quadratically. Only these edge counts are formal; turning them into a cost
+comparison assumes a uniform cost per edge and ignores that the hub carries all
+$n-1$ edges, so the cost claim is an engineering argument.
 
 ## Why the topology matters
 

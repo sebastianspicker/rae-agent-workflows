@@ -42,14 +42,18 @@ function repositories(value: unknown): Repository[] {
   });
 }
 const help = `Usage: coauthor-trailer-cleaner [OPTIONS] [<github_repo_url> <absolute_local_repo_path> ...]
-  --dry-run             Inspect without changing history
-  --push                Push with an exact upstream OID lease
+  --apply               Rewrite history; without it every run is a dry run
+  --dry-run             Inspect without changing history (default)
+  --push                With --apply: push with an exact upstream OID lease
   --no-push             Rewrite locally only (default)
   --validate-only       Validate inputs without rewriting
   --target "Name <email>"  Remove an identity; repeatable
   --config <file>       Load JSON defaults, targets and repos
   --repos-file <file>   Load JSON repos or "url path" lines
-  --backup-remote <name>  Retain the current recovery branch remotely
+  --backup-remote <name>  Push the recovery ref to this remote (needs --push or
+                        --allow-backup-push; must not be the cleaned repository)
+  --allow-backup-push   Allow the backup push without --push or to the cleaned repository
+  --delete-recovery-branch  Delete the recovery ref (local and pushed backup) after success
   --quiet | --verbose  Select output detail
   --version | --help   Show version or help
 `;
@@ -67,14 +71,17 @@ export function main(args: string[]): number {
     throw new Error("Node.js 24 or newer required");
   const options: RewriteOptions = {
     targets: [{ name: "Cursor", email: "cursoragent@cursor.com" }],
-    dryRun: false,
+    dryRun: true,
     validateOnly: false,
     noPush: true,
     backupRemote: "",
+    deleteRecoveryBranch: false,
   };
   let repos: Repository[] = [],
     reposFile = "",
-    quiet = false;
+    quiet = false,
+    apply = false,
+    configDryRun = false;
   const positionals: string[] = [],
     identities: Target[] = [];
   const configIndex = args.lastIndexOf("--config");
@@ -90,13 +97,14 @@ export function main(args: string[]): number {
     );
     const defaults = object(
       config.defaults === undefined ? {} : config.defaults,
-      ["dryRun", "noPush", "backupRemote"],
+      ["dryRun", "noPush", "backupRemote", "deleteRecoveryBranch"],
       "defaults",
     );
-    for (const key of ["dryRun", "noPush"] as const)
+    for (const key of ["dryRun", "noPush", "deleteRecoveryBranch"] as const)
       if (Object.hasOwn(defaults, key)) {
         if (typeof defaults[key] !== "boolean") throw new Error(`defaults.${key} must be boolean`);
-        options[key] = defaults[key];
+        if (key === "dryRun") configDryRun = defaults[key];
+        else options[key] = defaults[key];
       }
     if (defaults.backupRemote !== undefined && defaults.backupRemote !== null)
       options.backupRemote = string(defaults.backupRemote, "backupRemote");
@@ -112,14 +120,23 @@ export function main(args: string[]): number {
       return next;
     };
     switch (argument) {
+      case "--apply":
+        apply = true;
+        break;
       case "--dry-run":
-        options.dryRun = true;
+        configDryRun = true;
         break;
       case "--push":
         options.noPush = false;
         break;
       case "--no-push":
         options.noPush = true;
+        break;
+      case "--allow-backup-push":
+        options.allowBackupPush = true;
+        break;
+      case "--delete-recovery-branch":
+        options.deleteRecoveryBranch = true;
         break;
       case "--validate-only":
         options.validateOnly = true;
@@ -153,7 +170,9 @@ export function main(args: string[]): number {
     }
   }
   if (identities.length) options.targets = normalizeTargets(identities);
-  if (options.backupRemote && !/^[a-zA-Z0-9_.-]+$/.test(options.backupRemote))
+  // A real rewrite needs an explicit --apply; config files cannot turn the dry run off.
+  options.dryRun = !apply || configDryRun;
+  if (options.backupRemote && !/^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$/.test(options.backupRemote))
     throw new Error("Invalid backup remote name");
   if (!repos.length && reposFile) {
     const content = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true })
@@ -184,6 +203,18 @@ export function main(args: string[]): number {
       console.log(
         quiet ? `[ok] ${repo.url}` : JSON.stringify({ repository: repo.path, ...result }),
       );
+      if (options.dryRun && !options.validateOnly)
+        console.log("Dry run: no objects or refs were written; pass --apply to rewrite.");
+      if (result.recoveryRef) console.log(`Recovery ref: ${result.recoveryRef}`);
+      for (const warning of result.warnings ?? []) console.error(`[warn] ${warning}`);
+      if (result.residualRefs?.length)
+        console.error(
+          `[warn] Residual exposure: these refs still contain rewritten original commits (and their trailers): ${result.residualRefs.join(", ")}`,
+        );
+      if (result.backupRemoteRetained)
+        console.log(
+          `[warn] Remote ${result.backupRemoteRetained} retains a backup of the ORIGINAL history, including the targeted trailers`,
+        );
       if (result.invalidatedSignatures)
         console.error(
           `[warn] Removed ${result.invalidatedSignatures} signatures invalidated by rewritten commits`,

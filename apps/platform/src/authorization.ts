@@ -9,13 +9,16 @@ export const PLATFORM_SCOPES = Object.freeze([
   "rae.run.read",
   "rae.run.signal",
   "rae.run.cancel",
+  "rae.run.rebind",
   "rae.policy.write",
   "rae.work.claim",
   "rae.work.report",
 ]);
 
 export function authorizedProjects(principal: Principal): string[] {
-  const projects = principal.claims?.projects || principal.claims?.project_ids || [];
+  const claims = principal.claims ?? {};
+  // A present "projects" claim is authoritative even when falsy; project_ids is only a fallback.
+  const projects = claims.projects !== undefined ? claims.projects : (claims.project_ids ?? []);
   if (!Array.isArray(projects) || projects.some((value) => typeof value !== "string" || !value)) {
     throw Object.assign(new Error("token project membership must be an array of strings"), {
       statusCode: 403,
@@ -35,6 +38,12 @@ export function requireProject(principal: Principal, projectId: string) {
     throw Object.assign(new Error("principal is not authorized for this project"), {
       statusCode: 403,
     });
+}
+
+/** Hides resources in projects the principal cannot access instead of confirming they exist. */
+export function projectVisible(principal: Principal, projectId: string) {
+  const projects = authorizedProjects(principal);
+  return projects.includes(projectId) || projects.includes("*");
 }
 
 export function requireWorkerIdentity(principal: Principal, workerId: string) {

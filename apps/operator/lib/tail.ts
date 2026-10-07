@@ -111,28 +111,53 @@ class TailChannel {
     subscriber.paused = delivery.pause === true;
   }
 
+  /** Ends one subscriber's stream without disturbing the others on this channel. */
+  private drop(subscriber: Subscriber): void {
+    if (!this.subscribers.has(subscriber)) return;
+    try {
+      subscriber.onError();
+    } catch {
+      // A failing error callback belongs to the dropped subscriber alone.
+    }
+    this.remove(subscriber);
+  }
+
+  private readBatch(requests: Array<{ after: number; limit: number }>) {
+    try {
+      return this.pages?.(this.run, requests);
+    } catch {
+      // Fall back to per-cohort reads so a failure is attributed to its own cursor.
+      return undefined;
+    }
+  }
+
   private poll(): void {
     this.timer = null;
     if (!this.subscribers.size) return;
     const active = [...this.subscribers].filter((subscriber) => !subscriber.paused);
     if (!active.length) return;
-    try {
-      let hasMore = false;
-      const entries = cursorCohorts(active);
-      const requests = entries.map(([after]) => ({ after, limit: 1000 }));
-      const pages = this.pages?.(this.run, requests);
-      for (const [index, [after, subscribers]] of entries.entries()) {
-        const raw = pages?.[index] ?? this.read(this.run, { after, limit: 1000 });
-        hasMore ||= raw.has_more;
-        for (const subscriber of subscribers) this.deliver(subscriber, raw.events);
+    let hasMore = false;
+    const entries = cursorCohorts(active);
+    const pages = this.readBatch(entries.map(([after]) => ({ after, limit: 1000 })));
+    for (const [index, [after, subscribers]] of entries.entries()) {
+      let raw: ReturnType<Reader>;
+      try {
+        raw = pages?.[index] ?? this.read(this.run, { after, limit: 1000 });
+      } catch {
+        for (const subscriber of subscribers) this.drop(subscriber);
+        continue;
       }
-      if ([...this.subscribers].some((subscriber) => !subscriber.paused)) {
-        this.schedule(hasMore ? 0 : this.emptyDelay);
+      hasMore ||= raw.has_more;
+      for (const subscriber of subscribers) {
+        try {
+          this.deliver(subscriber, raw.events);
+        } catch {
+          this.drop(subscriber);
+        }
       }
-    } catch {
-      for (const subscriber of [...this.subscribers]) subscriber.onError();
-      this.subscribers.clear();
-      this.onEmpty();
+    }
+    if ([...this.subscribers].some((subscriber) => !subscriber.paused)) {
+      this.schedule(hasMore ? 0 : this.emptyDelay);
     }
   }
 }

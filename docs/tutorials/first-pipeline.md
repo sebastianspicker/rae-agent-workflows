@@ -1,8 +1,8 @@
 ---
 status: stable
 owner: orchestration
-last_reviewed: 2026-07-16
-source_of_truth: packages/engine
+last_reviewed: 2026-10-07
+source_of_truth: scripts/src/rae.ts
 evidence_links: ../reference/claims/evidence-index.md
 ---
 
@@ -26,12 +26,19 @@ a coding agent and modify a target repository.
 npm run rae -- orchestrate init
 ```
 
-This creates a `.pipeline/` state directory and prints a `run_id`.
+Without an argument, `orchestrate init` initialises `.pipeline/` in the
+directory you invoked it from. Passing a path or `--project-root <path>`
+initialises that project root instead. The command creates
+`<project-root>/.pipeline/` and prints a `run_id`.
 
 The manual pipeline surface does not create a published release. RAE is a
 public alpha candidate and interfaces may change.
 
 ## 2. Start the first real stage
+
+The stage commands also run in the invoking directory and receive it as
+`--project-root` unless you pass one, so relative paths such as `--taskset`
+resolve from the repository root.
 
 ```bash
 npm run rae -- orchestrate run-stage \
@@ -52,8 +59,11 @@ npm run rae -- orchestrate summarize-run \
 ## 4. Verify the package
 
 ```bash
-npm run verify --
+npm run verify -- --skip-install
 ```
+
+The last line is `VERDICT: PASS`, or `VERDICT: PARTIAL` when the experimental
+platform is not installed.
 
 ## What this demonstrates
 

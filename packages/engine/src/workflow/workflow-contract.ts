@@ -77,7 +77,16 @@ interface WorkflowShape {
     max_concurrency?: number;
     max_repair_rounds?: number;
     max_attempts_per_node?: number;
+    max_pipeline_depth?: number;
+    max_wall_clock_seconds?: number;
+    max_provider_attempts?: number;
   };
+}
+
+/** `authoring` enforces every current rule; `snapshot` checks structure so stored runs resume. */
+export type WorkflowValidationMode = "authoring" | "snapshot";
+export interface WorkflowValidationOptions {
+  mode: WorkflowValidationMode;
 }
 
 type SchemaReferences = Array<[path: string, pointer: string]>;
@@ -105,6 +114,20 @@ const FORBIDDEN_PAYLOAD_KEYS = new Set([
   "tools",
 ]);
 const MAX_PAYLOAD_CONTRACT_BYTES = 64 * 1024;
+const FINDING_SEVERITIES = ["blocking", "major", "minor", "info"];
+const DEFAULT_PIPELINE_DEPTH = 4;
+
+/** The shared finding schema every findings-style payload contract declares as its `items`. */
+export const FINDING_SCHEMA = Object.freeze({
+  type: "object",
+  required: ["severity"],
+  properties: {
+    severity: { enum: FINDING_SEVERITIES },
+    blocking: { type: "boolean" },
+    evidence_ref: { type: "string", maxLength: 4096 },
+    summary: { type: "string", maxLength: 8000 },
+  },
+});
 
 function canonicalValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalValue);
@@ -641,9 +664,13 @@ function streamGraph(
   return streamOutgoing;
 }
 
-function assertBoundedStreamDepth(streamOutgoing: Map<string, string[]>): void {
+function assertBoundedStreamDepth(
+  streamOutgoing: Map<string, string[]>,
+  limit = DEFAULT_PIPELINE_DEPTH,
+): void {
   const visit = (nodeId: string, depth: number, active: Set<string>): void => {
-    if (depth > 4) throw contractError(`stream pipeline through ${nodeId} exceeds depth 4`);
+    if (depth > limit)
+      throw contractError(`stream pipeline through ${nodeId} exceeds depth ${limit}`);
     if (active.has(nodeId)) throw contractError(`stream pipeline contains a cycle at ${nodeId}`);
     const nextActive = new Set(active).add(nodeId);
     for (const next of streamOutgoing.get(nodeId) ?? []) visit(next, depth + 1, nextActive);
@@ -658,7 +685,10 @@ function validateV21Topology(
 ): void {
   assertV21Nodes(workflow, nodes, graph);
   assertUntilDryLoops(workflow);
-  assertBoundedStreamDepth(streamGraph(workflow, nodes));
+  assertBoundedStreamDepth(
+    streamGraph(workflow, nodes),
+    workflow.budgets?.max_pipeline_depth ?? DEFAULT_PIPELINE_DEPTH,
+  );
 }
 
 function assertV22NodeShape(node: WorkflowNodeShape, signalContracts: Set<string>): void {
@@ -721,7 +751,107 @@ function workflowVersion(value: unknown): string | undefined {
     : undefined;
 }
 
-export function validateWorkflow(value: unknown): WorkflowContract {
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function isFindingsContract(contract: unknown): boolean {
+  const properties = asRecord(asRecord(contract)?.properties);
+  return properties !== undefined && "findings" in properties;
+}
+
+function propertyType(properties: Record<string, unknown> | undefined, key: string): unknown {
+  return asRecord(properties?.[key])?.type;
+}
+
+function matchesFindingSchema(contract: unknown, items: unknown): boolean {
+  let schema = asRecord(items);
+  const reference = schema?.$ref;
+  if (typeof reference === "string" && reference.startsWith("#/")) {
+    schema = asRecord(resolvePointer(contract, reference));
+  }
+  const properties = asRecord(schema?.properties);
+  const severity = asRecord(properties?.severity)?.enum;
+  return (
+    Array.isArray(schema?.required) &&
+    schema.required.includes("severity") &&
+    Array.isArray(severity) &&
+    FINDING_SEVERITIES.every((entry) => severity.includes(entry)) &&
+    severity.every((entry) => FINDING_SEVERITIES.includes(String(entry))) &&
+    propertyType(properties, "blocking") === "boolean" &&
+    propertyType(properties, "summary") === "string" &&
+    (properties?.evidence_ref === undefined ||
+      propertyType(properties, "evidence_ref") === "string")
+  );
+}
+
+function assertOwnershipPlans(workflow: WorkflowShape): void {
+  for (const node of workflow.nodes) {
+    if (node.ownership_plan !== true) continue;
+    const contract = node.payload_contract
+      ? (workflow.payload_contracts?.[node.payload_contract] as { required?: unknown } | undefined)
+      : undefined;
+    if (!Array.isArray(contract?.required) || !contract.required.includes("file_ownership")) {
+      throw contractError(
+        `ownership plan ${node.id} must declare a payload_contract whose schema requires file_ownership`,
+      );
+    }
+  }
+}
+
+function assertMarkerPlacement(workflow: WorkflowShape): void {
+  for (const node of workflow.nodes) {
+    if (node.verification === true && node.kind !== "gate") {
+      throw contractError(`node ${node.id} declares verification but is not a gate`);
+    }
+    if (node.mutation_checkpoint !== undefined && node.kind !== "checkpoint") {
+      throw contractError(`node ${node.id} declares mutation_checkpoint but is not a checkpoint`);
+    }
+  }
+}
+
+function assertFindingContracts(workflow: WorkflowShape): void {
+  for (const node of workflow.nodes) {
+    const contract = node.payload_contract
+      ? workflow.payload_contracts?.[node.payload_contract]
+      : undefined;
+    if (!isFindingsContract(contract)) continue;
+    const properties = asRecord(asRecord(contract)?.properties);
+    const items = asRecord(properties?.findings)?.items;
+    if (!matchesFindingSchema(contract, items)) {
+      throw contractError(
+        `node ${node.id} payload contract ${node.payload_contract} must declare findings items matching the shared finding schema`,
+      );
+    }
+  }
+}
+
+function assertNamedArtifacts(workflow: WorkflowShape): void {
+  for (const edge of workflow.edges) {
+    if (edge.type === "artifact" && !edge.artifact) {
+      throw contractError(`artifact edge ${edge.from} -> ${edge.to} must name its artifact`);
+    }
+  }
+}
+
+function assertAuthoringRules(workflow: WorkflowShape): void {
+  assertOwnershipPlans(workflow);
+  assertMarkerPlacement(workflow);
+  assertFindingContracts(workflow);
+  assertNamedArtifacts(workflow);
+}
+
+/**
+ * Validates one workflow. `authoring` (the default: registry drafts, new runs, designer and
+ * proposal output) also enforces the marker, finding-schema, artifact-name and ownership-plan
+ * rules; `snapshot` enforces structure and topology only, so a stored run keeps resuming.
+ */
+export function validateWorkflow(
+  value: unknown,
+  { mode }: WorkflowValidationOptions = { mode: "authoring" },
+): WorkflowContract {
   const workflow: unknown = structuredClone(value);
   const version = workflowVersion(workflow);
   const validateShape = version ? shapeValidators.get(version) : undefined;
@@ -742,6 +872,7 @@ export function validateWorkflow(value: unknown): WorkflowContract {
       );
     }
   }
+  if (mode === "authoring") assertAuthoringRules(typedWorkflow);
   validateTopology(typedWorkflow);
   return typedWorkflow as WorkflowContract;
 }

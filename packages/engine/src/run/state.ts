@@ -438,10 +438,37 @@ function discoverWorkspaceCandidateRoots(root: string): Set<string> {
   return candidateRoots;
 }
 
+/**
+ * Refuses a run state whose recorded workspace root is not the directory it was found in. A
+ * state file copied or planted elsewhere could otherwise redirect resume to an arbitrary path.
+ */
+export function assertWorkspaceRootMatches(recordedRoot: string, candidateRoot: string): string {
+  let recorded: string;
+  let candidate: string;
+  try {
+    recorded = realpathSync.native(recordedRoot);
+    candidate = realpathSync.native(candidateRoot);
+  } catch {
+    throw badInput(
+      `run workspace root ${recordedRoot} cannot be verified against ${candidateRoot}; refusing to resume`,
+    );
+  }
+  if (recorded !== candidate) {
+    throw badInput(
+      `run state in ${candidateRoot} records workspace root ${recordedRoot}; refusing to resume`,
+    );
+  }
+  return candidateRoot;
+}
+
+/**
+ * Locates the workspace of a run. A match is trusted only at the directory Git registers (or the
+ * given root) and only when its recorded workspace root resolves to that same directory.
+ */
 export function resolveWorkspaceRootForRun(runId: string, root = getRepoRoot()): string {
   const directState = readJson(getPipelineStatePath(root), null);
   if (directState && directState.run_id === runId) {
-    return getWorkspaceFromState(directState, root).root;
+    return assertWorkspaceRootMatches(getWorkspaceFromState(directState, root).root, root);
   }
 
   for (const candidateRoot of discoverWorkspaceCandidateRoots(root)) {
@@ -450,7 +477,10 @@ export function resolveWorkspaceRootForRun(runId: string, root = getRepoRoot()):
       null,
     );
     if (candidateState && candidateState.run_id === runId) {
-      return getWorkspaceFromState(candidateState, candidateRoot).root;
+      return assertWorkspaceRootMatches(
+        getWorkspaceFromState(candidateState, candidateRoot).root,
+        candidateRoot,
+      );
     }
   }
 

@@ -1,5 +1,5 @@
 /** Validates the bounded start form and separates accepted requests from discovered runs. */
-import { api, showToast } from "./api.js";
+import { api, showError, showToast } from "./api.js";
 import { waitForNewRun } from "./data.js";
 import { elements, state } from "./state.js";
 import { validateTask } from "./task-input.js";
@@ -12,6 +12,11 @@ function startError(message: string | null): void {
     error.hidden = !message;
   }
   elements["start-task"].setAttribute("aria-invalid", String(Boolean(message)));
+}
+
+function startPending(message: string | null): void {
+  elements["start-pending"].textContent = message ?? "";
+  elements["start-pending"].hidden = !message;
 }
 
 export async function submitStart(event: Event): Promise<void> {
@@ -29,6 +34,8 @@ export async function submitStart(event: Event): Promise<void> {
   state.actionPending = true;
   elements["start-submit"].disabled = true;
   elements["new-run-button"].disabled = true;
+  startError(null);
+  startPending("Starting…");
   try {
     const result = await api<{ run_id?: string }>(
       `/projects/${encodeURIComponent(projectId)}/runs`,
@@ -44,14 +51,17 @@ export async function submitStart(event: Event): Promise<void> {
       },
     );
     elements["start-task"].value = "";
+    startPending(null);
     elements["start-dialog"].close();
     showToast("Run accepted. Waiting for its isolated worktree and run identifier…", "notice");
     await waitForNewRun(previousIds, projectId, result.run_id);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to start run.";
-    startError(message);
-    showToast(message);
+    // The dialog's own alert carries the error while it is open; afterwards use the error slip.
+    if (elements["start-dialog"].open) startError(message);
+    else showError(error);
   } finally {
+    startPending(null);
     state.actionPending = false;
     elements["start-submit"].disabled = false;
     elements["new-run-button"].disabled = !state.projectId;

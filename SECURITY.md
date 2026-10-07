@@ -158,10 +158,12 @@ Do not publish:
   Insecure authentication and cleartext HTTP require explicit development
   flags.
 - Hosted configuration requires OIDC validation of exact issuer, audience,
-  JWKS URL, token type, bounded issue time, allowed asymmetric signing
-  algorithms, subject, and unexpired expiration. Route scopes and
+  JWKS URL, token type, a present issue time (`iat`), allowed asymmetric
+  signing algorithms, subject, and unexpired expiration. A token lifetime
+  (`exp - iat`) above `auth.maxTokenLifetimeSeconds` (at most seven days) is
+  rejected. Route scopes, including `rae.run.rebind` for rebinding, and
   project claims are enforced per request; worker identifiers must match token
-  subjects.
+  subjects. The `Host` allowlist applies to every route.
 - Worker reports, heartbeats, and artifact finalization require an active
   lease with the matching worker and fence value. Artifact verification hashes
   the object and quarantines a mismatched upload.

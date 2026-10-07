@@ -1,7 +1,7 @@
 ---
 status: stable
 owner: orchestration
-last_reviewed: 2026-07-19
+last_reviewed: 2026-10-07
 source_of_truth: packages/engine/src/cli/autonomous.ts
 evidence_links: ../reference/cli/umbrella.md
 ---
@@ -16,10 +16,10 @@ leaves a reviewable change in an isolated Git worktree.
 
 - the target is a Git repository with at least one commit and enabled
   HEAD/current-branch reflogs
-- Node.js `>=20.19.0 <21`, `>=22.12.0 <23`, or `>=24.0.0`, plus the
-  repository's normal verification tools
+- Node.js 24 or newer, plus the target repository's normal verification
+  tools
 - Codex CLI is installed and authenticated
-- RAE's orchestration dependencies were prepared with `npm run verify --`
+- RAE was prepared with `npm ci --ignore-scripts` and `npm run build`
 
 Check the agent-specific runtime contract:
 
@@ -41,6 +41,12 @@ npm run rae -- agent run \
   --graph-memory off \
   --task "Add a tested health endpoint and document its response contract"
 ```
+
+With `before-mutation-and-ship` the run pauses before the first writable node
+and again at the `release-checkpoint` node before completion. Without the flag
+the CLI uses `before-mutation`, which pauses only before the first writable
+node; `none` never pauses. Resolve a pause in the operator console or with
+`npm run rae -- agent resolve-checkpoint`, then `agent resume` the run.
 
 RAE creates a `pipeline/<run-id>` branch in a worktree under the target's Git
 metadata directory (`.git/rae-worktrees/<run-id>`) by default. The target's
@@ -64,10 +70,13 @@ git -C "/path/from/the-workspace-output" diff
 sed -n '1,240p' "/path/from-the-report-output"
 ```
 
-The run report links the ten phase gates, actual changed files, documentation
-status, and residual release conditions. The plan must explicitly decide
-whether documentation is required and name its owned paths; a required path
-that does not change blocks the build gate. RAE exposes no commit, push,
+The run report lists one row per node envelope of the workflow, the actual
+changed files, documentation status, and residual release conditions. (A
+`--legacy-linear` run reports its ten phase gates instead.) The plan must
+explicitly decide whether documentation is required and name its owned paths.
+In graph mode the report only states whether the documentation paths changed;
+only the legacy pipeline blocks the build gate when a required path does not
+change. RAE exposes no commit, push,
 publish, or deploy action, and supported Codex runs reject protected Git-state
 changes after every phase. A completed run therefore ends in
 `implemented-awaiting-human-release-review`.
@@ -83,9 +92,10 @@ isolated-worktree default, sandbox modes, prohibited actions, and
 command-provider opt-in.](../assets/screenshots/rae-agent-safety.svg)
 
 Provider-backed Codex runs also write a redacted JSONL event log for each phase
-under `agent-outputs/`. Build and quality phases must contain captured
-`command_execution` evidence; a model-only assertion without a command event
-cannot pass those gates.
+under `agent-outputs/`. In graph mode the writer evidence check accepts any
+successful captured `command_execution` event from Codex; a writer result with
+no such command event cannot pass. Only the legacy pipeline requires command
+evidence specifically in its build and quality phases.
 
 For a visual view of the same durable run state, start the local console in a
 second terminal:

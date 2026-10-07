@@ -49,6 +49,7 @@ Run options:
   --workflow <path>           Explicit graph-native workflow JSON for a new run
   --legacy-linear             Start a temporary v1 ten-phase run
   --checkpoint-policy <mode> Human pause mode: none, before-mutation, or before-mutation-and-ship
+                              (default: before-mutation)
   --graph-memory <mode>      Local graph mode: off, read, or read-write (default: off)
   --context-mode <mode>      Workflow 2.0/2.1 provider context: legacy or bounded (default: legacy)
   --in-place                  Modify a clean target checkout directly
@@ -82,6 +83,39 @@ function parseOptions(argv: string[]): CliOptions {
     "legacy-linear",
     "allow-unsafe-command-provider",
   ]);
+  const valueFlags = new Set([
+    "after-seq",
+    "actor",
+    "agent-arg",
+    "agent-command",
+    "checkpoint-id",
+    "checkpoint-policy",
+    "context-mode",
+    "decision",
+    "decision-id",
+    "execution-profile",
+    "graph-memory",
+    "idempotency-key",
+    "limit",
+    "max-concurrency",
+    "max-repair-rounds",
+    "model",
+    "node-id",
+    "payload-json",
+    "policy",
+    "project-root",
+    "provider",
+    "rationale",
+    "reasoning-effort",
+    "run-id",
+    "signal",
+    "task",
+    "task-file",
+    "through",
+    "timeout-seconds",
+    "variant",
+    "workflow",
+  ]);
   for (let index = 0; index < argv.length; index++) {
     const token = argv[index];
     if (!token.startsWith("--")) {
@@ -89,6 +123,9 @@ function parseOptions(argv: string[]): CliOptions {
       continue;
     }
     const key = token.slice(2);
+    if (!booleanFlags.has(key) && !valueFlags.has(key)) {
+      throw new Error(`unknown option --${key}`);
+    }
     if (booleanFlags.has(key)) {
       options[key] = true;
       continue;

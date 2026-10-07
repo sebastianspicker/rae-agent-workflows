@@ -39,7 +39,10 @@ export async function runTool<TInput, TData>(
           JSON.stringify({
             success: true,
             data: { status: "ok" },
-            metadata: { tool_version: toolVersion },
+            metadata: {
+              tool_version: toolVersion,
+              execution_time_ms: Math.round(performance.now() - t0),
+            },
             logs: [],
           }),
         );

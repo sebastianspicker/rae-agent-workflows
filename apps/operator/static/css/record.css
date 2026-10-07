@@ -17,6 +17,31 @@
   letter-spacing: -0.015em;
   overflow-wrap: anywhere;
   text-wrap: balance;
+  /* Long tasks are capped; the disclosure below shows the full text as written. */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  line-clamp: 4;
+  overflow: hidden;
+}
+
+.ident .task[data-expanded="true"] {
+  display: block;
+  -webkit-line-clamp: unset;
+  line-clamp: none;
+  overflow: visible;
+}
+
+.task-toggle {
+  justify-self: start;
+  color: var(--trace);
+  font-size: var(--t-xs);
+  text-decoration: underline;
+  text-underline-offset: 0.3em;
+}
+
+.task-toggle:hover {
+  color: var(--ink);
 }
 
 /* A programmatic focus target after selection, not a control: no ring. */
@@ -307,8 +332,7 @@
   color: var(--proof);
 }
 
-.record-status[data-tone="proof"]::before,
-.record-status[data-tone="error"]::before {
+.record-status[data-tone="proof"]::before {
   border-color: transparent;
   background: currentColor;
 }
@@ -689,12 +713,7 @@
 
 /* ---------- Wide windows: keep the decision in view while reading evidence ---------- */
 
-@media (min-width: 64rem) {
-  .review-jump {
-    display: none;
-  }
-}
-
+/* The decision jump stays visible at every width; wide and narrow queries do not overlap. */
 @media (min-width: 64rem) and (min-height: 46rem) {
   .decision {
     position: sticky;
@@ -702,7 +721,7 @@
   }
 }
 
-@media (max-width: 64rem) {
+@media (max-width: 63.99rem) {
   .task-sheet {
     grid-template-columns: minmax(0, 1fr);
     gap: var(--s7);

@@ -1,7 +1,7 @@
 ---
 status: stable
 owner: science
-last_reviewed: 2026-04-12
+last_reviewed: 2026-10-07
 source_of_truth: editorial
 evidence_links: ../../reference/claims/assumptions-register.md
 ---
@@ -16,9 +16,14 @@ general.
 
 - the public profile payload is intentionally generic; it is a safe baseline,
   not a full operator-specific environment
-- the frozen benchmark families emphasize route correctness, artifact
-  completeness, checkpoint discipline, and deterministic runtime behavior; they
-  are not a universal measure of all agent performance
+- no benchmark family or benchmark card is tracked in this repository yet (see
+  ASM-003 in the [assumptions register](../../reference/claims/assumptions-register.md));
+  the intended families emphasize route correctness, artifact completeness,
+  checkpoint discipline, and deterministic runtime behavior, and would still not
+  be a universal measure of all agent performance
+- the only tracked measurements are the local performance fixtures in
+  [Local performance measurements](../../reference/performance-measurements.md),
+  which are partly not reproducible from a clone
 - contamination-aware interpretation still matters whenever results are used for
   broader capability claims
 
@@ -33,8 +38,9 @@ general.
 
 ## Practical implication
 
-You can use the repo for public release, local verification, and benchmarked
-operator workflows. You should not treat it as a complete proof that one single
+You can use the repo for public release, local verification, and operator
+workflows backed by tests and the local performance fixtures; no benchmark
+family backs them yet. You should not treat it as a complete proof that one single
 architecture dominates every agent-engineering setting.
 
 ## Source note

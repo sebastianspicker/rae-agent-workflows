@@ -1,7 +1,7 @@
 ---
 status: historical
 owner: tools
-last_reviewed: 2026-07-16
+last_reviewed: 2026-10-07
 source_of_truth: editorial
 evidence_links: ../reference/repo-map.md
 ---
@@ -17,7 +17,9 @@ and separately testable.
 
 The included coauthor trailer cleaner `3.0.0` defaults to `--no-push`. It
 rewrites a private ref pinned to a captured OID, retains recovery data under
-concurrent changes, and uses compare-and-swap checks with atomic cleanup.
+concurrent changes, and uses compare-and-swap checks with atomic cleanup. The
+local recovery branch is kept after success unless `--delete-recovery-branch`
+is passed.
 
 ## Why this case matters
 

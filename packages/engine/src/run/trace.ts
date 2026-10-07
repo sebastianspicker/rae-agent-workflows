@@ -1,7 +1,15 @@
 /**
  * Persists and summarizes bounded pipeline trace events without exposing malformed state.
  */
-import { appendFileSync, closeSync, existsSync, openSync, readFileSync } from "node:fs";
+import {
+  appendFileSync,
+  closeSync,
+  existsSync,
+  openSync,
+  readFileSync,
+  readSync,
+  statSync,
+} from "node:fs";
 import { resolve } from "node:path";
 import { ensureRunDirs, getRepoRoot, getRunDir, toWorkspaceRelative, writeJson } from "./state.js";
 import { badInput, badTrace } from "../primitives/errors.js";
@@ -10,6 +18,11 @@ import { spawnSkillTool } from "./subprocess.js";
 
 /** Maximum number of trace events allowed per run. */
 export const MAX_TRACE_EVENTS = 10000;
+/** Lines kept free for non-volume events once high-volume events reach their cap. */
+export const TERMINAL_TRACE_RESERVE = 32;
+const HIGH_VOLUME_TRACE_EVENT = /^(agent_call|artifact_.*|workflow_node_.*|loop_.*|stream_.*)$/;
+/** Per-process line count and byte size per trace path, seeded by one scan. */
+const traceLineCounts = new Map<string, { lines: number; size: number }>();
 export const TRACE_SCHEMA_REFERENCE =
   "packages/contracts/v1/schemas/artifacts/execution-trace.schema.json";
 
@@ -84,9 +97,62 @@ export function appendTraceEvent(
   };
 
   const tracePath = ensureTraceFile(runId, root);
-  appendFileSync(tracePath, `${JSON.stringify(event)}\n`, "utf8");
+  // High-volume events stop short of the cap so the reserve stays free for the events that state
+  // why a run ended or is waiting; MAX_TRACE_EVENTS itself is a hard ceiling for every event, so
+  // the trace readers' bound keeps holding.
+  const lineCount = traceLineCount(tracePath);
+  if (
+    lineCount >= MAX_TRACE_EVENTS ||
+    (HIGH_VOLUME_TRACE_EVENT.test(String(payload.event)) &&
+      lineCount >= MAX_TRACE_EVENTS - TERMINAL_TRACE_RESERVE)
+  ) {
+    throw badTrace(
+      `trace file already holds ${lineCount} of MAX_TRACE_EVENTS (${MAX_TRACE_EVENTS}) events; refusing to append ${String(payload.event)}`,
+    );
+  }
+  const line = `${JSON.stringify(event)}\n`;
+  // The cached count stays at the pre-append size, so the next call counts this line and any
+  // line another process appended meanwhile exactly once.
+  appendFileSync(tracePath, line, "utf8");
   invalidateTraceCache();
   return event;
+}
+
+function countNewlines(bytes: Buffer): number {
+  let count = 0;
+  for (const byte of bytes) if (byte === 0x0a) count += 1;
+  return count;
+}
+
+/**
+ * Lines in the trace, scanned once per process and then advanced incrementally. Bytes appended by
+ * other processes (for example an operator stop) are counted from the last known size; a file
+ * that shrank or was replaced is rescanned.
+ */
+function traceLineCount(tracePath: string): number {
+  const size = statSync(tracePath).size;
+  const cached = traceLineCounts.get(tracePath);
+  if (cached && cached.size === size) return cached.lines;
+  if (!cached || size < cached.size) {
+    const lines = countNewlines(readFileSync(tracePath));
+    traceLineCounts.set(tracePath, { lines, size });
+    return lines;
+  }
+  const descriptor = openSync(tracePath, "r");
+  try {
+    const tail = Buffer.alloc(size - cached.size);
+    let offset = 0;
+    while (offset < tail.length) {
+      const read = readSync(descriptor, tail, offset, tail.length - offset, cached.size + offset);
+      if (read === 0) break;
+      offset += read;
+    }
+    const lines = cached.lines + countNewlines(tail.subarray(0, offset));
+    traceLineCounts.set(tracePath, { lines, size: cached.size + offset });
+    return lines;
+  } finally {
+    closeSync(descriptor);
+  }
 }
 
 export function readTraceEvents(runId: string, root = getRepoRoot()): TraceEvent[] {

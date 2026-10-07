@@ -1,7 +1,7 @@
 /** Runs one bounded provider attempt and persists a story through its transaction. */
 import { accessSync, constants, mkdtempSync, realpathSync, rmSync, statSync } from "node:fs";
-import { delimiter, join, relative } from "node:path";
-import { EXIT, RalphError } from "./errors.js";
+import { delimiter, dirname, join, relative } from "node:path";
+import { EXIT, RalphError, errorMessage } from "./errors.js";
 import { createdLine, extractReportPath, pathMatchesScope } from "./prd.js";
 import { appendRelative, atomicWriteRelative, readRelative } from "./safe-fs.js";
 import { buildPrompt } from "./prompt.js";
@@ -9,11 +9,14 @@ import { syncAgents } from "./helper.js";
 import { clearFailure, markPassed } from "./state.js";
 import {
   beginTransaction,
+  markContainmentUncertain,
+  pendingTransaction,
   prepareTransaction,
   promoteTransaction,
   recoverTransaction,
   transactionDiff,
   verifyTransaction,
+  writeContainmentSentinel,
 } from "./transaction.js";
 import {
   ABORT_EXIT,
@@ -86,7 +89,7 @@ function codexExecutable(repoRoot: string): string {
   return real;
 }
 
-function sanitizedEnv(cwd: string): NodeJS.ProcessEnv {
+export function sanitizedEnv(cwd: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { PWD: cwd, CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "codex_cli_rs" };
   for (const name of ALLOWLIST) if (process.env[name] !== undefined) env[name] = process.env[name];
   return env;
@@ -106,6 +109,11 @@ function redact(text: string): string {
     .replace(/AKIA[0-9A-Z]{16}/gu, "[REDACTED]")
     .replace(/\b(?:sk|rk|pk)-[A-Za-z0-9_-]{10,}\b/gu, "[REDACTED]")
     .replace(/\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}\b/gu, "[REDACTED]");
+}
+
+/** Reports whether a value contains a credential shape that the output redaction would mask. */
+export function containsCredential(value: string): boolean {
+  return redact(value) !== value;
 }
 
 function reportContract(report: string, storyId: string, options: CliOptions): number {
@@ -140,6 +148,8 @@ async function runCodex(
       ...(mode === "fixing" ? ["-c", "sandbox_workspace_write.writable_roots=[]"] : []),
       ...(options.search ? ["--search"] : []),
       "exec",
+      // The fixing workspace is a temporary copy without .git; the sandbox flags and the transaction enforce the boundary.
+      "--skip-git-repo-check",
       "-C",
       toolRoot,
       "-s",
@@ -226,8 +236,9 @@ function readOptionalReport(directory: string): string {
   }
 }
 
+/** Repository-relative prefix of the PRD bundle (prd.json, INSTRUCTIONS.md, learnings.md). */
 function packagePrefix(paths: RuntimePaths): string {
-  const value = relative(paths.repoRoot, paths.packageRoot).split("\\").join("/");
+  const value = relative(paths.repoRoot, dirname(paths.prdFile)).split("\\").join("/");
   return value ? `${safeRelativePath(value)}/` : "";
 }
 
@@ -271,6 +282,58 @@ export async function modelPreflight(
   logger.event("INFO", `model_preflight_ok tool=codex model=${options.model ?? ""}`);
 }
 
+const RUNTIME_NAMES = ["prd.json", "INSTRUCTIONS.md", "prd.schema.json", "learnings.md"];
+const RUNTIME_DIRECTORIES = ["dist", "node_modules", ".runtime"];
+
+/** Ralph's own files are never writable by a story, except its report and required learnings entry. */
+export function isRuntimePath(path: string, prefix: string, options: CliOptions): boolean {
+  if (options.requireLearningEntry && path === `${prefix}learnings.md`) return false;
+  if (prefix) return path.startsWith(prefix);
+  return (
+    RUNTIME_NAMES.includes(path) ||
+    RUNTIME_DIRECTORIES.some((directory) => path === directory || path.startsWith(`${directory}/`))
+  );
+}
+
+/** Automation, agent policy, VCS, and dependency-control paths no story scope can unlock. */
+const PROTECTED_DIRECTORIES = [".github", ".claude", ".codex", ".husky", ".git"];
+const PROTECTED_NAMES = [
+  "AGENTS.md",
+  "CLAUDE.md",
+  ".gitignore",
+  ".gitattributes",
+  "package.json",
+  "package-lock.json",
+  "npm-shrinkwrap.json",
+  "pnpm-lock.yaml",
+  "yarn.lock",
+  "bun.lock",
+  "bun.lockb",
+  "Cargo.lock",
+  "Gemfile.lock",
+  "Pipfile.lock",
+  "poetry.lock",
+  "uv.lock",
+  "composer.lock",
+  "go.sum",
+];
+
+/** Fixed denylist checked independently of story scope, at any depth, ignoring letter case. */
+export function isProtectedPath(path: string): boolean {
+  const parts = path.toLowerCase().split("/");
+  const name = parts.at(-1) ?? "";
+  return (
+    parts.some((part) => PROTECTED_DIRECTORIES.some((entry) => entry.toLowerCase() === part)) ||
+    PROTECTED_NAMES.some((entry) => entry.toLowerCase() === name)
+  );
+}
+
+/** Stops promotion after cancellation; the isolated workspace is discarded. */
+function abandon(paths: RuntimePaths, transaction: { journalPath: string } | undefined): number {
+  if (transaction) recoverTransaction(paths);
+  return ABORT_EXIT;
+}
+
 export async function processStory(
   paths: RuntimePaths,
   prd: Prd,
@@ -297,7 +360,16 @@ export async function processStory(
         learningBefore = signature(join(toolRoot, packagePrefix(paths), "learnings.md"));
       logger.event("INFO", `fixing_transaction_started story=${story.id}`);
     }
-    const prompt = buildPrompt(paths, story, mode, reportPath, sandbox, options, toolRoot);
+    const prompt = buildPrompt(
+      paths,
+      story,
+      mode,
+      reportPath,
+      sandbox,
+      options,
+      toolRoot,
+      prd.defaults.lint_detection_order,
+    );
     logger.event("STORY_START", `id=${story.id} mode=${mode} report=${reportPath}`);
     logger.log(`story=${story.id} mode=${mode}`);
     const result = await runCodex(
@@ -311,14 +383,56 @@ export async function processStory(
       logger,
     );
     if (result.code === CONTAINMENT_EXIT) {
-      // Keep the isolated workspace and journal for explicit recovery after containment is resolved.
+      // Keep the isolated workspace and journal; recovery refuses cleanup until an explicit discard.
+      if (transaction) {
+        try {
+          markContainmentUncertain(paths, transaction.journalPath);
+        } catch (error) {
+          logger.event(
+            "ERROR",
+            `story=${story.id} containment_mark_failed error=${errorMessage(error)}`,
+          );
+          // Block automatic recovery even though the journal could not be marked.
+          let id = transaction.journalPath;
+          try {
+            writeContainmentSentinel(paths, transaction.journalPath);
+            id = pendingTransaction(paths)?.id ?? id;
+          } catch {
+            /* the journal path in the message is the remaining evidence */
+          }
+          throw new RalphError(
+            `Story ${story.id} stopped with uncertain provider containment and the journal ${id} could not be marked (${errorMessage(error)}); confirm the provider process group has exited, then run --discard-transaction ${id}`,
+            EXIT.scope,
+          );
+        }
+      }
       transaction = undefined;
       return result.code;
     }
     if (mode === "fixing" && transaction) {
       const prefix = packagePrefix(paths);
-      const violations = transactionDiff(paths, transaction.journalPath).filter(
-        (path) => path === `${prefix}prd.json` || !pathMatchesScope(story, path),
+      const changed = transactionDiff(paths, transaction.journalPath);
+      const runtime = changed.filter(
+        (path) => path !== reportPath && isRuntimePath(path, prefix, options),
+      );
+      if (runtime.length)
+        throw new RalphError(
+          `Story ${story.id} modified Ralph runtime paths, which are never writable:\n${runtime.map((path) => `- ${path}`).join("\n")}\nThe isolated workspace was discarded; the live repository was not changed`,
+          EXIT.scope,
+        );
+      const exempt = (path: string): boolean =>
+        path === reportPath || (options.requireLearningEntry && path === `${prefix}learnings.md`);
+      const denied = changed.filter((path) => !exempt(path) && isProtectedPath(path));
+      if (denied.length)
+        throw new RalphError(
+          `Story ${story.id} modified protected paths, which no story scope can unlock:\n${denied.map((path) => `- ${path}`).join("\n")}\nThe isolated workspace was discarded; the live repository was not changed`,
+          EXIT.scope,
+        );
+      const violations = changed.filter(
+        (path) =>
+          path !== reportPath &&
+          !(options.requireLearningEntry && path === `${prefix}learnings.md`) &&
+          !pathMatchesScope(story, path),
       );
       if (violations.length)
         throw new RalphError(
@@ -342,9 +456,11 @@ export async function processStory(
         `fixing story ${story.id} requires at least one new learnings.md entry`,
         EXIT.tool,
       );
+    if (options.signal?.aborted) return abandon(paths, transaction);
     atomicWriteRelative(toolRoot, reportPath, result.report);
     markPassed(paths, prd, story.id, reportPath, toolRoot);
     if (transaction) {
+      if (options.signal?.aborted) return abandon(paths, transaction);
       prepareTransaction(paths, transaction.journalPath);
       const drift = verifyTransaction(paths, transaction.journalPath);
       if (drift.length)
@@ -352,6 +468,7 @@ export async function processStory(
           `Live repository drift detected before promoting story ${story.id}: ${drift.join(", ")}`,
           EXIT.scope,
         );
+      if (options.signal?.aborted) return abandon(paths, transaction);
       promoteTransaction(paths, transaction.journalPath);
       transaction = undefined;
       logger.event("INFO", `fixing_transaction_committed story=${story.id}`);
@@ -361,7 +478,7 @@ export async function processStory(
       const agentsPath = `${packagePrefix(paths)}AGENTS.md`;
       if (pathMatchesScope(story, agentsPath)) {
         try {
-          syncAgents(paths.packageRoot);
+          syncAgents(dirname(paths.prdFile));
           logger.event("INFO", "agents_synced_from_learnings");
         } catch {
           logger.event("WARN", "agents_sync_from_learnings_failed");

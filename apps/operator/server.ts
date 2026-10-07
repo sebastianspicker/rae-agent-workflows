@@ -14,6 +14,8 @@ import {
   isAuthorized,
   positiveInteger,
   readJsonBody,
+  sanitizeLogText,
+  scrubMessage,
   validateLoopbackRequest,
   validateRunId,
 } from "./lib/security.js";
@@ -75,6 +77,8 @@ interface OperatorContext {
   remote: RemoteProxy | null;
   host: string;
   origin: string;
+  /** Per-instance project and run workspace roots that error messages must not reveal. */
+  knownRoots: Set<string>;
   workflowRegistry?: WorkflowRegistry;
 }
 interface OperatorServerOptions {
@@ -118,6 +122,19 @@ function sendJson(res: ServerResponse, status: number, value: unknown): void {
   res.end(`${JSON.stringify(value)}\n`);
 }
 
+/** Resolves when the response can take more data or has closed, whichever comes first. */
+function writable(res: ServerResponse): Promise<void> {
+  return new Promise((done) => {
+    const finish = () => {
+      res.off("drain", finish);
+      res.off("close", finish);
+      done();
+    };
+    res.once("drain", finish);
+    res.once("close", finish);
+  });
+}
+
 async function sendRemoteResponse(
   req: IncomingMessage,
   res: ServerResponse,
@@ -149,8 +166,11 @@ async function sendRemoteResponse(
       const { value, done } = await reader.read();
       if (done) break;
       size += value.byteLength;
-      if (size > MAX_REMOTE_RESPONSE_BYTES) break;
-      res.write(Buffer.from(value));
+      if (size > MAX_REMOTE_RESPONSE_BYTES) {
+        res.write(`\n${JSON.stringify({ event: "stream_error", status: "size_limit" })}\n`);
+        break;
+      }
+      if (!res.write(Buffer.from(value))) await writable(res);
     }
   } finally {
     clearTimeout(timeout);
@@ -158,11 +178,68 @@ async function sendRemoteResponse(
   }
 }
 
-function errorResponse(res: ServerResponse, error: unknown): void {
+/** Maps engine error codes that carry no HTTP status to client-facing statuses. */
+function engineErrorStatus(error: Error & { code?: unknown }): number {
+  if (error.code === "E_BAD_INPUT") {
+    return /conflicting terminal decision|being resolved/i.test(error.message) ? 409 : 400;
+  }
+  if (error.code === "E_BAD_TRACE") return 422;
+  // Engine workflow contract errors are plain errors with this fixed prefix.
+  if (/^invalid workflow\b/i.test(error.message)) return 400;
+  return 500;
+}
+
+/** Engine messages may embed paths or parse snippets; the two conflict messages stay verbatim. */
+function scrubEngineMessage(message: string, knownRoots: Iterable<string>): string {
+  if (/conflicting terminal decision|being resolved/i.test(message)) return message;
+  console.error(`operator engine error: ${sanitizeLogText(message)}`);
+  return scrubMessage(message, knownRoots);
+}
+
+/** Gateway statuses are raised only by the remote relay with fixed, path-free messages. */
+const GATEWAY_STATUSES = new Set([502, 503, 504]);
+
+function errorResponse(
+  res: ServerResponse,
+  error: unknown,
+  knownRoots: Iterable<string> = [],
+): void {
   const candidate = (error instanceof Error ? error : new Error(String(error))) as HttpError;
-  const status = Number.isInteger(candidate.status) ? candidate.status! : 500;
-  const message = status >= 500 ? "internal server error" : candidate.message;
+  const explicitStatus = candidate.status;
+  const explicit = typeof explicitStatus === "number" && Number.isInteger(explicitStatus);
+  const status = explicit ? explicitStatus : engineErrorStatus(candidate);
+  const message =
+    status >= 500 && !(explicit && GATEWAY_STATUSES.has(status))
+      ? "internal server error"
+      : explicit
+        ? candidate.message
+        : scrubEngineMessage(candidate.message, knownRoots);
   sendJson(res, status, { error: { status, message } });
+}
+
+/** Locates a run through the catalog and remembers its workspace root for error scrubbing. */
+async function locateKnownRun(
+  context: OperatorContext,
+  project: OperatorProject,
+  runId: string,
+  view: "summary" | "detail" = "detail",
+): Promise<InternalRun> {
+  const run = await context.runCatalog.locate(project, runId, { view });
+  context.knownRoots.add(run.workspaceRoot);
+  return run;
+}
+
+/** Best-effort registration of a run's workspace root before a control error is scrubbed. */
+async function rememberRunRoot(
+  context: OperatorContext,
+  project: OperatorProject,
+  runId: string,
+): Promise<void> {
+  try {
+    await locateKnownRun(context, project, runId, "summary");
+  } catch {
+    // The original control error is reported; the lookup failure adds nothing.
+  }
 }
 
 function splitPath(pathname: string): string[] {
@@ -271,9 +348,12 @@ function streamEvents(
       return writeTailEvents(res, events, after, () => subscription?.resume());
     },
     () => {
-      if (!closed)
-        res.write(`${JSON.stringify({ event: "stream_error", status: "unavailable" })}\n`);
-      finish();
+      try {
+        if (!closed)
+          res.write(`${JSON.stringify({ event: "stream_error", status: "unavailable" })}\n`);
+      } finally {
+        finish();
+      }
     },
   );
   const timeout = setTimeout(finish, 15_000);
@@ -360,7 +440,7 @@ async function routeApi(
     const executionProfile = (context.profiles ?? new OperatorProfiles()).resolve(
       body.execution_profile_id,
     );
-    sendJson(res, 202, controller.start(project, body, executionProfile));
+    sendJson(res, 202, await controller.start(project, body, executionProfile));
     return;
   }
 
@@ -369,7 +449,7 @@ async function routeApi(
     requireMethod(req, "GET");
     controller.refreshOwnership();
     sendJson(res, 200, {
-      run: publicRun(await context.runCatalog.locate(project, runId), controller.ownedRunId),
+      run: publicRun(await locateKnownRun(context, project, runId), controller.ownedRunId),
     });
     return;
   }
@@ -378,11 +458,11 @@ async function routeApi(
   if (action === "events" && parts.length === 7) {
     requireMethod(req, "GET");
     const after = positiveInteger(url.searchParams.get("after"), 0, 10_000_000);
-    const limit = positiveInteger(url.searchParams.get("limit"), 100, 200);
+    const limit = positiveInteger(url.searchParams.get("limit"), 100, 200, 1);
     sendJson(
       res,
       200,
-      paginatedEvents(await context.runCatalog.locate(project, runId, { view: "summary" }), {
+      paginatedEvents(await locateKnownRun(context, project, runId, "summary"), {
         after,
         limit,
       }),
@@ -395,7 +475,7 @@ async function routeApi(
     streamEvents(
       req,
       res,
-      await context.runCatalog.locate(project, runId, { view: "summary" }),
+      await locateKnownRun(context, project, runId, "summary"),
       after,
       context.tailHub,
     );
@@ -403,19 +483,27 @@ async function routeApi(
   }
   requireMethod(req, "POST");
   if (parts.length !== 7) throw Object.assign(new Error("not found"), { status: 404 });
-  const body = await readJsonBody(req);
-  if (action === "stop") {
-    sendJson(res, 200, { control: controller.stop(project, runId) });
-  } else if (action === "resume") {
-    sendJson(res, 202, controller.resume(project, runId));
-  } else if (action === "interrupt") {
-    sendJson(res, 202, controller.interrupt(project, runId, body));
-  } else if (action === "checkpoint-decision") {
-    sendJson(res, 200, { checkpoint: controller.decideCheckpoint(project, runId, body) });
-  } else if (action === "cleanup") {
-    sendJson(res, 202, controller.cleanup(project, runId, body));
-  } else {
+  if (!["stop", "resume", "interrupt", "checkpoint-decision", "cleanup"].includes(action ?? "")) {
     throw Object.assign(new Error("not found"), { status: 404 });
+  }
+  const body = await readJsonBody(req);
+  try {
+    if (action === "stop") {
+      sendJson(res, 200, { control: controller.stop(project, runId) });
+    } else if (action === "resume") {
+      sendJson(res, 202, await controller.resume(project, runId));
+    } else if (action === "interrupt") {
+      sendJson(res, 202, controller.interrupt(project, runId, body));
+    } else if (action === "checkpoint-decision") {
+      sendJson(res, 200, { checkpoint: controller.decideCheckpoint(project, runId, body) });
+    } else {
+      sendJson(res, 200, await controller.cleanup(project, runId, body));
+    }
+  } catch (error) {
+    if (!(error instanceof Error && "status" in error)) {
+      await rememberRunRoot(context, project, runId);
+    }
+    throw error;
   }
 }
 
@@ -526,7 +614,11 @@ async function routeWorkflows(
       throw Object.assign(new Error("invalid proposal job id"), { status: 400 });
     }
     sendJson(res, 200, {
-      proposal: (context.proposalJobs ?? new WorkflowProposalJobs()).get(tail[2], workflowId),
+      proposal: (context.proposalJobs ?? new WorkflowProposalJobs()).get(
+        tail[2],
+        workflowId,
+        project.id,
+      ),
     });
     return;
   }
@@ -543,14 +635,13 @@ async function routeWorkflows(
     sendJson(res, 200, {
       diff: await assertRegistryMethod(registry, "diff")(
         workflowId,
-        Object.fromEntries(url.searchParams),
+        Object.fromEntries([...url.searchParams].filter(([, value]) => value !== "")),
       ),
     });
     return;
   }
   if (tail[1] === "revisions" && tail[3] === "validate" && tail.length === 4) {
     requireMethod(req, "POST");
-    workflowMutationAllowed(project, context.controller);
     sendJson(res, 200, {
       validation: await assertRegistryMethod(registry, "validate")(
         workflowId,
@@ -593,7 +684,7 @@ export async function handleOperatorRequest(
       serveStatic(req, res, url.pathname);
     }
   } catch (error) {
-    if (!res.headersSent) errorResponse(res, error);
+    if (!res.headersSent) errorResponse(res, error, context.knownRoots);
     else res.end();
   }
 }
@@ -618,6 +709,7 @@ export function createOperatorServer({
   if (!profiles || typeof profiles.list !== "function" || typeof profiles.resolve !== "function") {
     throw new Error("profiles must be an OperatorProfiles instance");
   }
+  const knownRoots = new Set(projects.map((project) => project.root));
   const remote = remoteUrl
     ? createRemoteOperatorProxy({ remoteUrl, tokenFile, ...(fetchImpl ? { fetchImpl } : {}) })
     : null;
@@ -639,6 +731,7 @@ export function createOperatorServer({
       remote,
       host,
       origin: `http://${host}`,
+      knownRoots,
     });
   });
   server.once("close", () => runCatalog.close());
@@ -679,7 +772,7 @@ function parseCli(argv: string[]): CliOptions | null {
       index += 1;
     } else if (arg === "--help" || arg === "-h") {
       process.stdout.write(
-        "Usage: npm run rae -- operator (--project <git-root> [--project <git-root>] | --remote-url <https-url> --token-file <owner-only-file>) [--execution-profile <file>] [--port 0]\n",
+        "Usage: npm run rae -- operator serve (--project <git-root> [--project <git-root>] | --remote-url <https-url> --token-file <owner-only-file>) [--execution-profile <file>] [--port 0]\n",
       );
       return null;
     } else {

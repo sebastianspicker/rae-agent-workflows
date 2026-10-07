@@ -4,21 +4,34 @@ const storageKey = "rae-operator-theme";
 
 type OperatorTheme = "light" | "dark";
 
-function preferredTheme(): OperatorTheme {
+function storedTheme(): OperatorTheme | null {
   try {
     const saved = localStorage.getItem(storageKey);
     if (saved === "light" || saved === "dark") return saved;
   } catch {
     /* A blocked storage area must not block the interface. */
   }
-  // Without a stored choice, follow the OS; dark remains the default when it states none.
-  return window.matchMedia?.("(prefers-color-scheme: light)").matches ? "light" : "dark";
+  return null;
 }
 
-function applyTheme(theme: OperatorTheme, toggle: HTMLElement): void {
-  document.documentElement.dataset.theme = theme;
+function systemTheme(): OperatorTheme {
+  return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
+/** The theme in effect: a stored choice, otherwise the operating system's live preference. */
+function effectiveTheme(): OperatorTheme {
+  const forced = document.documentElement.dataset.theme;
+  if (forced === "light" || forced === "dark") return forced;
+  return systemTheme();
+}
+
+/**
+ * Reflects the effective theme on the toggle. The label stays "Dark theme" and aria-pressed
+ * carries the state, so the control never announces a contradiction.
+ */
+function syncToggle(toggle: HTMLElement): void {
+  const theme = effectiveTheme();
   toggle.setAttribute("aria-pressed", String(theme === "dark"));
-  toggle.setAttribute("aria-label", `Use ${theme === "dark" ? "light" : "dark"} theme`);
   document
     .querySelector('meta[name="theme-color"]')
     ?.setAttribute("content", theme === "dark" ? "#0e171c" : "#f2f5f6");
@@ -27,14 +40,22 @@ function applyTheme(theme: OperatorTheme, toggle: HTMLElement): void {
 export function bindThemeToggle(): void {
   const toggle = document.getElementById("theme-toggle");
   if (!toggle) return;
-  applyTheme(preferredTheme(), toggle);
+  toggle.setAttribute("aria-label", "Dark theme");
+  // Only a stored choice pins the theme; without one the CSS media query follows the OS live.
+  const saved = storedTheme();
+  if (saved) document.documentElement.dataset.theme = saved;
+  syncToggle(toggle);
+  window
+    .matchMedia?.("(prefers-color-scheme: dark)")
+    .addEventListener?.("change", () => syncToggle(toggle));
   toggle.addEventListener("click", () => {
-    const theme = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+    const theme: OperatorTheme = effectiveTheme() === "dark" ? "light" : "dark";
     try {
       localStorage.setItem(storageKey, theme);
     } catch {
       /* The selected theme still applies for this session. */
     }
-    applyTheme(theme, toggle);
+    document.documentElement.dataset.theme = theme;
+    syncToggle(toggle);
   });
 }

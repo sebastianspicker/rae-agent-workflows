@@ -30,7 +30,14 @@ function native(): NativeBridge {
     if (process.platform !== "darwin" && process.platform !== "linux") {
       throw new Error("Native filesystem protections are unavailable on this platform");
     }
-    binding = require("../build/Release/rae_fs_bridge.node") as NativeBridge;
+    try {
+      binding = require("../build/Release/rae_fs_bridge.node") as NativeBridge;
+    } catch (error) {
+      throw new Error(
+        "The native filesystem bridge is not built; run `npm run build --workspace @rae/fs-bridge` from the repository root",
+        { cause: error },
+      );
+    }
   }
   return binding;
 }

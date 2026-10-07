@@ -27,6 +27,7 @@ export type CatalogResponse = {
   value?: CatalogPage | InternalRun;
   error?: string;
   status?: number;
+  code?: string;
   metrics?: ReadMetrics;
 };
 interface Pending {
@@ -99,7 +100,13 @@ export class RunCatalog {
         for (const key of ["bytesRead", "readCalls", "parseCalls"] as const)
           this.metrics[key] += response.metrics[key];
       if (response.error)
-        pending.reject(Object.assign(new Error(response.error), { status: response.status }));
+        pending.reject(
+          Object.assign(
+            new Error(response.error),
+            response.status === undefined ? {} : { status: response.status },
+            response.code === undefined ? {} : { code: response.code },
+          ),
+        );
       else if (response.value) pending.resolve(response.value);
       else pending.reject(new Error("Catalog worker returned no result"));
       if (!this.pending.size) worker.unref();

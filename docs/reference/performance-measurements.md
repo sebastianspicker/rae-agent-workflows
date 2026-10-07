@@ -1,7 +1,7 @@
 ---
 status: experimental
 owner: core
-last_reviewed: 2026-09-08
+last_reviewed: 2026-10-07
 source_of_truth: scripts/src/benchmarks
 evidence_links: ../assets/benchmarks/typescript-rewrite-2026-09-08.json
 ---
@@ -73,6 +73,15 @@ times, and built one lexical index. Queries remain synchronous and blocked
 the measuring event loop for roughly the batch duration.
 
 ## Reproduction and limits
+
+Reproducible from a clone: the compiled-side numbers (worker catalog, batched
+subscriptions, compiled graph queries) and their result hashes, by running the
+commands below after a build. Not reproducible from a clone: every "Reference"
+column and the reference side of the graph comparison, which depend on the
+retained JavaScript module. That module lives only in the git-ignored `.cache/` directory of the
+measuring checkout, so the reference timings and the cross-implementation hash
+equality are recorded results that others cannot re-run. Treat the reference
+side as an unverifiable local record.
 
 Build the repository before running these compiled tools:
 

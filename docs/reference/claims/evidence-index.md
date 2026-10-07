@@ -1,7 +1,7 @@
 ---
 status: stable
 owner: core
-last_reviewed: 2026-09-08
+last_reviewed: 2026-10-07
 source_of_truth: editorial
 evidence_links: bibliography.md
 ---
@@ -56,8 +56,8 @@ evidence_links: bibliography.md
 - Dossier: [CLM-014 staged separation](dossiers/clm-014-staged-separation.md)
 - Internal anchor: `docs/explanation/science/problem-statement.md`
 - Internal anchor: `docs/explanation/science/drift-and-self-certification.md`
-- Internal anchor: `packages/engine/src/cli/runner.ts`
-- Internal anchor: `packages/engine/src/cli/autonomous.ts`
+- Internal anchor: `packages/engine/src/workflow/workflow-runtime.ts`
+- Internal anchor: `workflows/graph-native-default.workflow.json`
 - External anchor: [Anthropic effective agents](bibliography.md#src-anthropic-effective-agents)
 - External anchor: [NIST GenAI Profile](bibliography.md#src-nist-genai-profile)
 - External anchor: [PaperBench](bibliography.md#src-openai-paperbench)
@@ -90,6 +90,13 @@ evidence_links: bibliography.md
 - External anchor: [Lost in the Middle](bibliography.md#src-lost-in-the-middle)
 - External anchor: [Cataldo et al.](bibliography.md#src-cataldo-congruence)
 - External anchor: [NIST GenAI Profile](bibliography.md#src-nist-genai-profile)
+
+## Pending measurements
+
+CLM-002, CLM-005, CLM-007, CLM-008, CLM-014, CLM-016, CLM-017, and CLM-020
+are provisional. Their anchors above motivate the claims; none is a
+measurement. The metric that would test each claim is listed in the
+[claims ledger](claims-ledger.md#metrics-for-provisional-claims).
 
 ## Evidence classes
 

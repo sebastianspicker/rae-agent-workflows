@@ -1,7 +1,7 @@
 ---
 status: experimental
 owner: tools
-last_reviewed: 2026-07-16
+last_reviewed: 2026-10-07
 source_of_truth: ../../../tools/repo-hygiene/coauthor-trailer-cleaner/README.md
 evidence_links: ../claims/evidence-index.md
 ---
@@ -25,11 +25,16 @@ repositories.
 - generic override: repeat `--target "Name <email>"`
 - config-based override: top-level `targets` array in JSON config
 - repo inputs: positional URL/path pairs, `--repos-file`, or `--config`
-- safety modes: `--dry-run`, `--validate-only`, `--no-push` (the default)
+- safety modes: a dry run is the default; `--apply` performs the rewrite.
+  `--validate-only` checks inputs only, and `--no-push` (the default) keeps the
+  rewrite local
 
 The cleaner rewrites only a private ref pinned to the captured OID, keeps
 recovery data when concurrent state changes, and compare-and-swap verifies the
-final atomic cleanup. Push is opt-in; default operation is local-only.
+final atomic cleanup. Recovery refs live under
+`refs/coauthor-trailer-cleaner/recovery/<suffix>`, and refs that still
+contain rewritten commits are listed after a run. Push is opt-in; the backup is
+pushed only with `--allow-backup-push` or when pushing is enabled.
 
 ## Verification smoke path
 

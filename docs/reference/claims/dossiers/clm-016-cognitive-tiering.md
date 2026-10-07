@@ -1,8 +1,8 @@
 ---
 status: stable
 owner: science
-last_reviewed: 2026-04-17
-source_of_truth: ../claims-ledger.md
+last_reviewed: 2026-10-07
+source_of_truth: docs/reference/claims/claims-ledger.md
 evidence_links: ../evidence-index.md#clm-016
 ---
 
@@ -58,7 +58,10 @@ Pending runtime-selection and cost/quality ablations.
 
 ## Review status
 
-Adopted as a bounded engineering heuristic.
+Provisional as a bounded engineering heuristic.
+No retained measurement supports it yet; the
+[claims ledger](../claims-ledger.md#metrics-for-provisional-claims) names the
+metric that would test it.
 
 ## Source note
 

@@ -11,11 +11,23 @@ import {
   freezeEnvelope,
   instanceId,
   pendingInstanceId,
-  persistEnvelope,
   predecessors,
   successful,
   valueOr,
 } from "./workflow-scheduler-v21-support.js";
+import {
+  abortOnStop,
+  decideBoundedRepeat,
+  drainSettled,
+  checkpointResumable,
+  gateProgress,
+  isProviderKind,
+  MAX_LOOP_ITERATION,
+  noProgressMessage,
+  persistEnvelope,
+  runBudgetStop,
+} from "./workflow-scheduler-common.js";
+import type { LoopLedger, LoopState, RunBudgetStop } from "./workflow-scheduler-common.js";
 import type {
   JsonValue,
   WorkflowsNodeEnvelopeV21,
@@ -42,7 +54,12 @@ interface PendingSpec {
 }
 interface RunningSpec {
   spec: PendingSpec;
-  promise: Promise<{ spec: PendingSpec; envelope: Readonly<WorkflowsNodeEnvelopeV21> }>;
+  promise: Promise<SettledSpec>;
+}
+interface SettledSpec {
+  spec: PendingSpec;
+  envelope?: Readonly<WorkflowsNodeEnvelopeV21>;
+  error?: unknown;
 }
 interface ExecutionResult extends Record<string, unknown> {
   payload?: JsonValue;
@@ -66,6 +83,7 @@ interface ScheduleV21Options {
   execute: (context: Record<string, unknown>) => Promise<ExecutionResult>;
   runDir?: string | null;
   maxConcurrency?: number;
+  maxRepairRounds?: number;
   stopRequested?: () => boolean;
   through?: string | null;
   resumeEnvelopes?: WorkflowsNodeEnvelopeV21[];
@@ -73,6 +91,15 @@ interface ScheduleV21Options {
   resolveTier?: (tier?: string, nodeId?: string) => ExecutionTier;
   task?: string;
   contextMode?: string;
+  /** Wall clock in milliseconds; injectable so tests can exhaust `max_wall_clock_seconds`. */
+  now?: () => number;
+}
+interface ExhaustedResult {
+  status: "repair-exhausted";
+  reason: Exclude<LoopState, "none" | "repeat"> | RunBudgetStop;
+  completed: Map<string, Readonly<WorkflowsNodeEnvelopeV21>>;
+  workflow_digest: string;
+  loop_rounds: Map<string, number>;
 }
 type BoundedContextAssembler = (options: Record<string, unknown>) => {
   evidence: Record<string, unknown>;
@@ -81,6 +108,10 @@ type BoundedContextAssembler = (options: Record<string, unknown>) => {
 function payloadField(payload: JsonValue, key: string): JsonValue | undefined {
   if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return undefined;
   return payload[key];
+}
+
+function isWorkflowWaiting(error: unknown): boolean {
+  return (error as { workflowWaiting?: unknown } | null)?.workflowWaiting === true;
 }
 
 function failureMessage(envelope: WorkflowsNodeEnvelopeV21): string | undefined {
@@ -95,6 +126,7 @@ export async function scheduleWorkflowV21({
   execute,
   runDir = null,
   maxConcurrency,
+  maxRepairRounds,
   stopRequested = () => false,
   through = null,
   resumeEnvelopes = [],
@@ -104,20 +136,28 @@ export async function scheduleWorkflowV21({
   }),
   task = "",
   contextMode = "legacy",
-}: ScheduleV21Options): Promise<{
-  status: "stopped" | "through" | "completed";
-  completed: Map<string, Readonly<WorkflowsNodeEnvelopeV21>>;
-  workflow_digest: string;
-}> {
-  const workflow = validateWorkflow(suppliedWorkflow) as WorkflowsWorkflowV21;
+  now = Date.now,
+}: ScheduleV21Options): Promise<
+  | {
+      status: "stopped" | "through" | "completed";
+      completed: Map<string, Readonly<WorkflowsNodeEnvelopeV21>>;
+      workflow_digest: string;
+    }
+  | ExhaustedResult
+> {
+  // Stored snapshots validate structurally so newer authoring rules cannot strand a resumed run.
+  const workflow = validateWorkflow(suppliedWorkflow, { mode: "snapshot" }) as WorkflowsWorkflowV21;
   if (workflow.schema_version !== "2.1.0") throw new Error("v2.1 scheduler requires schema 2.1.0");
   const workflowHash = workflowDigest(workflow);
   const concurrency = Math.min(maxConcurrency ?? workflow.budgets?.max_concurrency ?? 4, 4);
   const attemptsLimit = Math.min(workflow.budgets?.max_attempts_per_node ?? 3, 3);
   const dynamicLimit = Math.min(workflow.budgets?.max_dynamic_instances ?? 128, 128);
   const mapLimit = Math.min(workflow.budgets?.max_map_items ?? 32, 32);
+  const repairLimit = Math.min(maxRepairRounds ?? workflow.budgets?.max_repair_rounds ?? 5, 5);
   if (!Number.isInteger(concurrency) || concurrency < 1)
     throw new Error("max concurrency must be from 1 to 4");
+  if (!Number.isInteger(repairLimit) || repairLimit < 0)
+    throw new Error("max repair rounds must be from 0 to 5");
 
   const nodes = new Map<string, WorkflowNode>(workflow.nodes.map((node) => [node.id, node]));
   const completed = new Map<string, Readonly<WorkflowsNodeEnvelopeV21>>();
@@ -132,14 +172,44 @@ export async function scheduleWorkflowV21({
   const memberLoop = new Map<string, WorkflowNode>();
   const loopIterations = new Map<string, number>();
   const loopSeen = new Map<string, string[]>();
+  const loopRepairs = new Map<string, number>();
+  const loopProgress = new Map<string, string[]>();
+  const loopLimits = new Map<string, number>();
+  const ledger: LoopLedger = {
+    iterations: loopIterations,
+    repairs: loopRepairs,
+    progress: loopProgress,
+    limits: loopLimits,
+  };
   for (const loop of workflow.nodes.filter((node) => node.kind === "loop")) {
     loopIterations.set(loop.id, 1);
     loopSeen.set(loop.id, []);
+    // N repair rounds need N + 1 iterations, so the repair limit also caps the iterations.
+    loopLimits.set(
+      loop.id,
+      Math.min(
+        loop.loop?.max_iterations ?? MAX_LOOP_ITERATION,
+        MAX_LOOP_ITERATION,
+        repairLimit + 1,
+      ),
+    );
     for (const member of loop.loop?.members ?? []) memberLoop.set(member, loop);
   }
   let providerAttempts = 0;
+  // Provider attempts bound the run and carry across resumes.
+  let budgetAttempts = 0;
+  const startedAt = now();
+  let budgetStop: RunBudgetStop | null = null;
+  let loopStop: Exclude<LoopState, "none" | "repeat"> | null = null;
+  const budgetFor = (wantsProvider: boolean): RunBudgetStop | null =>
+    runBudgetStop(workflow.budgets, {
+      elapsedMs: now() - startedAt,
+      providerAttempts: budgetAttempts,
+      wantsProvider,
+    });
   let sequence = 0;
   let fatal: Error | null = null;
+  const abort = new AbortController();
   const emit = (event: string, metadata: Record<string, unknown> = {}): void =>
     onEvent({ seq: ++sequence, event, ...metadata });
 
@@ -151,6 +221,17 @@ export async function scheduleWorkflowV21({
   }
   for (const envelope of resumeEnvelopes) {
     const id = envelope.instance_id ?? envelope.node_id;
+    const checkpoint = nodes.get(envelope.node_id)?.kind === "checkpoint";
+    if (envelope.status === "failed" && checkpoint) {
+      const resumable = checkpointResumable(envelope);
+      if (resumable === true) {
+        attempts.set(id, envelope.attempt);
+        continue;
+      }
+      addCompleted(envelope);
+      fatal = new Error(`checkpoint instance ${id} cannot be re-evaluated: ${resumable}`);
+      continue;
+    }
     if (envelope.status === "failed" && envelope.attempt < attemptsLimit) {
       attempts.set(id, envelope.attempt);
       continue;
@@ -165,6 +246,50 @@ export async function scheduleWorkflowV21({
   for (const node of workflow.nodes) {
     const instances = [...(byNode.get(node.id) ?? [])];
     if (node.kind !== "map" && instances.length) expanded.add(node.id);
+  }
+  budgetAttempts = resumeEnvelopes
+    .filter((envelope) => isProviderKind(nodes.get(envelope.node_id)?.kind ?? ""))
+    .reduce((total, envelope) => total + envelope.attempt, 0);
+  restoreBoundedLoops();
+
+  /** Resumes a bounded loop inside its newest iteration with its repair accounting intact. */
+  function restoreBoundedLoops(): void {
+    for (const loop of workflow.nodes.filter(
+      (node) => node.kind === "loop" && node.loop?.mode !== "until-dry",
+    )) {
+      const members = new Set(loop.loop?.members ?? []);
+      const stored = resumeEnvelopes.filter((envelope) => members.has(envelope.node_id));
+      const latest = Math.max(1, ...stored.map((envelope) => envelope.loop_iteration ?? 1));
+      if (latest === 1) continue;
+      loopIterations.set(loop.id, latest);
+      for (const member of members) {
+        const current = stored.some(
+          (envelope) => envelope.node_id === member && (envelope.loop_iteration ?? 1) === latest,
+        );
+        if (!current) expanded.delete(member);
+      }
+      const failedGates = new Map<number, WorkflowsNodeEnvelopeV21>();
+      for (const envelope of stored) {
+        const iteration = envelope.loop_iteration ?? 1;
+        if (
+          nodes.get(envelope.node_id)?.kind !== "gate" ||
+          envelope.status === "passed" ||
+          iteration >= latest
+        )
+          continue;
+        const known = failedGates.get(iteration);
+        if (!known || known.attempt <= envelope.attempt) failedGates.set(iteration, envelope);
+      }
+      const counted = [...failedGates.entries()]
+        .sort(([left], [right]) => left - right)
+        .map(([, envelope]) => gateProgress(envelope))
+        .filter(({ writerOnly }) => !writerOnly);
+      loopRepairs.set(loop.id, counted.length);
+      loopProgress.set(
+        loop.id,
+        counted.map(({ key }) => key),
+      );
+    }
   }
 
   const nodeEnvelopes = (nodeId: string): WorkflowsNodeEnvelopeV21[] =>
@@ -344,8 +469,15 @@ export async function scheduleWorkflowV21({
 
   function joinDecision(node: WorkflowNode): Record<string, unknown> {
     const edges = predecessors(workflow, node.id);
+    const loop = memberLoop.get(node.id);
+    const iteration = loop ? loopIterations.get(loop.id) : null;
     const envelopes = edges.flatMap((edge) =>
-      nodeEnvelopes(edge.from).map((envelope) => ({ edge, envelope })),
+      nodeEnvelopes(edge.from)
+        .filter(
+          (envelope) =>
+            !loop || !memberLoop.has(edge.from) || envelope.loop_iteration === iteration,
+        )
+        .map((envelope) => ({ edge, envelope })),
     );
     const passed = envelopes.filter(({ edge, envelope }) => conditionMatches(edge, envelope));
     const allSettled = edges.every((edge) => isSettled(edge.from));
@@ -432,7 +564,7 @@ export async function scheduleWorkflowV21({
     const envelopes = nodeEnvelopes(node.id);
     const failures = envelopes.filter((envelope) => !successful(envelope)).length;
     const maxFailures = valueOr(policy.max_failures, 0);
-    const minimumSuccesses = valueOr(policy.minimum_successes, 1);
+    const minimumSuccesses = valueOr(policy.minimum_successes, node.kind === "map" ? 1 : 0);
     if (failures > maxFailures) {
       return `collect node ${node.id} exceeded its failure bound`;
     }
@@ -484,10 +616,30 @@ export async function scheduleWorkflowV21({
     return true;
   }
 
+  /**
+   * Restarts a bounded loop when its gate fails, reusing the v2.0 repair accounting. Returns
+   * `repeat` after queueing a fresh iteration, or records why the loop is exhausted.
+   */
+  function advanceBounded(spec: PendingSpec, envelope: WorkflowsNodeEnvelopeV21): LoopState {
+    if (spec.node.kind !== "gate" || successful(envelope)) return "none";
+    const loop = memberLoop.get(spec.node.id);
+    if (!loop?.loop || loop.loop.mode === "until-dry") return "none";
+    const state = decideBoundedRepeat(ledger, loop.id, envelope, repairLimit);
+    if (state !== "repeat") {
+      loopStop = state;
+      emit("loop_exhausted", { node_id: spec.node.id, reason: state });
+      return state;
+    }
+    for (const member of loop.loop.members) expanded.delete(member);
+    emit("loop_restarted", { loop_id: loop.id, iteration: loopIterations.get(loop.id) });
+    return "repeat";
+  }
+
   async function invoke(spec: PendingSpec): Promise<Readonly<WorkflowsNodeEnvelopeV21>> {
     const attempt = (attempts.get(spec.instance_id) ?? 0) + 1;
     attempts.set(spec.instance_id, attempt);
     providerAttempts++;
+    if (isProviderKind(spec.node.kind)) budgetAttempts++;
     if (providerAttempts > dynamicLimit)
       throw new Error(`workflow exceeds ${dynamicLimit} provider attempts`);
     const inputs = spec.inputs ?? baseInputs(spec.node.id);
@@ -547,6 +699,7 @@ export async function scheduleWorkflowV21({
         workflowDigest: workflowHash,
         execution: resolvedTier,
         context,
+        signal: abort.signal,
       });
       const payload = result.payload ?? (result as unknown as JsonValue);
       const payloadFindings = payloadField(payload, "findings");
@@ -575,7 +728,11 @@ export async function scheduleWorkflowV21({
       persistEnvelope(runDir, envelope);
       return envelope;
     } catch (error) {
-      const envelope = failureEnvelope(base, error);
+      // A wait is resumable, and an attempt aborted by a stop or fatal failure is not recorded,
+      // so neither consumes an attempt number.
+      if (isWorkflowWaiting(error) || abort.signal.aborted) throw error;
+      const terminal = (error as { workflowTerminal?: unknown } | null)?.workflowTerminal === true;
+      const envelope = failureEnvelope(base, error, terminal);
       persistEnvelope(runDir, envelope);
       emit("node_instance_attempt_failed", {
         node_id: spec.node.id,
@@ -583,7 +740,11 @@ export async function scheduleWorkflowV21({
         attempt,
         message: failureMessage(envelope),
       });
-      if (attempt < attemptsLimit && !stopRequested()) return invoke(spec);
+      // Checkpoints are evaluated once per pass; a resume re-evaluates them.
+      const retryable = !terminal && spec.node.kind !== "checkpoint" && attempt < attemptsLimit;
+      const stop = retryable ? budgetFor(isProviderKind(spec.node.kind)) : null;
+      budgetStop ??= stop;
+      if (retryable && !stopRequested() && !stop) return invoke(spec);
       return envelope;
     }
   }
@@ -591,68 +752,169 @@ export async function scheduleWorkflowV21({
   function launch(spec: PendingSpec): void {
     pending.delete(spec.instance_id);
     if (spec.node.resource) busyResources.add(spec.node.resource);
-    const promise = invoke(spec)
-      .then((envelope) => ({ spec, envelope }))
+    // Never rejects: failures settle to a record so no instance is abandoned or left unhandled.
+    const promise: Promise<SettledSpec> = invoke(spec)
+      .then(
+        (envelope): SettledSpec => ({ spec, envelope }),
+        (error: unknown): SettledSpec => ({ spec, error }),
+      )
       .finally(() => {
         if (spec.node.resource) busyResources.delete(spec.node.resource);
       });
     running.set(spec.instance_id, { spec, promise });
   }
 
-  while (!isSettled(workflow.terminal_node) || running.size || pending.size) {
-    if (stopRequested()) return { status: "stopped", completed, workflow_digest: workflowHash };
-    for (const node of workflow.nodes) discoverNode(node);
-    if (fatal && running.size === 0) throw fatal;
-    const writerRunning = [...running.values()].some(({ spec }) => spec.node.access === "write");
-    const candidates = [...pending.values()].sort((left, right) =>
-      left.instance_id.localeCompare(right.instance_id),
+  /**
+   * Awaits every in-flight instance so none keeps running after the scheduler returns or throws,
+   * and records the envelopes they produced.
+   */
+  async function drainRunning(): Promise<void> {
+    const remaining = [...running.values()];
+    const results = await drainSettled(remaining.map(({ promise }) => promise));
+    for (const { spec } of remaining) running.delete(spec.instance_id);
+    for (const { envelope } of results) if (envelope) addCompleted(envelope);
+  }
+
+  function noProgress(): Error {
+    return new Error(
+      noProgressMessage(
+        [...completed.values()]
+          .filter((envelope) => !successful(envelope))
+          .map((envelope) => ({
+            id: envelope.node_id,
+            kind: nodes.get(envelope.node_id)?.kind ?? "node",
+            status: "failed",
+            message: failureMessage(envelope),
+          })),
+        completed.keys(),
+      ),
     );
-    const writer = candidates.find(({ node }) => node.access === "write");
-    if (!writerRunning && running.size === 0 && writer) launch(writer);
-    else if (!writerRunning && !writer) {
-      for (const spec of candidates) {
-        if (running.size >= concurrency) break;
-        if (
-          spec.node.access === "write" ||
-          (spec.node.resource && busyResources.has(spec.node.resource))
-        )
-          continue;
-        launch(spec);
+  }
+
+  const exhaustionReason = (): ExhaustedResult["reason"] | null => loopStop ?? budgetStop;
+
+  /** Launches the instance unless a run-level budget forbids it; returns whether it started. */
+  function launchWithinBudget(spec: PendingSpec): boolean {
+    budgetStop ??= budgetFor(isProviderKind(spec.node.kind));
+    if (budgetStop) return false;
+    launch(spec);
+    return true;
+  }
+
+  let throughReached = false;
+  async function mainLoop(): Promise<"stopped" | "through" | "completed" | "exhausted"> {
+    while (!isSettled(workflow.terminal_node) || running.size || pending.size) {
+      if (stopRequested()) {
+        abort.abort(new Error("workflow stop requested"));
+        await drainRunning();
+        return "stopped";
       }
-    }
-    if (running.size === 0) {
+      budgetStop ??= budgetFor(false);
+      if (budgetStop || loopStop) {
+        // Stop scheduling, but let running nodes finish so none outlives the result.
+        await drainRunning();
+        return "exhausted";
+      }
+      for (const node of workflow.nodes) discoverNode(node);
       if (fatal) throw fatal;
-      if (isSettled(workflow.terminal_node)) break;
-      throw new Error(
-        `workflow cannot make progress; completed: ${[...completed.keys()].sort().join(", ")}`,
+      if (throughReached && running.size === 0) break;
+      const writerRunning = [...running.values()].some(({ spec }) => spec.node.access === "write");
+      const candidates = [...pending.values()].sort((left, right) =>
+        left.instance_id.localeCompare(right.instance_id),
       );
+      const writer = candidates.find(({ node }) => node.access === "write");
+      if (throughReached) {
+        // The through node settled: launch nothing new and let the running siblings drain.
+      } else if (!writerRunning && running.size === 0 && writer) launchWithinBudget(writer);
+      else if (!writerRunning && !writer) {
+        for (const spec of candidates) {
+          if (running.size >= concurrency) break;
+          if (
+            spec.node.access === "write" ||
+            (spec.node.resource && busyResources.has(spec.node.resource))
+          )
+            continue;
+          if (!launchWithinBudget(spec)) break;
+        }
+      }
+      if (budgetStop) {
+        await drainRunning();
+        return "exhausted";
+      }
+      if (running.size === 0) {
+        if (fatal) throw fatal;
+        if (isSettled(workflow.terminal_node)) break;
+        throw noProgress();
+      }
+      const settled = await Promise.race([...running.values()].map(({ promise }) => promise));
+      running.delete(settled.spec.instance_id);
+      if (!settled.envelope) {
+        if (isWorkflowWaiting(settled.error)) throw settled.error;
+        // A stop aborts running providers; their failures are not workflow failures.
+        if (abort.signal.aborted && stopRequested()) continue;
+        fatal = settled.error instanceof Error ? settled.error : new Error(String(settled.error));
+        continue;
+      }
+      addCompleted(settled.envelope);
+      emit("node_instance_completed", {
+        node_id: settled.spec.node.id,
+        instance_id: settled.spec.instance_id,
+        status: settled.envelope.status,
+        item_key: settled.envelope.item_key,
+        execution_tier: settled.envelope.execution_tier,
+      });
+      streamSuccessors(settled.spec, settled.envelope);
+      const loopContinued =
+        advanceUntilDry(settled.spec, settled.envelope) ||
+        advanceBounded(settled.spec, settled.envelope) !== "none";
+      const collectionError = collectPolicyError(settled.spec.node);
+      if (collectionError) fatal = new Error(collectionError);
+      if (
+        !successful(settled.envelope) &&
+        settled.spec.node.failure_handling?.mode !== "collect" &&
+        !thresholdToleratesFailure(settled.spec.node) &&
+        !loopContinued &&
+        !budgetStop
+      ) {
+        fatal = new Error(
+          `workflow node instance ${settled.spec.instance_id} failed: ${failureMessage(settled.envelope) ?? "failed"}`,
+        );
+      }
+      // A map or stream node is through only when every one of its instances has settled.
+      if (through && isSettled(through)) throughReached = true;
     }
-    const settled = await Promise.race([...running.values()].map(({ promise }) => promise));
-    running.delete(settled.spec.instance_id);
-    addCompleted(settled.envelope);
-    emit("node_instance_completed", {
-      node_id: settled.spec.node.id,
-      instance_id: settled.spec.instance_id,
-      status: settled.envelope.status,
-      item_key: settled.envelope.item_key,
-      execution_tier: settled.envelope.execution_tier,
-    });
-    streamSuccessors(settled.spec, settled.envelope);
-    const loopContinued = advanceUntilDry(settled.spec, settled.envelope);
-    const collectionError = collectPolicyError(settled.spec.node);
-    if (collectionError) fatal = new Error(collectionError);
-    if (
-      !successful(settled.envelope) &&
-      settled.spec.node.failure_handling?.mode !== "collect" &&
-      !thresholdToleratesFailure(settled.spec.node) &&
-      !loopContinued
-    ) {
-      fatal = new Error(
-        `workflow node instance ${settled.spec.instance_id} failed: ${failureMessage(settled.envelope) ?? "failed"}`,
-      );
-    }
-    if (through === settled.spec.node.id && running.size === 0)
-      return { status: "through", completed, workflow_digest: workflowHash };
+    if (fatal) throw fatal;
+    return throughReached ? "through" : "completed";
+  }
+
+  const stopWatch = abortOnStop(stopRequested, abort);
+  let outcome: "stopped" | "through" | "completed" | "exhausted";
+  try {
+    outcome = await mainLoop();
+  } catch (error) {
+    // Any failure aborts and awaits in-flight instances before it surfaces; a checkpoint wait
+    // lets running readers finish.
+    if (!isWorkflowWaiting(error)) abort.abort(error);
+    await drainRunning();
+    throw error;
+  } finally {
+    stopWatch();
+  }
+  if (outcome === "exhausted") {
+    const reason = exhaustionReason();
+    if (!reason) throw new Error("workflow stopped without a recorded reason");
+    if (!loopStop) emit("budget_exhausted", { reason });
+    return {
+      status: "repair-exhausted",
+      reason,
+      completed,
+      workflow_digest: workflowHash,
+      loop_rounds: loopRepairs,
+    };
+  }
+  if (outcome !== "completed") return { status: outcome, completed, workflow_digest: workflowHash };
+  if (!nodeEnvelopes(workflow.terminal_node).some(successful)) {
+    throw new Error(`workflow terminal node ${workflow.terminal_node} did not complete`);
   }
   emit("workflow_completed", { node_id: workflow.terminal_node });
   return { status: "completed", completed, workflow_digest: workflowHash };

@@ -33,10 +33,23 @@ npm run rae -- hygiene coauthor-cleaner [OPTIONS] --config <config.json>
 
 Key options:
 
+- `--apply`: perform the rewrite. Without it the cleaner runs as a dry run
 - `--target "Name <email>"`: remove this co-author identity; repeatable
 - `--push`: push rewritten history with an exact pre-rewrite upstream OID lease
 - `--no-push`: rewrite locally only (default)
-- `--dry-run`: inspect the selected repository without changing history
+- `--dry-run`: walk history and report how many commits and signatures would
+  change, without writing objects or moving refs (the default without
+  `--apply`)
+- `--backup-remote <name>`: push the recovery ref to this remote. The push runs
+  only with `--push` or `--allow-backup-push`, and the remote must be a
+  configured remote whose push URLs do not point at the repository being
+  cleaned (that would republish the original history), unless
+  `--allow-backup-push` is passed. The backup holds the original history, so it
+  retains the targeted trailers (reported at the end).
+- `--allow-backup-push`: allow the backup push without `--push`, and to any
+  remote, including the repository being cleaned
+- `--delete-recovery-branch`: delete the recovery ref after success, locally
+  and on `--backup-remote` (kept by default; the recovery ref name is printed)
 - `--validate-only`: validate inputs only
 - `--config <file>`: load defaults, targets, and optionally repos from JSON
 - `--repos-file <file>`: load `url path` pairs or a JSON array of repos
@@ -63,11 +76,12 @@ You can override that with repeated CLI flags:
 npm run rae -- hygiene coauthor-cleaner \
   --target "Pair Bot <pairbot@example.com>" \
   --target "Example Contributor <contributor@example.com>" \
-  --no-push \
+  --no-push --apply \
   https://github.com/user/repo /path/to/repo
 ```
 
-or with a config file:
+or with a config file (configuration cannot enable rewriting; pass `--apply`,
+while `defaults.dryRun: true` forces a dry run even then):
 
 ```json
 {
@@ -89,7 +103,10 @@ Example: [coauthor-trailer-cleaner.example.json](coauthor-trailer-cleaner.exampl
 
 ## Safety Model
 
-- rewrites history locally by default; remote mutation requires explicit `--push`
+- is a dry run by default; rewriting requires `--apply`, and remote mutation
+  additionally requires `--push`
+- pushes the recovery backup only with `--allow-backup-push` or when pushing
+  is enabled
 - rejects detached HEAD
 - requires a clean worktree before rewrite
 - requires an in-sync tracking branch before push rewrite
@@ -97,7 +114,9 @@ Example: [coauthor-trailer-cleaner.example.json](coauthor-trailer-cleaner.exampl
   `--force-with-lease=<upstream-ref>:<captured-OID>`
 - requires an absolute local path
 - leaves remote configuration unchanged
-- creates a uniquely named local recovery branch for the current run
+- creates a uniquely named recovery ref under
+  `refs/coauthor-trailer-cleaner/recovery/<suffix>` for the current run
+- lists, after a run, any remaining refs that still contain rewritten commits
 - transforms raw commit objects and keeps a private ref pinned to the captured
   original OID; the branch is promoted only by an exact compare-and-swap
 - revalidates the branch, HEAD, index, and worktree immediately before the
@@ -109,11 +128,14 @@ Example: [coauthor-trailer-cleaner.example.json](coauthor-trailer-cleaner.exampl
   worktree or index
 - revalidates local state after a successful push before deleting recovery
   data; concurrent changes retain both recovery and rewritten transaction refs
-- deletes the exact recovery and private transaction refs together in one
-  atomic ref transaction that verifies their expected OIDs and the rewritten
-  branch OID
-- can retain the exact current-run recovery branch on `--backup-remote`; remote
-  recovery branches are never wildcard-deleted
+- deletes the private transaction ref (and the recovery ref only with
+  `--delete-recovery-branch`) in one atomic ref transaction that verifies the
+  expected OIDs and the rewritten branch OID
+- keeps the local recovery ref after success unless `--delete-recovery-branch`
+  is passed; it lives outside `refs/heads/`, so branch push globs do not publish
+  it. It reaches `--backup-remote` only with `--push` or `--allow-backup-push`;
+  remote recovery refs are never wildcard-deleted
+- verifies the rewritten messages before the branch compare-and-swap and any push
 - supports `--validate-only` for a no-mutation preflight pass
 
 A private prepared-phase Git hook checks the captured HEAD attachment while
@@ -123,7 +145,12 @@ or cleanup and retains recovery refs.
 
 Signatures on changed commits cannot remain valid. The cleaner strips those
 invalid signatures, reports their count, and leaves signatures on unchanged
-objects intact. Unrelated branches and tags retain their original objects.
+objects intact. Commits whose messages contain no target trailer are never
+rewritten, even if they contain repeated blank lines. Unrelated branches,
+tags and remote-tracking refs are not rewritten, so any that contain rewritten
+commits still expose the original trailers; the cleaner lists them as residual
+exposure after the run (the recovery ref is reported separately). Delete or
+rewrite them, and expire reflogs, before treating the trailers as removed.
 
 Use an external backup or throwaway clone before rewriting shared history.
 

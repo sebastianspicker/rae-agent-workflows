@@ -31,16 +31,20 @@ export function tone(status: unknown): string {
   if (["pass", "passed", "completed", "success", "approved"].includes(value)) return "pass";
   if (["fail", "failed", "error", "blocked", "rejected"].includes(value)) return "error";
   if (["running", "active", "in_progress", "pending", "awaiting"].includes(value)) return "active";
-  if (["interrupted", "stopped", "cancelled", "canceled"].includes(value)) return "muted";
   return "muted";
 }
 
-export function runTone(run: OperatorRun | null | undefined): string {
-  if (
+/** True when a human checkpoint decision is waiting on this run. */
+export function needsDecision(run: OperatorRun | null | undefined): boolean {
+  return (
     run?.needs_human_decision === true ||
-    run?.checkpoints?.some((item) => item.status === "pending")
-  )
-    return "blocked";
+    Boolean(run?.checkpoints?.some((item) => item.status === "pending"))
+  );
+}
+
+/** Catalogue filter tone: a human hold is "decision"; "blocked" is reserved for failures. */
+export function runTone(run: OperatorRun | null | undefined): string {
+  if (needsDecision(run)) return "decision";
   // A graph wait with no checkpoint is live workflow state, not a human hold.
   if (run?.status === "waiting") return "active";
   const statusTone = tone(run?.status);
@@ -77,17 +81,32 @@ export function formatCost(value: unknown): string {
     : String(value);
 }
 
-export function formatTime(value: string | null | undefined): string {
+export function formatTime(value: string | null | undefined, withDate = false): string {
   if (!value) return "Not available";
   const date = new Date(value);
-  return Number.isNaN(date.valueOf())
-    ? "Not available"
-    : date.toLocaleTimeString([], {
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-        hour12: false,
-      });
+  if (Number.isNaN(date.valueOf())) return "Not available";
+  const time = date.toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+  return withDate
+    ? `${date.toLocaleDateString([], { month: "short", day: "2-digit" })} ${time}`
+    : time;
+}
+
+/** True when timestamped entries fall on more than one local calendar day. */
+export function spansMultipleDays(values: ReadonlyArray<string | null | undefined>): boolean {
+  const days = new Set<string>();
+  for (const value of values) {
+    if (!value) continue;
+    const date = new Date(value);
+    if (Number.isNaN(date.valueOf())) continue;
+    days.add(date.toDateString());
+    if (days.size > 1) return true;
+  }
+  return false;
 }
 
 export function formatDateTime(value: string | null | undefined): string {
@@ -116,9 +135,17 @@ export function relativeTime(value: string | null | undefined): string {
   return date.toLocaleDateString([], { month: "short", day: "numeric" });
 }
 
+/** Shortens an identifier from the middle so its distinguishing prefix and suffix stay visible. */
+export function middleCut(value: unknown, maximum: number): string {
+  const text = String(value ?? "");
+  if (text.length <= maximum) return text;
+  const tail = Math.max(4, Math.floor((maximum - 1) / 3));
+  return `${text.slice(0, maximum - 1 - tail)}…${text.slice(-tail)}`;
+}
+
 export function shortRef(value: unknown): string {
   const text = String(value ?? "");
   if (!text) return "—";
   if (text.length <= 18) return text;
-  return `${text.slice(0, 10)}…${text.slice(-4)}`;
+  return middleCut(text, 15);
 }

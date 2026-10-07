@@ -1,7 +1,7 @@
 ---
 status: experimental
 owner: orchestration
-last_reviewed: 2026-09-02
+last_reviewed: 2026-10-07
 source_of_truth: apps/platform
 evidence_links: ../claims/claims-ledger.md
 ---
@@ -66,8 +66,6 @@ See [Hosted API](../../how-to/hosted-api.md),
 ## Source note
 
 - [NIST GenAI Profile](../claims/bibliography.md#src-nist-genai-profile)
-- [Model Cards](../claims/bibliography.md#src-model-cards)
-- [Datasheets](../claims/bibliography.md#src-datasheets)
 - [OpenAI evals guidance](../claims/bibliography.md#src-openai-evals)
 - [PaperBench](../claims/bibliography.md#src-openai-paperbench)
 - [IEEE 1012](../claims/bibliography.md#src-ieee-1012)

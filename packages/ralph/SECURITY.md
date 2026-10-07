@@ -6,8 +6,7 @@ Security issues are accepted for:
 
 - `src/*.ts`
 - PRD/runtime validation and path/scope enforcement logic
-- retained reference sources: `ralph.sh`, `lib/ralph/*.sh`, `scripts/*.sh`, and
-  `scripts/*.py`
+- bundled assets: `INSTRUCTIONS.md`, `prd.schema.json`, and `prd.json.example`
 
 ## Reporting a Vulnerability
 

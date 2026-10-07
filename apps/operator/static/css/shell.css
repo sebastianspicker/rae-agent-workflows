@@ -22,7 +22,8 @@
   top: 0;
   z-index: 20;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  /* The find region keeps at least 10rem; the nav gives way first and wraps. */
+  grid-template-columns: auto minmax(10rem, 1fr) auto minmax(0, max-content);
   grid-template-areas: "brand find session nav";
   align-items: center;
   gap: var(--s5);
@@ -177,8 +178,10 @@
 .topbar__nav {
   grid-area: nav;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: var(--s3);
+  justify-content: flex-end;
+  gap: var(--s2) var(--s3);
   padding-left: var(--s5);
   border-left: var(--hair);
 }
@@ -214,11 +217,52 @@ body[data-run-view="list"] .nav-link {
   padding: var(--s6) var(--gutter) var(--s8);
 }
 
+/* The skip-link target is a landmark for focus, not a control: no ring. */
+.body:focus {
+  outline: none;
+}
+
 /* Until runs load, only the catalogue (with its loading line) is shown. */
 body:not([data-run-view]) .workspace,
 body[data-run-view="list"] .workspace,
 body[data-run-view="selected"] .index {
   display: none;
+}
+
+/* Wide windows keep the catalogue beside the record in both views. */
+@media (min-width: 90rem) {
+  body[data-run-view] .body {
+    display: grid;
+    grid-template-columns: minmax(20rem, 26rem) minmax(0, 1fr);
+    align-items: start;
+    gap: var(--s7);
+    max-width: 120rem;
+  }
+
+  body[data-run-view="list"] .workspace,
+  body[data-run-view="selected"] .index {
+    display: block;
+  }
+
+  body[data-run-view] .index {
+    position: sticky;
+    top: calc(var(--topbar-h) + var(--s5));
+    max-height: calc(100dvh - var(--topbar-h) - var(--s6));
+    overflow-y: auto;
+  }
+}
+
+/* ---------- Pending decisions ---------- */
+
+.decisions-pending {
+  border-color: var(--hold);
+  background: var(--hold-wash);
+  color: var(--hold);
+  white-space: nowrap;
+}
+
+.decisions-pending:hover:not(:disabled) {
+  border-color: var(--hold);
 }
 
 /* ---------- Empty workspace ---------- */
@@ -277,7 +321,7 @@ body[data-run-view="selected"] .index {
 @media (max-width: 47.5rem) {
   .topbar {
     position: static;
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: minmax(10rem, 1fr) minmax(0, max-content);
     grid-template-areas:
       "brand session"
       "find nav";
@@ -307,6 +351,17 @@ body[data-run-view="selected"] .index {
     gap: var(--s2);
     padding-left: 0;
     border-left: 0;
+  }
+
+  /* Only the count shows; the button's aria-label carries "N decisions pending". */
+  .decisions-pending__label {
+    display: none;
+  }
+
+  .decisions-pending {
+    min-width: var(--control-h);
+    justify-content: center;
+    padding-inline: var(--s2);
   }
 
   .new-run {

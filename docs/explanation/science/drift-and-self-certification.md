@@ -1,7 +1,7 @@
 ---
 status: stable
 owner: science
-last_reviewed: 2026-04-12
+last_reviewed: 2026-10-07
 source_of_truth: editorial
 evidence_links: ../../reference/claims/evidence-index.md
 ---
@@ -59,8 +59,20 @@ RAE counters this with:
 
 - staged artifacts
 - adversarial review
-- explicit drift matching
+- plan alignment checks: in the default graph workflow, two read-only
+  alignment extractors (`alignment-a` and `alignment-b`) independently map the
+  plan to the requirements in fresh sessions, and `alignment-gate` blocks the
+  run before mutation on any blocking alignment finding or any alignment
+  result that did not pass
 - separate benchmark and documentation governance
+
+The alignment check is model-based, not a computation of the drift score
+above. The extractors report findings; the gate applies the deterministic
+rule. The `--legacy-linear` pipeline records a comparable model-produced
+`pmatch` drift report that compares the plan with the brief and design. RAE
+does not extract constraints mechanically or compare the implementation
+against them after the build; post-build drift is left to the critics and the
+verification gate.
 
 ## Companion surfaces
 

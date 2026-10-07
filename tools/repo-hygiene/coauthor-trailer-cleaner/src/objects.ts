@@ -10,27 +10,39 @@ function escapePattern(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+// Latin-1 text never contains this code point, so it safely marks removal points.
+const REMOVED = "\u0100";
+
 export function cleanMessage(message: Buffer, targets: readonly Target[]): Buffer {
   let text = message.toString("latin1");
+  let removed = false;
   for (const target of targets) {
     const name = escapePattern(asciiFold(Buffer.from(target.name).toString("latin1")));
     const email = escapePattern(asciiFold(Buffer.from(target.email).toString("latin1")));
     const whitespace = "[ \\t\\n\\r\\f\\v]*";
     const pattern = new RegExp(
-      `^co-authored-by:${whitespace}${name}${whitespace}<${email}>${whitespace}(?:\\r?\\n)?`,
+      `^${REMOVED}*co-authored-by:${whitespace}${name}${whitespace}<${email}>${whitespace}(?:\\r?\\n)?`,
       "gm",
     );
     const folded = asciiFold(text);
     const pieces: string[] = [];
     let offset = 0;
     for (const match of folded.matchAll(pattern)) {
-      pieces.push(text.slice(offset, match.index));
+      pieces.push(text.slice(offset, match.index), REMOVED);
+      removed = true;
       offset = match.index + match[0].length;
     }
     pieces.push(text.slice(offset));
     text = pieces.join("");
   }
-  return Buffer.from(text.replace(/(?:\r?\n){3,}/g, "\n\n"), "latin1");
+  // Leave messages without a matching trailer byte-identical.
+  if (!removed) return message;
+  // Collapse blank lines only where a trailer was removed.
+  const junction = new RegExp(`((?:\\r?\\n)*)${REMOVED}+((?:\\r?\\n)*)`, "g");
+  text = text.replace(junction, (_match, before: string, after: string) =>
+    /^(?:\r?\n){3,}$/.test(before + after) ? "\n\n" : before + after,
+  );
+  return Buffer.from(text, "latin1");
 }
 
 export function transformCommit(

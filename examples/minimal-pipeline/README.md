@@ -9,6 +9,11 @@ result.
 
 ## Commands
 
+Run these from the repository root. The umbrella runs the stage commands in
+the directory you invoke it from and passes that directory as
+`--project-root`, so `.pipeline/` is created at
+`<repository-root>/.pipeline/` and the taskset path resolves relative to it.
+
 ```bash
 npm run rae -- orchestrate init
 npm run rae -- orchestrate run-stage \

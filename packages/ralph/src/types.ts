@@ -9,6 +9,7 @@ export interface RalphDefaults {
   max_stories_default?: number | "all_open";
   report_dir: string;
   sandbox_by_mode: Record<Mode, "read-only" | "workspace-write">;
+  lint_detection_order?: string[];
 }
 
 export interface Story {
@@ -40,6 +41,8 @@ export interface StoryStep {
 }
 
 export interface Prd {
+  $schema?: string;
+  schema_version?: string;
   project?: string;
   branch_name?: string;
   branchName?: string;
@@ -88,8 +91,11 @@ export interface CliOptions {
     | "import-state"
     | "reset-story"
     | "retry-failed"
+    | "discard-transaction"
     | "dry-run";
   actionValue?: string;
+  /** Confirms a destructive recovery action such as discarding a promoting transaction. */
+  force?: boolean;
   noColor: boolean;
 }
 
@@ -127,7 +133,14 @@ export interface TransactionOperation {
   recovery?: string;
   placement?: "external" | "sibling";
   parent_identity?: Identity;
-  state: "pending" | "quarantining" | "quarantined" | "installed" | "recovered" | "conflict";
+  state:
+    | "pending"
+    | "quarantining"
+    | "quarantined"
+    | "installing"
+    | "installed"
+    | "recovered"
+    | "conflict";
 }
 
 export interface TransactionJournal {
@@ -139,6 +152,7 @@ export interface TransactionJournal {
     | "applying"
     | "recovering"
     | "conflicted"
+    | "contained_uncertain"
     | "committed"
     | "recovered";
   root: string;

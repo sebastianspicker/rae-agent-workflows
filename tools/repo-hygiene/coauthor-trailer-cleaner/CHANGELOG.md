@@ -11,6 +11,12 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 - Added a prepared-phase HEAD attachment guard that preserves existing Git
   reference-transaction hooks and retains recovery refs on concurrent switches.
 - Report signatures invalidated by rewritten commits.
+- Default to a dry run; a rewrite requires `--apply`.
+- Keep the recovery ref under `refs/coauthor-trailer-cleaner/recovery/`.
+- Push the backup only with `--push` or `--allow-backup-push`, and refuse a
+  backup remote that points at the cleaned repository unless allowed.
+- Report refs that still contain rewritten original commits as residual
+  exposure.
 
 ## [3.0.0] - 2026-07-16
 

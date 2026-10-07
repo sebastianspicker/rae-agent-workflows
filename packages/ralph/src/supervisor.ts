@@ -168,6 +168,8 @@ async function runChild(options: SuperviseOptions, parent: number, fd: number): 
       }),
     ]);
     checkReport();
+    // Always stop the group, even when the parent exited first, and confirm it is gone.
+    group.stop();
     if (group.cleanup && !(await group.cleanup)) {
       process.stderr.write("[ralph] process containment uncertain after group termination\n");
       return CONTAINMENT_EXIT;

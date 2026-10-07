@@ -1,8 +1,11 @@
 /** Enforces recorded Codex command evidence against the approved verification plan. */
 import { isAbsolute, relative, resolve, sep } from "node:path";
+import { normalizeEvidenceCommand } from "../primitives/command-evidence.js";
 import { isContainedRelative } from "../primitives/paths.js";
 
 const EVIDENCE_PHASES = new Set(["build", "quality-static", "quality-tests", "post-build"]);
+/** Phases that may be not-applicable when the plan binds no command to them. */
+const OPTIONAL_EVIDENCE_PHASES = new Set(["build", "quality-static"]);
 interface VerificationCommand extends Record<string, unknown> {
   command?: unknown;
   working_directory?: unknown;
@@ -41,11 +44,10 @@ function recordArray(value: unknown): Array<Record<string, unknown>> {
     : [];
 }
 
-function normalizeCommand(command: unknown): string {
-  return String(command ?? "").trim();
-}
+const normalizeCommand = normalizeEvidenceCommand;
 
 function normalizeWorkingDirectory(value: unknown, workspaceRoot: string): string | null {
+  if (value === undefined) return ".";
   if (typeof value !== "string" || !value.trim()) return null;
   const base = resolve(workspaceRoot ?? process.cwd());
   const relativePath = relative(base, isAbsolute(value) ? resolve(value) : resolve(base, value));
@@ -134,6 +136,10 @@ function recordMissingEvidence(phase: string, artifact: Record<string, unknown>)
   };
 }
 
+function numericCount(value: unknown): number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
 /** Requires every role-bound planned command to have a successful Codex event. */
 export function enforceCommandEvidence(
   phase: string,
@@ -145,6 +151,23 @@ export function enforceCommandEvidence(
   if (result.provider !== "codex" || !EVIDENCE_PHASES.has(phase))
     return { required: result.provider === "codex", status: "not-applicable" };
   const required = plannedCommands(plan, phase);
+  if (required.length === 0) {
+    // Build and static checks may legitimately have nothing to run. Test and post-build
+    // verification must be planned, so an empty plan fails closed instead of passing.
+    if (!OPTIONAL_EVIDENCE_PHASES.has(phase)) {
+      recordMissingEvidence(phase, artifact);
+      return {
+        required: true,
+        status: "missing",
+        command_event_count: numericCount(result.commandEventCount),
+      };
+    }
+    return {
+      required: false,
+      status: "not-applicable",
+      command_event_count: numericCount(result.commandEventCount),
+    };
+  }
   const keys = successfulKeys(result, phase, workspaceRoot);
   const matched = required.filter((entry) => {
     const workingDirectory = normalizeWorkingDirectory(entry.working_directory, workspaceRoot);
@@ -153,16 +176,20 @@ export function enforceCommandEvidence(
       keys.has(`${workingDirectory}\0${normalizeCommand(entry.command)}`)
     );
   });
-  if (required.length > 0 && matched.length === required.length) {
+  if (matched.length === required.length) {
     return {
       required: true,
       status: "present",
-      command_event_count: result.commandEventCount,
+      command_event_count: numericCount(result.commandEventCount),
       successful_command_event_count: keys.size,
       matched_planned_command_count: matched.length,
       required_planned_command_count: required.length,
     };
   }
   recordMissingEvidence(phase, artifact);
-  return { required: true, status: "missing", command_event_count: 0 };
+  return {
+    required: true,
+    status: "missing",
+    command_event_count: numericCount(result.commandEventCount),
+  };
 }

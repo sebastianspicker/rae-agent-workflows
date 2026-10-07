@@ -24,6 +24,12 @@ function conflict(): never {
     { statusCode: 409 },
   );
 }
+function reusedKey(): never {
+  throw Object.assign(new Error("Idempotency-Key was reused with a different request"), {
+    statusCode: 422,
+    errorCode: "idempotency_key_reused",
+  });
+}
 function field(row: Record<string, unknown>, key: string): string {
   const value = row[key];
   if (typeof value !== "string") throw new Error(`Invalid artifact database field: ${key}`);
@@ -102,6 +108,23 @@ export class PostgresArtifactStore implements ArtifactStore {
     return this.database.transaction(async (client) => {
       await lockOwner(client, request);
       const owner = await activeLease(client, request);
+      const existing = await client.query(
+        `SELECT ${projection},attempt_id::text AS "attemptId",fence::text AS fence FROM artifacts WHERE id=$1 FOR UPDATE`,
+        [request.artifactId],
+      );
+      // A replayed reservation key returns the same reservation only for the same owner and bytes.
+      if (existing.rowCount) {
+        const row = existing.rows[0];
+        if (row.attemptId !== owner.attemptId || row.fence !== String(request.fence)) conflict();
+        if (
+          row.objectKey !== request.objectKey ||
+          row.expectedSha256 !== request.expectedSha256 ||
+          Number(row.expectedSizeBytes) !== request.expectedSizeBytes
+        )
+          reusedKey();
+        if (row.state !== "reserved") conflict();
+        return artifact(existing);
+      }
       return artifact(
         await client.query(
           `INSERT INTO artifacts (id,run_id,attempt_id,fence,object_key,state,expected_sha256,expected_size_bytes)

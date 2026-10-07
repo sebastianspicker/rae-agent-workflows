@@ -3,9 +3,8 @@
 The operator presents durable autonomous-run state under `.pipeline/`. It binds
 only to `127.0.0.1`, uses an ephemeral port by default, and does not expose raw
 provider traces. The interface uses modular CSS and TypeScript under
-`static/css/` and `static/js/`, compiled into `dist/static/`. Its design system,
-the reasoning behind it and the assumptions it rests on are recorded in
-[DESIGN_BRIEF.md](DESIGN_BRIEF.md).
+`static/css/` and `static/js/`, compiled into `dist/static/`. Its design system
+is defined by the stylesheets under `static/css/`.
 
 ## Task and evidence review
 
@@ -22,13 +21,27 @@ Completed runs retain references for local report and worktree-diff inspection.
 Completion does not publish or release changes. Full gate, resource, event and
 recovery controls remain under **Run details**; the complete revision-controlled
 workflow editor remains under **Workflow editor**. **All runs** exposes the
-catalogue, search, state filters and new-run form. `Ctrl+K` or `Cmd+K` opens run
-search. Copy controls copy displayed references without reading local files.
+catalogue, search, state filters (All, Active, Needs decision, Completed,
+Blocked) and new-run form; Blocked means a failure, while human holds are under
+Needs decision. `Cmd+K` on macOS or `Ctrl+K` elsewhere opens run search and
+focuses it. Copy controls copy displayed references without reading local
+files. At 1440 px and wider the catalogue stays beside the selected record.
 
-Without a stored choice the theme follows the operating system and falls back
-to dark; the theme control retains a chosen light or dark preference when
-browser storage is available. Narrow windows stack evidence before decisions.
-State is always given in text as well as colour.
+While the tab is visible the console re-reads run summaries every 10 seconds.
+A top-bar "N decisions pending" button filters the catalogue to runs waiting on
+a human decision, and the page title gains an `(N)` prefix. The connection pill
+reports the health of the catalogue refresh and the live event stream; the
+stream reconnects after the server's routine 15-second cycle silently and after
+errors with capped exponential backoff. Run controls are never disabled by
+event-log errors, and Stop and Interrupt stay available from the catalogue row
+while run details are loading or unavailable because the server validates them. Reject and Escalate
+ask for confirmation and show the rationale that will be saved. Errors stay on
+screen until dismissed; notices expire.
+
+Without a stored choice the theme follows the operating system live; the theme
+control stores a chosen light or dark preference when browser storage is
+available. Narrow windows stack evidence before decisions. State is always given
+in text as well as colour.
 
 The console self-hosts two SIL Open Font License typefaces, IBM Plex Mono and
 Newsreader, under `static/fonts/` with their licences. The server's content
@@ -55,9 +68,16 @@ npm --workspace @rae/operator run build:demo
 Or provide a dedicated directory for a Pages upload or local static server:
 
 ```bash
-npm --workspace @rae/operator run build:demo -- --out /tmp/rae-operator-pages
-python3 -m http.server --directory /tmp/rae-operator-pages 8080
+npm --workspace @rae/operator run build
+node apps/operator/dist/scripts/build-demo.js --out .runtime/operator-demo
+python3 -m http.server --directory .runtime/operator-demo 8080
 ```
+
+`"$TMPDIR/rae-operator-demo"` works as an alternative output directory. The
+output must be a strict descendant of the real temporary directory or of
+`<repo>/.runtime/`. An existing output directory must contain the marker file
+`.rae-operator-demo` written by the build. Anything else is refused before any
+delete happens.
 
 The build copies the real static assets, replaces the production entry module
 with the demo bootstrap, rewrites root-relative assets for a Pages subpath, and
@@ -113,8 +133,8 @@ the ephemeral local URL and sends only its local session bearer. The server
 reads the upstream bearer token from `--token-file` for every forwarded request;
 it is never included in browser JavaScript, local API responses, or errors.
 
-`--remote-url` must be an origin-only HTTPS URL. HTTP is accepted only for an
-explicit loopback development origin. The token file must be a regular file
+`--remote-url` must be an origin-only HTTPS URL. Plain HTTP is rejected, including for
+loopback origins. The token file must be a regular file
 owned by the current user, with no group or world permissions; symlinks and
 unsafe files are rejected. Token rotation therefore takes effect on the next
 request without restarting the console.
@@ -122,7 +142,12 @@ request without restarting the console.
 Remote mode is a fixed API relay, not a general proxy. It rejects redirects and
 forwards only the `/api/v1` methods used by this console, including the listed
 run, event, control, and workflow-editor routes. Request bodies are limited to
-64 KiB and upstream responses to 1 MiB.
+64 KiB and upstream responses to 1 MiB. Upstream responses must be
+`application/json`; the event stream route also accepts `application/x-ndjson`
+and `text/event-stream`. Any other content type is answered with 502, an
+unreachable upstream with 502 and an upstream timeout with 504. Streamed events
+honour local backpressure, and a stream that reaches the size limit ends with a
+`{"event":"stream_error","status":"size_limit"}` line.
 
 ## API
 
@@ -154,14 +179,30 @@ All `/api/v1` requests require the session bearer token and an exact loopback
 Start accepts `task`, `checkpoint_policy`, and an optional preloaded
 `execution_profile_id`. It never accepts a profile path. Interrupt and cleanup
 require `confirm_run_id` to exactly match the selected run. A checkpoint
-decision requires its opaque `checkpoint_id`, an opaque `decision_id`, one of
-`approve`, `reject`, or `escalate`, and a non-empty `rationale`. The server
+decision requires its opaque `checkpoint_id`, one of `approve`, `reject`, or `escalate`, and a
+non-empty `rationale`. An opaque `decision_id` is optional; the server
+generates one when it is omitted. The server
 records the actor as `rae-loopback-operator`.
 
 The console never accepts in-place execution, command providers, environment
 overrides, raw trace access, forced cleanup, commit, push, or publish controls.
 Cleanup delegates to the pipeline's ownership- and dirty-state-validating
-worktree cleanup operation.
+worktree cleanup operation. It waits for that operation and returns `200` with
+`{ "accepted": true, "run_id": "…", "exit_code": 0 }`; a non-zero exit or the
+60-second timeout returns `409` with a scrubbed reason. While a cleanup is in
+flight, start in the same project and resume, interrupt or cleanup of that run
+return `409`.
+
+Compatibility note: earlier versions answered cleanup with `202` and
+`{ "pid": … }` before the operation finished. Clients that polled for completion
+or read `pid` must now read `exit_code` from the `200` response instead.
+
+Error messages returned to the browser are scrubbed: project and run workspace
+roots (including their `/private` and temporary-directory spellings) and the
+home directory are replaced by placeholders, and secret-like tokens are
+redacted. Run ids, UUIDs, 40-hex commit SHAs and 64-hex digests stay readable.
+Child and engine text is logged server-side without terminal escape sequences or
+control characters.
 
 The workflow editor provides synchronized Loop, Graph, Analyze, and JSON views.
 It compiles five guided templates to workflow 2.1, exposes keyboard-operable
@@ -173,7 +214,9 @@ allowlisted project run is active.
 
 Proposal creation is asynchronous. A request accepts only `task`, optional
 `base_revision`, and optional `execution_profile_id`; task text is limited to
-32 KiB and the in-memory queue holds at most 12 jobs. The result is validated
+32 KiB and the in-memory queue holds at most 12 jobs, of which at most four run
+a provider at once. Job lookups are scoped to the project and workflow that
+created the job. The result is validated
 before it is returned to the editor. The proposal endpoint does not save a
 revision, activate a digest, or start a run.
 
@@ -188,7 +231,10 @@ removes an autonomous lock only when its recorded PID matches the owned child.
 POSIX process groups cannot prove termination of a descendant that deliberately
 creates a new session, so interrupt responses expose `containment_uncertain`;
 inspect the workspace and provider activity before reusing an interrupted run.
-Start defaults to checkpoints before both mutation and release.
+A repeated interrupt restarts the SIGTERM (10 s) and SIGKILL (20 s) escalation
+for the same process instead of adding a second set of timers. Start returns as
+soon as the new run directory is recorded, or reports an early engine exit
+within 2 seconds. Start defaults to checkpoints before both mutation and release.
 
 ## Verification
 

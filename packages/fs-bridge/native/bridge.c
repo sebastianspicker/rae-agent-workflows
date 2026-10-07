@@ -13,7 +13,8 @@
 
 static napi_value fail(napi_env env, const char *operation) {
   int saved = errno;
-  const char *code = "EIO";
+  const char *code = NULL;
+  char derived[96];
   switch (saved) {
     case EEXIST: code = "EEXIST"; break;
     case ENOENT: code = "ENOENT"; break;
@@ -27,6 +28,32 @@ static napi_value fail(napi_env env, const char *operation) {
     case EINVAL: code = "EINVAL"; break;
     case EILSEQ: code = "EILSEQ"; break;
     case ENOSYS: code = "ENOSYS"; break;
+    case ENAMETOOLONG: code = "ENAMETOOLONG"; break;
+    case ENOSPC: code = "ENOSPC"; break;
+    case EROFS: code = "EROFS"; break;
+    case EMLINK: code = "EMLINK"; break;
+    case EMFILE: code = "EMFILE"; break;
+    case ENFILE: code = "ENFILE"; break;
+    case ENOMEM: code = "ENOMEM"; break;
+    case EISDIR: code = "EISDIR"; break;
+    case EAGAIN: code = "EAGAIN"; break;
+    case EBUSY: code = "EBUSY"; break;
+    case EIO: code = "EIO"; break;
+    case ENXIO: code = "ENXIO"; break;
+    case ENOTSUP: code = "ENOTSUP"; break;
+#if defined(EOPNOTSUPP) && EOPNOTSUPP != ENOTSUP
+    case EOPNOTSUPP: code = "EOPNOTSUPP"; break;
+#endif
+    case ETXTBSY: code = "ETXTBSY"; break;
+#ifdef EDQUOT
+    case EDQUOT: code = "EDQUOT"; break;
+#endif
+    case EFBIG: code = "EFBIG"; break;
+  }
+  if (!code) {
+    /* Unknown errno: use a locale-independent ERRNO_<n> code instead of strerror text. */
+    snprintf(derived, sizeof derived, "ERRNO_%d", saved);
+    code = derived;
   }
   char message[256];
   snprintf(message, sizeof message, "%s: %s", operation, strerror(saved));
@@ -60,7 +87,10 @@ static char *path_value(napi_env env, napi_value value, int component) {
   void *bytes = NULL;
   napi_is_buffer(env, value, &buffer);
   if (buffer) {
-    if (napi_get_buffer_info(env, value, &bytes, &length) != napi_ok) return NULL;
+    if (napi_get_buffer_info(env, value, &bytes, &length) != napi_ok) {
+      napi_throw_type_error(env, "EINVAL", "unable to read path buffer");
+      return NULL;
+    }
   } else if (napi_get_value_string_utf8(env, value, NULL, 0, &length) != napi_ok) {
     napi_throw_type_error(env, "EINVAL", "path must be a string or Buffer");
     return NULL;
@@ -72,7 +102,11 @@ static char *path_value(napi_env env, napi_value value, int component) {
   result = malloc(length + 1);
   if (!result) { errno = ENOMEM; fail(env, "allocate path"); return NULL; }
   if (buffer) memcpy(result, bytes, length);
-  else if (napi_get_value_string_utf8(env, value, result, length + 1, &length) != napi_ok) { free(result); return NULL; }
+  else if (napi_get_value_string_utf8(env, value, result, length + 1, &length) != napi_ok) {
+    free(result);
+    napi_throw_type_error(env, "EINVAL", "unable to read path string");
+    return NULL;
+  }
   result[length] = '\0';
   if (memchr(result, '\0', length) || (component && (strchr(result, '/') || !strcmp(result, ".") || !strcmp(result, "..")))) {
     free(result);

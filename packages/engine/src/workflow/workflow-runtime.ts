@@ -1,24 +1,43 @@
 /** Executes immutable graph workflow snapshots through the central scheduler. */
-import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   existsSync,
   lstatSync,
+  mkdirSync,
+  mkdtempSync,
   readFileSync,
   readlinkSync,
   readdirSync,
-  writeFileSync,
+  rmSync,
 } from "node:fs";
-import { relative, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { dirname, join, relative, resolve } from "node:path";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import type { AnySchema, ValidateFunction } from "ajv";
-import { changedPaths, assertGitStateInvariant } from "../run/autonomous-git.js";
-import { signalProcessGroup } from "../agents/agent-executor.js";
-import { createCheckpoint, readOperatorControl, setRunStatus } from "../run/operator-control.js";
+import {
+  changedIgnoredPaths,
+  changedPaths,
+  assertGitStateInvariant,
+  ignoredDirectoryHasControlFile,
+  ignoredPathFingerprints,
+  type IgnoredWalkLimits,
+  isIgnoreControlFile,
+  truncatedIgnoredPaths,
+} from "../run/autonomous-git.js";
+import { ignoredWriteAllow } from "../run/autonomous-policy.js";
+import { runBoundedProcess } from "../agents/bounded-process.js";
+import {
+  createCheckpoint,
+  listCheckpoints,
+  readOperatorControl,
+  setRunStatus,
+} from "../run/operator-control.js";
 import { appendTraceEvent } from "../run/trace.js";
 import { writeJson } from "../run/state.js";
 import { createRuntimeStateGuard, reconcileRuntimeStateGuard } from "../run/runtime-state-guard.js";
 import { scheduleWorkflow } from "./workflow-scheduler.js";
+import { readEnvelopeFile, WRITER_REVERIFICATION_FINDING } from "./workflow-scheduler-common.js";
+import { writeExclusiveFileAtomic } from "../primitives/atomic-file.js";
 import { canonicalJson } from "./workflow-contract.js";
 import { applyWorkflowTransform } from "./workflow-transforms.js";
 import { resolveExecutionTier, resolveNodeCapabilities } from "./execution-profile.js";
@@ -31,6 +50,7 @@ import type {
   WorkflowsNodeEnvelopeV21,
   WorkflowsNodeEnvelopeV22,
 } from "@rae/contracts";
+import { DEFAULT_CHECKPOINT_POLICY } from "../run/autonomous-lifecycle.js";
 import type {
   AutonomousCommandOptions,
   AutonomousLifecycleContext,
@@ -40,7 +60,6 @@ import type {
   AgentExecutionResult,
   AgentProvider,
 } from "../agents/agent-executor.js";
-import type { GitStateSnapshot } from "../run/autonomous-git.js";
 
 const WORKER = cliWorkflowAgentWorkerEntrypoint();
 type WorkflowEnvelope =
@@ -89,6 +108,8 @@ interface NodeInstance extends Record<string, unknown> {
     capabilities?: CapabilitySet | null;
   };
   context?: ContextAssembly;
+  /** Aborted by the scheduler on stop or fatal failure; terminates the provider process group. */
+  signal?: AbortSignal;
 }
 interface RuntimeContext extends AutonomousLifecycleContext {
   workflow: WorkflowContract;
@@ -96,12 +117,15 @@ interface RuntimeContext extends AutonomousLifecycleContext {
   options?: AutonomousActionOptions;
   verifiedGraphRecords?: unknown[];
   admittedMemory?: unknown[];
+  /** Overrides the ignored-directory fingerprint walk caps (tests). */
+  ignoredWalkLimits?: Partial<IgnoredWalkLimits>;
 }
 interface WorkerRequest extends AgentPhaseOptions {
   timeoutMs: number;
 }
 interface RuntimeFailure extends Error {
   workflowWaiting?: boolean;
+  workflowTerminal?: boolean;
 }
 interface DeterministicPayload extends Record<string, unknown> {
   node_id: string;
@@ -157,7 +181,7 @@ function latestPassedEnvelope(directory: string): WorkflowEnvelope | undefined {
     "loop_iteration" in envelope ? (envelope.loop_iteration ?? 1) : 1;
   return readdirSync(directory)
     .filter((name) => name.endsWith(".json"))
-    .map((name) => JSON.parse(readFileSync(resolve(directory, name), "utf8")) as WorkflowEnvelope)
+    .map((name) => readEnvelopeFile(resolve(directory, name)) as WorkflowEnvelope)
     .filter((envelope) => envelope.status === "passed")
     .sort(
       (left, right) => loopIteration(left) - loopIteration(right) || left.attempt - right.attempt,
@@ -221,40 +245,63 @@ function assertWriterEvidence(
   }
 }
 
-function runWorker(request: WorkerRequest, cwd: string): Promise<ProviderResult> {
-  return new Promise<ProviderResult>((accept, reject) => {
-    const child = spawn(process.execPath, [WORKER], {
-      cwd,
-      stdio: ["pipe", "pipe", "pipe"],
-      detached: process.platform !== "win32",
-    });
-    let stdout = "";
-    let stderr = "";
-    const timeout = AbortSignal.timeout(request.timeoutMs + 5000);
-    const terminate = () => {
-      if (!signalProcessGroup(child.pid, "SIGKILL")) child.kill("SIGKILL");
-    };
-    timeout.addEventListener("abort", terminate, { once: true });
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => {
-      stdout += chunk;
-      if (stdout.length > 20 * 1024 * 1024) child.kill("SIGKILL");
-    });
-    child.stderr.on("data", (chunk: string) => {
-      stderr += chunk;
-    });
-    child.once("error", reject);
-    child.once("close", (code) => {
-      timeout.removeEventListener("abort", terminate);
-      if (code !== 0)
-        reject(new Error(`workflow agent worker exited with ${code}: ${stderr.trim()}`));
-      else accept(JSON.parse(stdout) as ProviderResult);
-    });
-    child.stdin.end(`${JSON.stringify(request)}\n`);
+/** Worker stderr kept for diagnostics; stdout keeps the bounded-process default cap. */
+const WORKER_STDERR_LIMIT_BYTES = 1024 * 1024;
+
+/**
+ * Runs one provider session in the isolated worker process. The worker leads its own process
+ * group; a timeout, an output overflow, or `signal` (a scheduler stop or fatal failure)
+ * terminates the whole group.
+ */
+async function runWorker(
+  request: WorkerRequest,
+  cwd: string,
+  signal?: AbortSignal,
+): Promise<ProviderResult> {
+  const proc = await runBoundedProcess({
+    command: process.execPath,
+    args: [WORKER],
+    cwd,
+    env: process.env,
+    input: `${JSON.stringify(request)}\n`,
+    timeoutMs: request.timeoutMs + 5000,
+    stderrLimitBytes: WORKER_STDERR_LIMIT_BYTES,
+    signal,
   });
+  if (proc.error) throw new Error(`workflow agent worker failed to start: ${proc.error.message}`);
+  if (proc.termination) {
+    const uncertain = proc.termination.containmentUncertain ? "; containment_uncertain" : "";
+    throw new Error(
+      `workflow agent worker was terminated (${proc.termination.reason})${uncertain}: ${proc.stderrTail.trim()}`,
+    );
+  }
+  if (proc.backgroundCleanup?.containmentUncertain) {
+    throw new Error(
+      `workflow agent worker left background processes that could not be stopped; containment_uncertain: ${proc.stderrTail.trim()}`,
+    );
+  }
+  if (proc.status !== 0) {
+    throw new Error(`workflow agent worker exited with ${proc.status}: ${proc.stderrTail.trim()}`);
+  }
+  try {
+    return JSON.parse(proc.stdout) as ProviderResult;
+  } catch (error) {
+    throw new Error(
+      `workflow agent worker returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 }
 
+/** The node's payload contract, defaulting to any object. */
+function nodePayloadContract(context: RuntimeContext, node: WorkflowNode): unknown {
+  return (
+    context.workflow.payload_contracts?.[node.payload_contract ?? ""] ?? {
+      type: "object",
+    }
+  );
+}
+
+/** Writes the node's payload schema once, atomically; later attempts reuse the same file. */
 function nodeSchemaPath(context: RuntimeContext, node: WorkflowNode): string {
   const pathValue = resolve(
     context.runDir,
@@ -262,13 +309,17 @@ function nodeSchemaPath(context: RuntimeContext, node: WorkflowNode): string {
     "payload-contracts",
     `${node.id}.schema.json`,
   );
-  const contract = context.workflow.payload_contracts?.[node.payload_contract ?? ""] ?? {
-    type: "object",
-  };
-  writeFileSync(pathValue, `${JSON.stringify(contract, null, 2)}\n`, {
-    encoding: "utf8",
-    mode: 0o600,
-  });
+  if (existsSync(pathValue)) return pathValue;
+  mkdirSync(dirname(pathValue), { recursive: true, mode: 0o700 });
+  try {
+    writeExclusiveFileAtomic(
+      pathValue,
+      `${JSON.stringify(nodePayloadContract(context, node), null, 2)}\n`,
+    );
+  } catch (error) {
+    // A concurrent instance of the same node wrote the identical schema first.
+    if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
+  }
   return pathValue;
 }
 
@@ -284,10 +335,26 @@ function boundedRunReferenceBase(context: RuntimeContext): string {
   return `${relativeRunDir}/`;
 }
 
+/** Inlines the canonical payload schema for providers that cannot enforce an output schema. */
+function outputSchemaSection(outputSchema: unknown): string {
+  if (outputSchema === null || outputSchema === undefined) return "";
+  return `
+Output JSON schema:
+${JSON.stringify(outputSchema, null, 2)}
+`;
+}
+
+/** True when the provider enforces the payload schema itself (Codex --output-schema). */
+function providerEnforcesSchema(provider: string): boolean {
+  // "auto" only ever resolves to Codex; OpenCode is always explicit.
+  return provider === "codex" || provider === "auto";
+}
+
 function boundedPromptFor(
   context: RuntimeContext,
   node: WorkflowNode,
   assembledContext: unknown,
+  outputSchema: unknown = null,
 ): string {
   const runReferenceBase = boundedRunReferenceBase(context);
   return `You are executing one node in a RAE graph-native autonomous workflow.
@@ -311,7 +378,7 @@ Mandatory rules:
 - Never read or print secrets, credentials, environment files, tokens, or private key material.
 - ${node.access === "write" ? "Modify only paths owned by the plan and capture verification commands." : "Do not modify repository files."}
 - Return only the JSON payload required by the supplied schema, without Markdown.
-`;
+${outputSchemaSection(outputSchema)}`;
 }
 
 /** Builds the exact provider prompt while preserving the legacy and v2.2 serialization contract. */
@@ -321,13 +388,14 @@ export function providerPromptForWorkflow(
   inputs: WorkflowInput[],
   item: unknown,
   assembledContext: unknown = null,
+  outputSchema: unknown = null,
 ): string {
   if (
     assembledContext &&
     context.contextMode === "bounded" &&
     ["2.0.0", "2.1.0"].includes(context.workflow?.schema_version)
   ) {
-    return boundedPromptFor(context, node, assembledContext);
+    return boundedPromptFor(context, node, assembledContext, outputSchema);
   }
   const inputPayloads = inputs.map(({ edge, envelope }) => ({
     source_node: edge.from,
@@ -360,7 +428,7 @@ Mandatory rules:
 - Never read or print secrets, credentials, environment files, tokens, or private key material.
 - ${node.access === "write" ? "Modify only paths owned by the plan and capture verification commands." : "Do not modify repository files."}
 - Return only the JSON payload required by the supplied schema, without Markdown.
-`;
+${outputSchemaSection(outputSchema)}`;
 }
 
 async function providerNode(
@@ -370,17 +438,69 @@ async function providerNode(
   attempt: number,
   instance: NodeInstance = {},
 ): Promise<NodeExecutionResult> {
-  const { instancePart, schemaPath, eventLogPath, outputPath } = providerPaths(
+  const { request, instancePart, eventLogPath, cleanup } = prepareProviderRequest(
+    context,
+    node,
+    inputs,
+    attempt,
+    instance,
+  );
+  try {
+    return await executeProviderNode(
+      context,
+      node,
+      request,
+      instancePart,
+      eventLogPath,
+      attempt,
+      instance,
+    );
+  } finally {
+    cleanup();
+  }
+}
+
+/**
+ * Builds the worker request. The provider output file lives in a temp directory outside the
+ * workspace so it cannot trip the runtime-state guard under .pipeline.
+ */
+export function prepareProviderRequest(
+  context: RuntimeContext & { options: AutonomousActionOptions },
+  node: WorkflowNode,
+  inputs: WorkflowInput[],
+  attempt: number,
+  instance: NodeInstance = {},
+): { request: WorkerRequest; instancePart: string; eventLogPath: string; cleanup: () => void } {
+  const { instancePart, schemaPath, eventLogPath } = providerPaths(
     context,
     node,
     attempt,
     instance,
   );
-  const request = providerRequest(context, node, inputs, instance, {
-    schemaPath,
-    eventLogPath,
-    outputPath,
-  });
+  const tempDir = mkdtempSync(join(tmpdir(), "rae-workflow-"));
+  const cleanup = (): void => rmSync(tempDir, { recursive: true, force: true });
+  try {
+    const request = providerRequest(context, node, inputs, instance, {
+      schemaPath,
+      eventLogPath,
+      outputPath: resolve(tempDir, `${instancePart}.${attempt}.json`),
+    });
+    return { request, instancePart, eventLogPath, cleanup };
+  } catch (error) {
+    cleanup();
+    throw error;
+  }
+}
+
+async function executeProviderNode(
+  context: RuntimeContext & { options: AutonomousActionOptions },
+  node: WorkflowNode,
+  request: WorkerRequest,
+  instancePart: string,
+  eventLogPath: string,
+  attempt: number,
+  instance: NodeInstance,
+): Promise<NodeExecutionResult> {
   const contextAssemblyRef = persistBoundedContextAssembly(
     context,
     node,
@@ -389,16 +509,18 @@ async function providerNode(
     instancePart,
     request,
   );
-  const { result, beforeFingerprint } = await runProviderWorker(
+  const { result, beforeFingerprint, ignoredBefore } = await runProviderWorker(
     context,
     node,
     request,
     eventLogPath,
+    instance.signal,
   );
   validateProviderArtifact(context, node, result);
   const changed = changedPaths(context.workspaceRoot);
   assertReadOnlyNodeDidNotMutate(context, node, beforeFingerprint);
   assertWriterEvidence(context, node, result, changed);
+  const ignoredFindings = ignoredPathFindings(context, node, ignoredBefore);
   const contextEvidence = instance.context
     ? {
         ...instance.context.evidence,
@@ -414,7 +536,101 @@ async function providerNode(
         provider_prompt_bytes: Buffer.byteLength(request.prompt, "utf8"),
       }
     : null;
-  return providerResult(node, result, changed, instancePart, attempt, contextEvidence);
+  const nodeResult = providerResult(node, result, changed, instancePart, attempt, contextEvidence);
+  return ignoredFindings.length
+    ? { ...nodeResult, findings: [...nodeResult.findings, ...ignoredFindings] }
+    : nodeResult;
+}
+
+/**
+ * True when a changed ignored entry matches an `ignored_write_allow` prefix at the top level or
+ * below any directory (`node_modules/` also covers `packages/a/node_modules/`). Ignore and
+ * attributes files, and directories that carry their own, are never allowed: they can hide
+ * other changes from ownership checks.
+ */
+function ignoredWriteAllowed(
+  workspaceRoot: string,
+  entry: string,
+  allow: readonly string[],
+): boolean {
+  if (isIgnoreControlFile(entry) || ignoredDirectoryHasControlFile(workspaceRoot, entry)) {
+    return false;
+  }
+  return allow.some((prefix) => entry.startsWith(prefix) || entry.includes(`/${prefix}`));
+}
+
+/**
+ * Compares ignored-path fingerprints taken before and after one provider node. Read-only nodes
+ * may not change anything, ignored or not. A writer's ignored changes block unless the autonomous
+ * policy's ignored-write allow list covers them; allowed changes stay visible as a warning.
+ */
+export function ignoredPathFindings(
+  context: RuntimeContext,
+  node: WorkflowNode,
+  ignoredBefore: Readonly<Record<string, string>>,
+): Array<Record<string, unknown>> {
+  const after = ignoredPathFingerprints(context.workspaceRoot, context.ignoredWalkLimits);
+  const changed = changedIgnoredPaths(ignoredBefore, after);
+  const allow = ignoredWriteAllow(context.policy);
+  // A directory whose fingerprint hit the walk cap cannot prove it is unchanged, so outside the
+  // allow list it blocks like a change.
+  const truncated = truncatedIgnoredPaths(after);
+  const unverifiable = truncated.filter(
+    (entry) => !ignoredWriteAllowed(context.workspaceRoot, entry, allow),
+  );
+  if ((changed.length || unverifiable.length) && node.access !== "write") {
+    const detail = [
+      changed.length ? `added, removed, or changed gitignored paths: ${changed.join(", ")}` : "",
+      unverifiable.length
+        ? `gitignored directories too large to fingerprint: ${unverifiable.join(", ")}`
+        : "",
+    ].filter(Boolean);
+    throw new Error(`read-only node ${node.id} ${detail.join("; ")}`);
+  }
+  if (node.access !== "write") return [];
+  const blocked = changed.filter(
+    (entry) => !ignoredWriteAllowed(context.workspaceRoot, entry, allow),
+  );
+  const allowed = changed.filter((entry) => !blocked.includes(entry));
+  const findings: Array<Record<string, unknown>> = [];
+  if (blocked.length) {
+    findings.push({
+      severity: "blocking",
+      blocking: true,
+      source: node.id,
+      summary: `writer ${node.id} changed gitignored paths outside the ignored-write allow list: ${blocked.join(", ")}`,
+      paths: blocked,
+    });
+  }
+  if (allowed.length) {
+    findings.push({
+      severity: "warning",
+      blocking: false,
+      source: node.id,
+      summary: `writer ${node.id} changed allowed gitignored paths: ${allowed.join(", ")}`,
+      paths: allowed,
+    });
+  }
+  if (unverifiable.length) {
+    findings.push({
+      severity: "blocking",
+      blocking: true,
+      source: node.id,
+      summary: `writer ${node.id} ran with gitignored directories too large to fingerprint outside the ignored-write allow list: ${unverifiable.join(", ")}`,
+      paths: unverifiable,
+    });
+  }
+  const allowedTruncated = truncated.filter((entry) => !unverifiable.includes(entry));
+  if (allowedTruncated.length) {
+    findings.push({
+      severity: "warning",
+      blocking: false,
+      source: node.id,
+      summary: `allowed gitignored directories exceed the fingerprint bound; deep changes may be missed: ${allowedTruncated.join(", ")}`,
+      paths: allowedTruncated,
+    });
+  }
+  return findings;
 }
 
 function persistBoundedContextAssembly(
@@ -472,7 +688,7 @@ function providerPaths(
   node: WorkflowNode,
   attempt: number,
   instance: NodeInstance,
-): { instancePart: string; schemaPath: string; eventLogPath: string; outputPath: string } {
+): { instancePart: string; schemaPath: string; eventLogPath: string } {
   const outputDir = resolve(context.runDir, "workflow", "agent-outputs");
   const instanceName =
     !instance.instance_id && Number(instance.loop_iteration ?? 1) > 1
@@ -483,7 +699,6 @@ function providerPaths(
     instancePart,
     schemaPath: nodeSchemaPath(context, node),
     eventLogPath: resolve(outputDir, `${instancePart}.${attempt}.events.jsonl`),
-    outputPath: resolve(outputDir, `${instancePart}.${attempt}.json`),
   };
 }
 
@@ -518,6 +733,11 @@ function providerRequest(
       inputs,
       instance.item,
       instance.context?.prompt_context,
+      providerEnforcesSchema(
+        String(instance.execution?.executor ?? context.options.provider ?? "auto"),
+      )
+        ? null
+        : nodePayloadContract(context, node),
     ),
     sandboxMode: node.access === "write" ? "workspace-write" : "read-only",
     model: instance.execution?.model ?? context.options.model ?? undefined,
@@ -538,16 +758,26 @@ async function runProviderWorker(
   node: WorkflowNode,
   request: WorkerRequest,
   eventLogPath: string,
-): Promise<{ result: ProviderResult; beforeFingerprint: string }> {
+  signal?: AbortSignal,
+): Promise<{
+  result: ProviderResult;
+  beforeFingerprint: string;
+  ignoredBefore: Record<string, string>;
+}> {
   const beforeFingerprint = workspaceMutationFingerprint(context.workspaceRoot);
+  const ignoredBefore = ignoredPathFingerprints(context.workspaceRoot, context.ignoredWalkLimits);
   if (node.access !== "write") {
-    return { result: await runWorker(request, context.workspaceRoot), beforeFingerprint };
+    return {
+      result: await runWorker(request, context.workspaceRoot, signal),
+      beforeFingerprint,
+      ignoredBefore,
+    };
   }
   createRuntimeStateGuard(context.workspaceRoot, context.runId, node.id);
   let result: ProviderResult | undefined;
   let executionError: unknown;
   try {
-    result = await runWorker(request, context.workspaceRoot);
+    result = await runWorker(request, context.workspaceRoot, signal);
   } catch (error) {
     executionError = error;
   } finally {
@@ -561,7 +791,7 @@ async function runProviderWorker(
   }
   if (executionError) throw executionError;
   if (!result) throw new Error(`workflow provider ${node.id} returned no result`);
-  return { result, beforeFingerprint };
+  return { result, beforeFingerprint, ignoredBefore };
 }
 
 function validateProviderArtifact(
@@ -644,24 +874,96 @@ function envelopeInstanceId(envelope: WorkflowEnvelope): string {
   return "instance_id" in envelope ? envelope.instance_id : envelope.node_id;
 }
 
+/** A single non-map input passes through; map instances and multiple inputs are wrapped. */
+export function transformSource(
+  workflow: { nodes: Array<{ id: string; kind: string }> },
+  inputs: WorkflowInput[],
+): unknown {
+  const [only] = inputs;
+  if (inputs.length === 1 && only) {
+    const itemKey = "item_key" in only.envelope ? only.envelope.item_key : null;
+    const sourceKind = workflow.nodes.find(({ id }) => id === only.edge.from)?.kind;
+    if (sourceKind !== "map" && (itemKey === null || itemKey === undefined))
+      return only.envelope.payload;
+  }
+  return { inputs: inputs.map(({ envelope }) => envelope.payload) };
+}
+
+/** Fails on blocking findings, non-passed inputs, or an unverified writer feeding a loop gate. */
+export function evaluateGate(
+  node: { id: string; verification?: boolean },
+  inputs: WorkflowInput[],
+  workflow: {
+    nodes: Array<{ id: string; access?: string }>;
+    edges: Array<{ from: string; type: string }>;
+  },
+): {
+  status: "passed" | "failed";
+  findings: Array<Record<string, unknown>>;
+  inputsFailed: boolean;
+} {
+  const findings: Array<Record<string, unknown>> = inputs.flatMap(
+    ({ envelope }) => envelope.findings ?? [],
+  );
+  let failed = findings.some(
+    (finding) => finding.blocking === true || finding.severity === "blocking",
+  );
+  const inputsFailed = inputs.some(({ envelope }) => envelope.status !== "passed");
+  if (inputsFailed) failed = true;
+  if (node.verification === true) {
+    const writerInput = inputs.find(
+      ({ edge }) => workflow.nodes.find(({ id }) => id === edge.from)?.access === "write",
+    );
+    const hasLoopBack = workflow.edges.some(
+      (edge) => edge.type === "loop-back" && edge.from === node.id,
+    );
+    if (writerInput && hasLoopBack) {
+      failed = true;
+      findings.push({
+        id: WRITER_REVERIFICATION_FINDING,
+        severity: "blocking",
+        blocking: true,
+        summary: `write node ${writerInput.edge.from} output requires re-verification by the loop members`,
+      });
+    }
+  }
+  return { status: failed ? "failed" : "passed", findings, inputsFailed };
+}
+
 function deterministicNode(
   context: RuntimeContext & { options: AutonomousActionOptions },
   node: WorkflowNode,
   inputs: WorkflowInput[],
 ): NodeExecutionResult {
   if (node.kind === "checkpoint") {
-    const policy = context.options["checkpoint-policy"] ?? "none";
-    if (["before-mutation", "before-mutation-and-ship"].includes(policy)) {
-      const checkpoint = createCheckpoint(
-        context.runId,
-        {
-          phase: node.id,
-          purpose: "mutation",
-          message: "Human approval is required before the graph workflow may modify the workspace.",
-        },
-        context.workspaceRoot,
-      );
-      if (checkpoint.status !== "approved") {
+    const policy = context.options["checkpoint-policy"] ?? DEFAULT_CHECKPOINT_POLICY;
+    // mutation_checkpoint: false marks a release checkpoint that only pauses before shipping.
+    const release = node.mutation_checkpoint === false;
+    const pauses = release
+      ? policy === "before-mutation-and-ship"
+      : ["before-mutation", "before-mutation-and-ship"].includes(policy);
+    if (pauses) {
+      // A release checkpoint recorded under the former "mutation" purpose keeps its identity, so
+      // a resumed run honors the decision already made instead of asking again.
+      const recorded = release
+        ? listCheckpoints(context.runId, context.workspaceRoot).find(
+            ({ phase, purpose }) => phase === node.id && purpose === "mutation",
+          )
+        : undefined;
+      const checkpoint =
+        recorded ??
+        createCheckpoint(
+          context.runId,
+          {
+            phase: node.id,
+            purpose: release ? "ship" : "mutation",
+            message: release
+              ? "Human approval is required before the graph workflow may complete."
+              : "Human approval is required before the graph workflow may modify the workspace.",
+          },
+          context.workspaceRoot,
+        );
+      if (checkpoint.status === "pending") {
         setRunStatus(context.runId, "waiting", context.workspaceRoot, {
           waiting_checkpoint_id: checkpoint.checkpoint_id,
           stop_requested: false,
@@ -670,6 +972,14 @@ function deterministicNode(
           `workflow is waiting for checkpoint ${checkpoint.checkpoint_id}`,
         );
         error.workflowWaiting = true;
+        throw error;
+      }
+      if (checkpoint.status !== "approved") {
+        // A human decision is final for this run: schedulers must not retry the node.
+        const error: RuntimeFailure = new Error(
+          `checkpoint ${checkpoint.checkpoint_id} was ${checkpoint.status}`,
+        );
+        error.workflowTerminal = true;
         throw error;
       }
     }
@@ -697,27 +1007,35 @@ function deterministicNode(
     }
   }
   if (node.kind === "transform") {
-    const source =
-      inputs.length === 1
-        ? inputs[0].envelope.payload
-        : { inputs: inputs.map(({ envelope }) => envelope.payload) };
+    const source = transformSource(context.workflow, inputs);
     if (!("transform" in node) || !node.transform) {
       throw new Error(`transform node ${node.id} is missing its transform contract`);
     }
     payload.items = applyWorkflowTransform(node.transform, source);
   }
   if (node.kind === "gate") {
-    const findings = inputs.flatMap(({ envelope }) => envelope.findings ?? []);
-    const blocking = findings.some(
-      (finding) => finding.blocking === true || finding.severity === "blocking",
-    );
-    payload.status = blocking ? "failed" : "passed";
-    payload.findings = findings;
+    const evaluation = evaluateGate(node, inputs, context.workflow);
+    payload.status = evaluation.status;
+    payload.findings = evaluation.findings;
+    // Lets the scheduler tell a failure forced only by a fresh writer from a real input failure.
+    if (evaluation.inputsFailed) payload.inputs_failed = true;
   }
   return { status: payload.status, payload, findings: payload.findings ?? [] };
 }
 
-function resumeEnvelopes(context: RuntimeContext): WorkflowEnvelope[] {
+function envelopeOrder(envelope: WorkflowEnvelope): [number, number] {
+  const iteration = "loop_iteration" in envelope ? (envelope.loop_iteration ?? 1) : 1;
+  return [iteration, envelope.attempt];
+}
+
+function compareEnvelopeOrder(left: WorkflowEnvelope, right: WorkflowEnvelope): number {
+  const [leftIteration, leftAttempt] = envelopeOrder(left);
+  const [rightIteration, rightAttempt] = envelopeOrder(right);
+  return leftIteration - rightIteration || leftAttempt - rightAttempt;
+}
+
+/** Picks the newest envelope per instance by (loop_iteration, attempt). */
+export function resumeEnvelopes(context: RuntimeContext): WorkflowEnvelope[] {
   const root = resolve(context.runDir, "workflow", "attempts");
   if (!existsSync(root)) return [];
   const envelopes: WorkflowEnvelope[] = [];
@@ -728,9 +1046,7 @@ function resumeEnvelopes(context: RuntimeContext): WorkflowEnvelope[] {
       .sort();
     const latestByInstance = new Map<string, WorkflowEnvelope>();
     for (const name of files) {
-      const envelope = validateNodeEnvelope(
-        JSON.parse(readFileSync(resolve(directory, name), "utf8")) as unknown,
-      );
+      const envelope = validateNodeEnvelope(readEnvelopeFile(resolve(directory, name)));
       if (envelope.run_id !== context.runId)
         throw new Error(`resume envelope ${nodeId} belongs to a different run`);
       if (envelope.workflow_digest !== context.workflowDigest) {
@@ -738,7 +1054,7 @@ function resumeEnvelopes(context: RuntimeContext): WorkflowEnvelope[] {
       }
       const id = envelopeInstanceId(envelope);
       const prior = latestByInstance.get(id);
-      if (!prior || envelope.attempt >= prior.attempt) latestByInstance.set(id, envelope);
+      if (!prior || compareEnvelopeOrder(envelope, prior) >= 0) latestByInstance.set(id, envelope);
     }
     envelopes.push(...latestByInstance.values());
   }
@@ -766,8 +1082,10 @@ export async function runGraphWorkflow(
     workflow: context.workflow,
     runId: context.runId,
     runDir: context.runDir,
-    maxConcurrency: Number(options["max-concurrency"] ?? 4),
-    maxRepairRounds: Number(options["max-repair-rounds"] ?? 5),
+    maxConcurrency:
+      options["max-concurrency"] === undefined ? undefined : Number(options["max-concurrency"]),
+    maxRepairRounds:
+      options["max-repair-rounds"] === undefined ? undefined : Number(options["max-repair-rounds"]),
     through: options.through ?? null,
     stopRequested: () => readOperatorControl(context.runId, context.workspaceRoot).stop_requested,
     resumeEnvelopes: resumeEnvelopes(context),

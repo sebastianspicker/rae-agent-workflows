@@ -10,18 +10,22 @@
       "additionalProperties": false,
       "properties": {
         "dryRun": {
-          "description": "Preview commands without executing them",
+          "description": "Force a dry run even when --apply is passed; false does not enable rewriting (only --apply does)",
           "type": "boolean"
         },
         "noPush": {
           "description": "Rewrite history locally without pushing to remote",
           "type": "boolean"
         },
+        "deleteRecoveryBranch": {
+          "description": "Delete the recovery ref after a successful rewrite (kept by default)",
+          "type": "boolean"
+        },
         "backupRemote": {
-          "description": "Name of a remote on which to retain the exact current-run recovery branch",
+          "description": "Name of a remote, different from the cleaned repository, to which the current-run recovery ref is pushed; requires --push or --allow-backup-push",
           "type": "string",
           "minLength": 1,
-          "pattern": "^[a-zA-Z0-9_.-]+$"
+          "pattern": "^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$"
         }
       }
     },

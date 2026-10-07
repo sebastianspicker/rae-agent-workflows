@@ -1,5 +1,6 @@
 /** Renders and controls the authenticated workflow registry editor. */
 import { api, showError, showToast } from "./api.js";
+import { formatDateTime } from "./format.js";
 import { currentRun, elements, state } from "./state.js";
 import type { WorkflowDefinition, WorkflowEdge, WorkflowNode, WorkflowRecord } from "./types.js";
 
@@ -28,7 +29,16 @@ interface WorkflowListItem extends WorkflowRecord {
 type Layers = Map<number, GraphVertex[]>;
 type Positions = Map<string, Position>;
 
-const escapeText = (value: unknown): string => String(value ?? "");
+const SVG_NS = "http://www.w3.org/2000/svg";
+const NODE_WIDTH = 130;
+const NODE_HEIGHT = 60;
+const COLUMN_PITCH = 220;
+const ROW_PITCH = 92;
+const GRAPH_MARGIN_X = 20;
+const GRAPH_MARGIN_Y = 24;
+// Plex Mono advances 0.6 em: 12 px ids and 10 px badges inside the node's 8 px padding.
+const NODE_ID_CHARACTERS = 15;
+const NODE_BADGE_CHARACTERS = 18;
 const base = (): string => `/projects/${encodeURIComponent(state.projectId ?? "")}/workflows`;
 const firstDefined = <T>(...values: Array<T | undefined>): T | undefined =>
   values.find((value) => value !== undefined);
@@ -136,7 +146,10 @@ function renderInspector(definition: WorkflowDefinition): void {
   };
   for (const [id, value] of Object.entries(controls)) elements[id].value = String(value);
   elements["workflow-node-verification"].checked = node?.verification === true;
-  elements["workflow-node-checkpoint"].checked = node?.mutation_checkpoint === true;
+  // Absent or true is a mutation checkpoint; only an explicit false is a release checkpoint.
+  elements["workflow-node-checkpoint"].value =
+    node?.mutation_checkpoint === false ? "release" : "mutation";
+  elements["workflow-node-checkpoint-field"].hidden = node?.kind !== "checkpoint";
   elements["workflow-node-ownership"].checked = node?.ownership_plan === true;
   elements["workflow-inspector-help"].textContent = node
     ? `Editing ${node.id}. Use Delete to remove the selected node or edge, and connect two selected nodes in the structured list.`
@@ -321,59 +334,120 @@ function renderGraph(definition: WorkflowDefinition): void {
   const { vertices, edges, layers } = topology(definition);
   setGraphViewBox(layers);
   const positions = graphPositions(layers);
-  renderEdges(graph, edges, positions);
+  const paths = renderEdges(graph, edges, positions);
   renderNodes(graph, vertices, positions);
+  // Labels follow the nodes so their halos sit above every box and line they cross.
+  for (const [edgeRecord, path, from, to] of paths) {
+    graph.append(edgeLabel(edgeRecord, path, from, to));
+  }
 }
 
 function setGraphViewBox(layers: Layers): void {
   const maximumRows = Math.max(1, ...[...layers.values()].map((layer) => layer.length));
   const maximumDepth = Math.max(0, ...layers.keys());
-  elements["workflow-graph"].setAttribute(
-    "viewBox",
-    `0 0 ${Math.max(640, (maximumDepth + 1) * 180 + 30)} ${Math.max(250, maximumRows * 92 + 45)}`,
-  );
+  const width = Math.max(640, GRAPH_MARGIN_X * 2 + maximumDepth * COLUMN_PITCH + NODE_WIDTH);
+  const height = Math.max(250, maximumRows * ROW_PITCH + 45);
+  const svg = elements["workflow-graph"];
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  // Draw at 1:1 so labels keep their size; the surrounding .graph-scroll scrolls instead.
+  svg.style.setProperty("--graph-width", `${width}px`);
+  svg.style.setProperty("--graph-height", `${height}px`);
 }
 
 function graphPositions(layers: Layers): Positions {
   const positions: Positions = new Map();
   for (const [layerIndex, layer] of layers) {
     layer.forEach((node, row) => {
-      positions.set(node.id, { x: 20 + layerIndex * 180, y: 24 + row * 92 });
+      positions.set(node.id, {
+        x: GRAPH_MARGIN_X + layerIndex * COLUMN_PITCH,
+        y: GRAPH_MARGIN_Y + row * ROW_PITCH,
+      });
     });
   }
   return positions;
 }
 
-function renderEdges(graph: Element, edges: WorkflowEdge[], positions: Positions): void {
+type DrawnEdge = [WorkflowEdge, SVGPathElement, Position, Position];
+
+function renderEdges(graph: Element, edges: WorkflowEdge[], positions: Positions): DrawnEdge[] {
+  const drawn: DrawnEdge[] = [];
   for (const edgeRecord of edges) {
     const from = positions.get(edgeRecord.from);
     const to = positions.get(edgeRecord.to);
     if (!from || !to) continue;
-    graph.append(edgePath(edgeRecord, from, to), edgeLabel(edgeRecord, from, to));
+    const path = edgePath(edgeRecord, from, to);
+    graph.append(path);
+    drawn.push([edgeRecord, path, from, to]);
   }
+  return drawn;
 }
 
 function edgePath(edgeRecord: WorkflowEdge, from: Position, to: Position): SVGPathElement {
-  const edge = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  const edge = document.createElementNS(SVG_NS, "path");
   edge.setAttribute("class", `workflow-edge workflow-edge--${edgeRecord.type}`);
   edge.setAttribute("d", edgePathData(edgeRecord.type, from, to));
   return edge;
 }
 
-function edgePathData(type: string, from: Position, to: Position): string {
-  const bend = type === "loop-back" ? Math.min(from.y, to.y) - 18 : (from.x + to.x) / 2;
-  if (type === "loop-back")
-    return `M${from.x + 130} ${from.y + 30} C${from.x + 155} ${bend} ${to.x - 25} ${bend} ${to.x} ${to.y + 30}`;
-  return `M${from.x + 130} ${from.y + 30} C${bend} ${from.y + 30} ${bend} ${to.y + 30} ${to.x} ${to.y + 30}`;
+/** Start, two control points and end of an edge's cubic Bézier. */
+function edgeCurve(type: string, from: Position, to: Position): Position[] {
+  const start = { x: from.x + NODE_WIDTH, y: from.y + NODE_HEIGHT / 2 };
+  const end = { x: to.x, y: to.y + NODE_HEIGHT / 2 };
+  if (type === "loop-back") {
+    const bend = Math.min(from.y, to.y) - 18;
+    return [start, { x: start.x + 25, y: bend }, { x: end.x - 25, y: bend }, end];
+  }
+  const bend = (start.x + end.x) / 2;
+  return [start, { x: bend, y: start.y }, { x: bend, y: end.y }, end];
 }
 
-function edgeLabel(edgeRecord: WorkflowEdge, from: Position, to: Position): SVGTextElement {
-  const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
+function edgePathData(type: string, from: Position, to: Position): string {
+  const [start, first, second, end] = edgeCurve(type, from, to);
+  return `M${start.x} ${start.y} C${first.x} ${first.y} ${second.x} ${second.y} ${end.x} ${end.y}`;
+}
+
+function bezierPoint([p0, p1, p2, p3]: Position[], t: number): Position {
+  const u = 1 - t;
+  const at = (key: "x" | "y") =>
+    u * u * u * p0[key] + 3 * u * u * t * p1[key] + 3 * u * t * t * p2[key] + t * t * t * p3[key];
+  return { x: at("x"), y: at("y") };
+}
+
+/** Midpoint of a forward edge by arc length; the highest point of a loop-back arc. */
+function labelPoint(type: string, path: SVGPathElement, from: Position, to: Position): Position {
+  const curve = edgeCurve(type, from, to);
+  if (type === "loop-back") {
+    let apex = bezierPoint(curve, 0.5);
+    for (let step = 0; step <= 20; step += 1) {
+      const point = bezierPoint(curve, step / 20);
+      if (point.y < apex.y) apex = point;
+    }
+    return apex;
+  }
+  try {
+    const length = path.getTotalLength();
+    const point = length > 0 ? path.getPointAtLength(length / 2) : null;
+    if (point && Number.isFinite(point.x) && Number.isFinite(point.y)) {
+      return { x: point.x, y: point.y };
+    }
+  } catch {
+    // Geometry can be unavailable while the panel is not rendered; the curve is symmetric.
+  }
+  return bezierPoint(curve, 0.5);
+}
+
+function edgeLabel(
+  edgeRecord: WorkflowEdge,
+  path: SVGPathElement,
+  from: Position,
+  to: Position,
+): SVGTextElement {
+  const label = document.createElementNS(SVG_NS, "text");
+  const point = labelPoint(edgeRecord.type, path, from, to);
   label.setAttribute("class", "workflow-edge-label");
-  label.setAttribute("x", String((from.x + to.x + 130) / 2));
-  label.setAttribute("y", String((from.y + to.y) / 2 + 20));
-  // The graph's 50-unit inter-node channel fits edge kinds, while complete
-  // condition and artifact values remain available in the equivalent tables.
+  label.setAttribute("x", String(Math.round(point.x)));
+  label.setAttribute("y", String(Math.round(point.y)));
+  // Complete condition and artifact values remain available in the equivalent tables.
   label.textContent =
     edgeRecord.type === "condition"
       ? "when"
@@ -386,41 +460,52 @@ function edgeLabel(edgeRecord: WorkflowEdge, from: Position, to: Position): SVGT
 function renderNodes(graph: Element, vertices: GraphVertex[], positions: Positions): void {
   for (const node of vertices) {
     const position = positions.get(node.id);
-    if (position)
-      graph.append(
-        nodeRectangle(node, position),
-        nodeText(node, position),
-        nodeBadge(node, position),
-      );
+    if (!position) continue;
+    const group = document.createElementNS(SVG_NS, "g");
+    const title = document.createElementNS(SVG_NS, "title");
+    title.textContent = node.kind === "fan-out" ? `${node.members.join(", ")} (parallel)` : node.id;
+    group.append(
+      title,
+      nodeRectangle(node, position),
+      nodeText(node, position),
+      nodeBadge(node, position),
+    );
+    graph.append(group);
   }
 }
 
 function nodeRectangle(node: GraphVertex, { x, y }: Position): SVGRectElement {
-  const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+  const rect = document.createElementNS(SVG_NS, "rect");
   rect.setAttribute("class", `workflow-node workflow-node--${node.kind}`);
   rect.setAttribute("x", String(x));
   rect.setAttribute("y", String(y));
-  rect.setAttribute("width", "130");
-  rect.setAttribute("height", "60");
+  rect.setAttribute("width", String(NODE_WIDTH));
+  rect.setAttribute("height", String(NODE_HEIGHT));
   return rect;
 }
 
+/** Ellipsises text to a monospace character budget; the node's <title> keeps the full value. */
+function fitText(value: string, characters: number): string {
+  return value.length <= characters ? value : `${value.slice(0, characters - 1)}…`;
+}
+
 function nodeText(node: GraphVertex, { x, y }: Position): SVGTextElement {
-  const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+  const text = document.createElementNS(SVG_NS, "text");
   text.setAttribute("x", String(x + 8));
   text.setAttribute("y", String(y + 24));
-  text.textContent = escapeText(
+  text.textContent = fitText(
     node.kind === "fan-out" ? `${node.members.length} parallel nodes` : node.id,
+    NODE_ID_CHARACTERS,
   );
   return text;
 }
 
 function nodeBadge(node: GraphVertex, { x, y }: Position): SVGTextElement {
-  const badge = document.createElementNS("http://www.w3.org/2000/svg", "text");
+  const badge = document.createElementNS(SVG_NS, "text");
   badge.setAttribute("class", "workflow-node-badge");
   badge.setAttribute("x", String(x + 8));
   badge.setAttribute("y", String(y + 46));
-  badge.textContent = `${node.kind} · ${node.tier ?? node.access}`;
+  badge.textContent = fitText(`${node.kind} · ${node.tier ?? node.access}`, NODE_BADGE_CHARACTERS);
   return badge;
 }
 
@@ -442,7 +527,7 @@ function structuredTable(caption: string, columns: string[], rows: unknown[][]):
     const tableRow = document.createElement("tr");
     for (const value of row) {
       const cell = document.createElement("td");
-      cell.textContent = escapeText(value);
+      cell.textContent = String(value ?? "");
       tableRow.append(cell);
     }
     body.append(tableRow);
@@ -521,6 +606,7 @@ function instanceDecisionLabel(instance: WorkflowInstance): string {
   return instance.convergence?.dry ? "converged" : "—";
 }
 
+/** Reads the catalogue summaries, which the background poll keeps current. */
 function mutationLocked(): boolean {
   // The Pages bootstrap is mock-only and must keep its in-memory registry controls explorable.
   if (document.documentElement.dataset.demo === "true") return false;
@@ -530,26 +616,45 @@ function mutationLocked(): boolean {
   );
 }
 
+/** Re-applies the registry lock after the run summaries change. */
+export function refreshWorkflowLocks(): void {
+  if (!state.workflow) return;
+  updateExpertMode(state.workflow.workflow);
+  updateMutationControls();
+}
+
+let registryLocked = false;
+
+function setWorkflowStatus(text: string): void {
+  if (elements["workflow-status"].textContent !== text)
+    elements["workflow-status"].textContent = text;
+}
+
 function updateMutationControls(): void {
   const locked = mutationLocked();
   for (const control of mutationControls()) {
     control.disabled = locked;
   }
   elements["workflow-definition"].readOnly = locked;
-  if (locked)
-    elements["workflow-status"].textContent = "Registry is read-only while a run is active.";
+  if (locked === registryLocked) return;
+  registryLocked = locked;
+  // Status copy changes only on a lock transition so the 10 s poll never overwrites
+  // validation, proposal or draft messages.
+  const lockedCopy = "Registry is read-only while a run is active.";
+  if (locked) setWorkflowStatus(lockedCopy);
+  else if (elements["workflow-status"].textContent === lockedCopy)
+    setWorkflowStatus("Registry unlocked. No run is active.");
 }
 
+/** Validation is read-only and stays available while a run is active. */
 function mutationControls() {
   return [
     elements["workflow-draft"],
-    elements["workflow-validate"],
     elements["workflow-activate"],
     elements["workflow-add-node"],
     elements["workflow-delete-node"],
     elements["workflow-add-edge"],
     elements["workflow-delete-edge"],
-    elements["workflow-auto-layout"],
     elements["workflow-propose"],
   ];
 }
@@ -573,7 +678,7 @@ function renderWorkflowDetails(workflow: WorkflowRecord): void {
         dt = document.createElement("dt"),
         dd = document.createElement("dd");
       dt.textContent = key.replace("_", " ");
-      dd.textContent = escapeText(value);
+      dd.textContent = String(value ?? "");
       box.append(dt, dd);
       return box;
     }),
@@ -588,7 +693,9 @@ function renderWorkflowHistory(workflow: WorkflowRecord): void {
       li.textContent =
         typeof item === "string"
           ? item
-          : `${item.revision ?? "revision"} · ${item.activated_at ?? "recorded"}`;
+          : `Revision ${item.revision ?? "unknown"} · ${
+              item.activated_at ? formatDateTime(item.activated_at) : "time not recorded"
+            }`;
       return li;
     }),
   );
@@ -647,7 +754,13 @@ export async function loadWorkflows(): Promise<void> {
     }),
   );
   elements["workflow-empty"].hidden = state.workflows.length > 0;
-  if (state.workflows[0]) await selectWorkflow(state.workflowId ?? state.workflows[0].workflow_id);
+  const retained = state.workflows.find((workflow) => workflow.workflow_id === state.workflowId);
+  if (!retained) {
+    state.workflowId = null;
+    state.workflow = null;
+  }
+  const selected = retained ?? state.workflows[0];
+  if (selected) await selectWorkflow(selected.workflow_id);
   elements["workflow-status"].textContent =
     "Registry loaded. Drafts cannot change while a run is active.";
   updateMutationControls();
@@ -739,7 +852,9 @@ function applyInspector(): void {
   if (failure) node.failure_handling = { mode: failure };
   else delete node.failure_handling;
   node.verification = elements["workflow-node-verification"].checked;
-  node.mutation_checkpoint = elements["workflow-node-checkpoint"].checked;
+  if (node.kind === "checkpoint") {
+    node.mutation_checkpoint = elements["workflow-node-checkpoint"].value !== "release";
+  } else delete node.mutation_checkpoint;
   node.ownership_plan = elements["workflow-node-ownership"].checked;
   if (node.join === "quorum") {
     node.quorum = { threshold: Number(elements["workflow-node-quorum"].value || 1) };
@@ -824,6 +939,13 @@ async function proposeDraft(): Promise<void> {
   await pollProposal(result.id);
 }
 
+/** Delete edits text in fields; it removes a node only from non-text controls. */
+function isTextEntry(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false;
+  if (target.closest("input, textarea, select")) return true;
+  return target instanceof HTMLElement && target.isContentEditable;
+}
+
 export function bindWorkflowEditor(): void {
   elements["workflow-refresh"].addEventListener("click", () => loadWorkflows().catch(showError));
   for (const view of ["loop", "graph", "analyze", "json"]) {
@@ -847,7 +969,6 @@ export function bindWorkflowEditor(): void {
     "workflow-delete-node": deleteNode,
     "workflow-add-edge": connectSelectedNodes,
     "workflow-delete-edge": deleteEdge,
-    "workflow-auto-layout": () => renderGraph(draftDefinition()),
     "workflow-propose": proposeDraft,
   };
   for (const [id, action] of Object.entries(structuredActions)) {
@@ -874,13 +995,12 @@ export function bindWorkflowEditor(): void {
     elements[id].addEventListener("change", () => applyInspector());
   }
   elements["workflow-draft-form"].addEventListener("keydown", (event) => {
-    if (event.altKey && event.key.toLowerCase() === "n") {
-      event.preventDefault();
-      addNode();
-    }
-    if (event.key === "Delete" && document.activeElement?.tagName !== "TEXTAREA") {
-      event.preventDefault();
+    if (event.key !== "Delete" || isTextEntry(event.target)) return;
+    event.preventDefault();
+    try {
       deleteNode();
+    } catch (error) {
+      showError(error);
     }
   });
   elements["workflow-draft-form"].addEventListener("submit", async (event) => {
@@ -923,8 +1043,13 @@ export function bindWorkflowEditor(): void {
   });
   elements["workflow-diff"].addEventListener("click", async () => {
     try {
+      const query = new URLSearchParams();
+      const from = elements["workflow-diff-base"].value;
+      const to = selectedRevision();
+      if (from) query.set("from", from);
+      if (to !== null && to !== undefined) query.set("to", String(to));
       const diff = await api<{ diff: unknown }>(
-        `${base()}/${encodeURIComponent(state.workflowId ?? "")}/diff?from=${encodeURIComponent(elements["workflow-diff-base"].value)}&to=${encodeURIComponent(selectedRevision() ?? "")}`,
+        `${base()}/${encodeURIComponent(state.workflowId ?? "")}/diff${query.size ? `?${query}` : ""}`,
       );
       elements["workflow-diff-output"].textContent = JSON.stringify(diff.diff, null, 2);
     } catch (error) {

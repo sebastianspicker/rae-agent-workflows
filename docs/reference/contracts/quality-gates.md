@@ -1,7 +1,7 @@
 ---
 status: experimental
 owner: orchestration
-last_reviewed: 2026-04-12
+last_reviewed: 2026-10-07
 source_of_truth: packages/contracts/v1/schemas
 evidence_links: ../claims/claims-ledger.md
 ---
@@ -69,8 +69,5 @@ gate impossible to audit.
 
 - [IEEE 1012](../claims/bibliography.md#src-ieee-1012)
 - [NIST GenAI Profile](../claims/bibliography.md#src-nist-genai-profile)
-- [Model Cards](../claims/bibliography.md#src-model-cards)
-- [Datasheets](../claims/bibliography.md#src-datasheets)
 - [OpenAI evals guidance](../claims/bibliography.md#src-openai-evals)
 - [PaperBench](../claims/bibliography.md#src-openai-paperbench)
-- [Pineau reproducibility report](../claims/bibliography.md#src-pineau-reproducibility)

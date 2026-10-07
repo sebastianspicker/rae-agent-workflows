@@ -15,6 +15,7 @@ import {
   replacePrivateFile,
   redact,
 } from "./agent-provider-runtime.js";
+import { normalizeEvidenceCommand } from "../primitives/command-evidence.js";
 import { runBoundedProcess, type BoundedProcessResult } from "./bounded-process.js";
 import {
   assertProjectCodexCapabilities,
@@ -209,7 +210,8 @@ function selectCommandWorkingDirectory(item: JsonObject, event: JsonObject): unk
   return event.cwd;
 }
 
-function commandEventFrom(
+/** Exported for tests. */
+export function commandEventFrom(
   safeEvent: unknown,
   phase: string,
   workspaceRoot: string,
@@ -218,13 +220,14 @@ function commandEventFrom(
   const item = safeEvent.item;
   if (!isJsonObject(item) || item.type !== "command_execution") return null;
   if (typeof item.command !== "string") return null;
-  const command = item.command.trim();
+  const command = normalizeEvidenceCommand(item.command);
   if (!command) return null;
   if (!Number.isSafeInteger(item.exit_code)) return null;
   const workingDirectory = selectCommandWorkingDirectory(item, safeEvent);
   return {
     command,
-    working_directory: evidenceWorkingDirectory(workingDirectory, workspaceRoot),
+    // Codex may omit the cwd for commands run in the session directory, which is the workspace.
+    working_directory: evidenceWorkingDirectory(workingDirectory ?? ".", workspaceRoot),
     phase: typeof phase === "string" ? phase : null,
     exit_code: item.exit_code as number,
     successful: item.exit_code === 0,

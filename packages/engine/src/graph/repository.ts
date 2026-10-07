@@ -7,6 +7,7 @@ import {
   addEdge,
   addNode,
   credentialLike,
+  porcelainZEntries,
   readJson,
   runGit,
   safeRegularFile,
@@ -40,15 +41,9 @@ function indexedPath(row: string): string | null {
 
 function addPlanOwnedChanges(root: string, paths: Set<string>, planOwned: readonly string[]): void {
   const command = ["status", "--porcelain=v1", "-z", "--untracked-files=all"];
-  for (const row of runGit(root, command).split("\0").filter(Boolean)) {
-    const path = changedPath(row);
-    if (planOwnsPath(planOwned, path)) paths.add(path);
+  for (const entry of porcelainZEntries(runGit(root, command))) {
+    if (planOwnsPath(planOwned, entry.path)) paths.add(entry.path);
   }
-}
-
-function changedPath(row: string): string {
-  const path = row.slice(3);
-  return path.includes(" -> ") ? (path.split(" -> ").at(-1) ?? path) : path;
 }
 
 function planOwnsPath(planOwned: readonly string[], candidate: string): boolean {

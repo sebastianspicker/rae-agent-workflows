@@ -1,10 +1,35 @@
 /** Records attributable checkpoint decisions without treating approval as execution. */
-import { postAction } from "./actions.js";
+import { openConfirmation, postAction } from "./actions.js";
 import { showError, showToast } from "./api.js";
 import { humanize } from "./format.js";
 import { elements, state } from "./state.js";
 
 let lastDecision: { key: string; id: string } | null = null;
+
+/** Moves focus to the next meaningful control once the decision form has closed. */
+function focusAfterDecision(): void {
+  if (!elements["resume-button"].disabled) elements["resume-button"].focus();
+  else {
+    elements["checkpoint-empty"].setAttribute("tabindex", "-1");
+    elements["checkpoint-empty"].focus();
+  }
+}
+
+async function recordDecision(
+  decision: string,
+  checkpointId: string | undefined,
+  rationale: string,
+): Promise<void> {
+  const key = JSON.stringify([state.projectId, state.runId, checkpointId, decision, rationale]);
+  if (lastDecision?.key !== key) lastDecision = { key, id: crypto.randomUUID() };
+  await postAction("checkpoint-decision", {
+    checkpoint_id: checkpointId,
+    decision,
+    decision_id: lastDecision.id,
+    rationale,
+  });
+  showToast(`${humanize(decision)} decision recorded.`, "notice");
+}
 
 async function decide(button: HTMLButtonElement): Promise<void> {
   if (state.actionPending) return;
@@ -18,27 +43,21 @@ async function decide(button: HTMLButtonElement): Promise<void> {
     elements["checkpoint-rationale"].focus();
     return;
   }
-  const key = JSON.stringify([
-    state.projectId,
-    state.runId,
-    checkpointId,
-    button.dataset.decision,
-    rationale,
-  ]);
-  if (lastDecision?.key !== key) lastDecision = { key, id: crypto.randomUUID() };
-  try {
-    await postAction("checkpoint-decision", {
-      checkpoint_id: checkpointId,
-      decision: button.dataset.decision,
-      decision_id: lastDecision.id,
+  const decision = button.dataset.decision ?? "";
+  if (decision === "reject" || decision === "escalate") {
+    // Terminal outcomes are confirmed with the exact rationale that will be saved.
+    openConfirmation(decision, {
       rationale,
+      onConfirm: async () => {
+        await recordDecision(decision, checkpointId, rationale);
+        return focusAfterDecision;
+      },
     });
-    showToast(`${humanize(button.dataset.decision ?? "decision")} decision recorded.`, "notice");
-    if (!elements["resume-button"].disabled) elements["resume-button"].focus();
-    else {
-      elements["checkpoint-empty"].setAttribute("tabindex", "-1");
-      elements["checkpoint-empty"].focus();
-    }
+    return;
+  }
+  try {
+    await recordDecision(decision, checkpointId, rationale);
+    focusAfterDecision();
   } catch (error) {
     showError(error);
   }

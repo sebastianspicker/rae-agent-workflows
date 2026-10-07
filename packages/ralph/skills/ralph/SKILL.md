@@ -11,22 +11,17 @@ Converts a PRD (Markdown) into this template schema:
 - `stories[]` with `mode`, `scope`, `acceptance_criteria`, `steps`, `verification`, `out_of_scope`,
 - `passes: false` for all stories.
 
-## Target Schema (Required Fields)
+## Target Schema
 
 Top-Level:
-- `schema_version`
-- `project`
-- `defaults`
-- `stories`
+- required: `defaults`, `stories`
+- recommended: `schema_version`, `project`
 
 `defaults`:
-- `mode_default`
-- `max_stories_default`
-- `model_default`
-- `reasoning_effort_default`
-- `report_dir`
-- `sandbox_by_mode`
-- `lint_detection_order`
+- required: `report_dir`, `sandbox_by_mode`
+- recommended: `mode_default`, `max_stories_default`, `model_default`,
+  `reasoning_effort_default`, `lint_detection_order` (orders and selects the
+  detected check ecosystems)
 
 Story:
 - `id`, `title`, `priority`, `mode`, `scope`, `acceptance_criteria`, `passes`

@@ -5,7 +5,7 @@ import { atomicWriteRelative } from "./safe-fs.js";
 import { readRelative } from "./safe-fs.js";
 import { EXIT, RalphError } from "./errors.js";
 import { isoUtc, safeRelativePath, sha256 } from "./util.js";
-import { loadPrd, storyById } from "./prd.js";
+import { storyById, validatePrdValue } from "./prd.js";
 import type { Mode, Prd, RuntimePaths, Story } from "./types.js";
 
 function stable(value: unknown): string {
@@ -81,6 +81,34 @@ interface ImportedState {
   stories: ImportedStory[];
 }
 
+/** Story status fields an import may restore; definitions always come from prd.json. */
+const IMPORTED_FIELDS = [
+  "passes",
+  "skipped",
+  "report_path",
+  "completed_at",
+  "skip_reason",
+  "skipped_at",
+] as const;
+const IMPORTED_STORY_KEYS = new Set<string>(["id", ...IMPORTED_FIELDS]);
+const IMPORTED_STATE_KEYS = new Set<string>([
+  "project",
+  "project_fingerprint_sha256",
+  "story_ids_fingerprint_sha256",
+  "story_definitions_fingerprint_sha256",
+  "stories",
+  "exported_at",
+]);
+
+function rejectUnknownKeys(value: object, allowed: Set<string>, label: string): void {
+  const unknown = Object.keys(value).filter((key) => !allowed.has(key));
+  if (unknown.length)
+    throw new RalphError(
+      `Invalid import-state payload: unknown ${label} key(s): ${unknown.sort().join(", ")}`,
+      EXIT.prd,
+    );
+}
+
 export function importState(paths: RuntimePaths, prd: Prd, file: string): Prd {
   let imported: ImportedState;
   try {
@@ -93,8 +121,10 @@ export function importState(paths: RuntimePaths, prd: Prd, file: string): Prd {
       "Invalid import-state payload: expected fingerprinted story status objects",
       EXIT.prd,
     );
+  rejectUnknownKeys(imported, IMPORTED_STATE_KEYS, "top-level");
   const ids = new Set<string>();
   for (const item of imported.stories) {
+    if (item && typeof item === "object") rejectUnknownKeys(item, IMPORTED_STORY_KEYS, "story");
     if (
       !item ||
       typeof item.id !== "string" ||
@@ -127,7 +157,12 @@ export function importState(paths: RuntimePaths, prd: Prd, file: string): Prd {
   for (const story of next.stories) {
     const update = updates.get(story.id);
     if (!update) continue;
-    Object.assign(story, update);
+    for (const field of IMPORTED_FIELDS) {
+      const value = update[field];
+      if (value === undefined) continue;
+      if (field === "passes" || field === "skipped") story[field] = value as boolean;
+      else story[field] = value as string;
+    }
     if (story.passes !== true) {
       delete story.report_path;
       delete story.completed_at;
@@ -137,8 +172,8 @@ export function importState(paths: RuntimePaths, prd: Prd, file: string): Prd {
       delete story.skipped_at;
     }
   }
+  validatePrdValue(paths, next);
   writePrd(paths, next);
-  loadPrd(paths);
   return next;
 }
 
@@ -191,13 +226,7 @@ export function resetSkipped(paths: RuntimePaths, prd: Prd): number {
       delete story.skipped_at;
     }
   if (count) writePrd(paths, prd);
-  atomicWriteRelative(
-    paths.repoRoot,
-    safeRelativePath(
-      relative(paths.repoRoot, join(paths.stateDir, "story-failures.tsv")).split("\\").join("/"),
-    ),
-    "",
-  );
+  writeFailures(paths, new Map());
   return count;
 }
 
@@ -262,7 +291,7 @@ export function skipStory(paths: RuntimePaths, prd: Prd, id: string, reason: str
 export function writeProgress(
   paths: RuntimePaths,
   prd: Prd,
-  output = join(paths.packageRoot, "progress.txt"),
+  output = join(dirname(paths.prdFile), "progress.txt"),
 ): void {
   const passed = prd.stories.filter((story) => story.passes).length;
   const skipped = prd.stories.filter((story) => story.skipped).length;
@@ -305,7 +334,7 @@ export function appendProgress(
   story: Story,
   mode: Mode,
   report: string,
-  output = join(paths.packageRoot, "progress.log.md"),
+  output = join(dirname(paths.prdFile), "progress.log.md"),
 ): void {
   const file = resolve(output);
   const header = existsSync(file)
@@ -323,7 +352,7 @@ export function recordLearning(
   id: string,
   note: string,
   files = "",
-  output = join(paths.packageRoot, "learnings.md"),
+  output = join(dirname(paths.prdFile), "learnings.md"),
 ): void {
   const header = existsSync(output)
     ? ""

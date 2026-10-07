@@ -5,14 +5,81 @@
   "title": "Mapped module migration with one writer",
   "entry_node": "inventory",
   "terminal_node": "complete",
-  "budgets": { "max_concurrency": 4, "max_repair_rounds": 5, "max_attempts_per_node": 3, "max_dynamic_instances": 128, "max_pipeline_depth": 4, "max_map_items": 32 },
+  "budgets": { "max_concurrency": 4, "max_attempts_per_node": 3, "max_dynamic_instances": 128, "max_pipeline_depth": 4, "max_map_items": 32 },
+  "payload_contracts": {
+    "findings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary", "findings"],
+      "properties": {
+        "summary": { "type": "string", "maxLength": 8000 },
+        "findings": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "object",
+            "required": ["severity"],
+            "properties": {
+              "severity": { "enum": ["blocking", "major", "minor", "info"] },
+              "blocking": { "type": "boolean" },
+              "evidence_ref": { "type": "string", "maxLength": 4096 },
+              "summary": { "type": "string", "maxLength": 8000 }
+            }
+          }
+        }
+      }
+    },
+    "ownership-plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary", "findings", "file_ownership", "documentation"],
+      "properties": {
+        "summary": { "type": "string", "maxLength": 8000 },
+        "findings": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "object",
+            "required": ["severity"],
+            "properties": {
+              "severity": { "enum": ["blocking", "major", "minor", "info"] },
+              "blocking": { "type": "boolean" },
+              "evidence_ref": { "type": "string", "maxLength": 4096 },
+              "summary": { "type": "string", "maxLength": 8000 }
+            }
+          }
+        },
+        "file_ownership": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 4096 }
+        },
+        "documentation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["required", "paths", "rationale"],
+          "properties": {
+            "required": { "type": "boolean" },
+            "paths": { "type": "array", "maxItems": 128, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 4096 } },
+            "rationale": { "type": "string", "minLength": 1, "maxLength": 4000 }
+          }
+        }
+      }
+    }
+  },
   "nodes": [
-    { "id": "inventory", "kind": "agent", "access": "read", "tier": "economy", "guidance": "Return at most 32 migration modules with stable module_id fields." },
-    { "id": "analyze-module", "kind": "map", "access": "read", "tier": "standard", "guidance": "Analyze one module contract, callers, tests, and migration risks.", "map": { "source_pointer": "/items", "stable_key_pointer": "/module_id", "max_items": 32 } },
-    { "id": "plan", "kind": "agent", "access": "read", "tier": "judgment", "guidance": "Produce one ownership plan for the serialized migration writer.", "ownership_plan": true },
+    { "id": "inventory", "kind": "agent", "access": "read", "role": "module inventory", "tier": "economy", "guidance": "Return at most 32 migration modules with stable module_id fields." },
+    { "id": "analyze-module", "kind": "map", "access": "read", "role": "module analyst", "tier": "standard", "guidance": "Analyze one module contract, callers, tests, and migration risks.", "map": { "source_pointer": "/items", "stable_key_pointer": "/module_id", "max_items": 32 } },
+    { "id": "plan", "kind": "agent", "access": "read", "role": "planner", "tier": "judgment", "guidance": "Produce one ownership plan for the serialized migration writer.", "payload_contract": "ownership-plan", "ownership_plan": true },
     { "id": "mutation-checkpoint", "kind": "checkpoint", "access": "control", "guidance": "Require the configured human mutation decision.", "mutation_checkpoint": true },
-    { "id": "migrate", "kind": "agent", "access": "write", "tier": "judgment", "guidance": "Apply only the plan-owned migration and capture verification evidence." },
-    { "id": "verify", "kind": "gate", "access": "control", "guidance": "Fail when migration verification or compatibility evidence is blocking.", "verification": true },
+    { "id": "migrate", "kind": "agent", "access": "write", "role": "migration writer", "tier": "judgment", "guidance": "Apply only the plan-owned migration and capture verification evidence.", "payload_contract": "findings" },
+    { "id": "critic-tests", "kind": "agent", "access": "read", "role": "test critic", "tier": "standard", "guidance": "Inspect test evidence for the migrated modules and report typed blocking findings.", "payload_contract": "findings", "resource": "workspace-commands" },
+    { "id": "critic-contracts", "kind": "agent", "access": "read", "role": "contract critic", "tier": "judgment", "guidance": "Inspect contract compatibility and caller impact of the migration and report typed blocking findings.", "payload_contract": "findings" },
+    { "id": "repair-join", "kind": "join", "access": "control", "guidance": "Collect all migration critic findings deterministically.", "join": "all" },
+    { "id": "verification", "kind": "gate", "access": "control", "guidance": "Fail when migration verification or compatibility evidence is blocking, including any blocking critic finding.", "verification": true },
+    { "id": "release-checkpoint", "kind": "checkpoint", "access": "control", "guidance": "Pause for human approval before completion when the policy is before-mutation-and-ship; pass through otherwise.", "mutation_checkpoint": false },
     { "id": "complete", "kind": "terminal", "access": "control", "guidance": "Record migration completion." }
   ],
   "edges": [
@@ -20,7 +87,13 @@
     { "from": "analyze-module", "to": "plan", "type": "artifact", "artifact": "module-analysis" },
     { "from": "plan", "to": "mutation-checkpoint", "type": "sequence" },
     { "from": "mutation-checkpoint", "to": "migrate", "type": "sequence" },
-    { "from": "migrate", "to": "verify", "type": "artifact", "artifact": "migration-result" },
-    { "from": "verify", "to": "complete", "type": "condition", "condition": "success" }
+    { "from": "migrate", "to": "critic-tests", "type": "artifact", "artifact": "migration-result" },
+    { "from": "migrate", "to": "critic-contracts", "type": "artifact", "artifact": "migration-result" },
+    { "from": "critic-tests", "to": "repair-join", "type": "artifact", "artifact": "findings" },
+    { "from": "critic-contracts", "to": "repair-join", "type": "artifact", "artifact": "findings" },
+    { "from": "migrate", "to": "verification", "type": "artifact", "artifact": "migration-result" },
+    { "from": "repair-join", "to": "verification", "type": "artifact", "artifact": "round-findings" },
+    { "from": "verification", "to": "release-checkpoint", "type": "condition", "condition": "success" },
+    { "from": "release-checkpoint", "to": "complete", "type": "sequence" }
   ]
 }

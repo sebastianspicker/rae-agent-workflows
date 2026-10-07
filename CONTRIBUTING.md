@@ -49,21 +49,36 @@ Synchronized orchestration adapters must be changed through
 
 ```bash
 npm --workspace @rae/agent-adapters run generate --
-npm --workspace @rae/agent-adapters run generate -- --check
+npm run check:adapters
 ```
 
 ## Verification
 
-For a prepared offline checkout:
+Test sources, fixtures, snapshots, and local test helpers are private and
+gitignored. Keep them on disk; do not force-add them or remove their ignore
+rules. The test commands below require a maintainer's local test files.
+
+Narrow checks run against the compiled `dist/` output, so build first. Each
+workspace suite has a root script named after its package: `test:engine`,
+`test:operator`, `test:platform`, `test:ralph`, `test:agent-profiles`,
+`test:coauthor-trailer-cleaner`, `test:repository-tools`, `test:dev-tools` and
+`test:fs-bridge`. `npm test` runs them in sequence and skips the platform when
+its dependencies are not installed. `npm run check:architecture`,
+`npm run check:docs` and `npm run check:adapters` run the individual gates.
+
+For a prepared public checkout without private tests:
 
 ```bash
-npm run verify -- --skip-install
+npm run verify -- --skip-install --skip-tests
 ```
 
 Use `npm run verify --` when dependencies still need to be installed.
+`--skip-build` reuses an existing build, as CI does after its own build step.
+`--skip-tests` omits private local suites and reports `VERDICT: PARTIAL`;
+public CI uses it. Omit this option for full local verification.
 `--skip-docs` is a partial mode that omits the VitePress documentation build. It does not satisfy the release gate.
 
-Release candidates must run:
+Release candidates must run with the private local tests present:
 
 ```bash
 npm run verify -- --release-candidate

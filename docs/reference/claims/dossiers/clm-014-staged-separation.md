@@ -1,8 +1,8 @@
 ---
 status: stable
 owner: science
-last_reviewed: 2026-07-19
-source_of_truth: ../claims-ledger.md
+last_reviewed: 2026-10-07
+source_of_truth: docs/reference/claims/claims-ledger.md
 evidence_links: ../evidence-index.md#clm-014
 ---
 
@@ -33,8 +33,8 @@ and failure-analysis literature.
 
 - `docs/explanation/science/problem-statement.md`
 - `docs/explanation/science/drift-and-self-certification.md`
-- `packages/engine/src/cli/runner.ts`
-- `packages/engine/src/cli/autonomous.ts`
+- `packages/engine/src/workflow/workflow-runtime.ts`
+- `workflows/graph-native-default.workflow.json`
 
 ## External anchors
 
@@ -48,9 +48,12 @@ and failure-analysis literature.
 
 ## Benchmark artifacts
 
-Staged separation is a design claim grounded in the runner and autonomous
-sources. No retained regression suite independently establishes target mutation
-or gate progression; targeted model-quality ablation studies remain pending.
+Staged separation is a design claim grounded in the graph workflow runtime and
+the default workflow, which separate requirements, design critique, planning,
+independent alignment extraction, writing, critique, and gate verification
+into distinct nodes with fresh provider sessions. No retained measurement
+compares this separation with a single blended loop; targeted model-quality
+ablation studies remain pending.
 
 ## Counterarguments
 
@@ -64,7 +67,10 @@ or gate progression; targeted model-quality ablation studies remain pending.
 
 ## Review status
 
-Adopted as a scoped engineering heuristic.
+Provisional as a scoped engineering heuristic.
+No retained measurement supports it yet; the
+[claims ledger](../claims-ledger.md#metrics-for-provisional-claims) names the
+metric that would test it.
 
 ## Source note
 

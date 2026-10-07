@@ -1,7 +1,7 @@
 ---
 status: stable
 owner: science
-last_reviewed: 2026-04-12
+last_reviewed: 2026-10-07
 source_of_truth: editorial
 evidence_links: ../../reference/claims/claims-ledger.md
 ---
@@ -18,7 +18,9 @@ RAE takes five linked positions:
 - planning, production, and verification should be separated when the cost of
   error is material
 - context should be selected for signal density rather than accumulated by
-  default
+  default (a design position: the engine's default `--context-mode legacy`
+  still inlines full predecessor envelopes, and `--context-mode bounded` is the
+  opt-in selected mode)
 - coordination should be topology-aware rather than treated as free parallelism
 - benchmark outputs require provenance, calibration, and validity doctrine
 - documentation is part of the reliability surface because it changes operator
@@ -28,9 +30,9 @@ RAE takes five linked positions:
 
 - `engineering_heuristic`
   Information density, staged separation, cognitive tiering, layered failure
-  analysis
+  analysis, coordination topology cost comparison
 - `formal`
-  Coordination topology and contract-versus-gate distinctions
+  Edge counts per topology and contract-versus-gate distinctions
 - `governance_rule`
   Validity doctrine and negative-result publication
 
