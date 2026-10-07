@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="theme-color" content="#0e171c">
+    <meta name="theme-color" content="#0b1115">
     <meta name="color-scheme" content="light dark">
     <meta
       name="description"
@@ -97,12 +97,9 @@
       <div class="body" id="main" tabindex="-1">
         <nav id="run-index" class="index" aria-labelledby="runs-heading">
           <header class="index__head">
-            <div>
-              <p class="eyebrow">Run catalogue</p>
-              <h1 id="runs-heading">Runs</h1>
-            </div>
+            <h1 id="runs-heading">Runs</h1>
             <button id="cycle-filter" class="filter-chip" type="button" aria-label="Filter runs: all">
-              <span class="filter-chip__k" aria-hidden="true">show</span>
+              <span class="filter-chip__k" aria-hidden="true">state</span>
               <span id="filter-label">All</span>
             </button>
           </header>
@@ -124,8 +121,7 @@
           </div>
 
           <p class="index__foot">
-            Allowlisted repositories only.
-            <span class="session-policy">This console cannot commit, push or publish.</span>
+            Allowlisted repositories only. No commit, push or publish controls.
           </p>
         </nav>
 
@@ -145,129 +141,40 @@
           </section>
 
           <div id="run-content" hidden>
-            <header class="ident">
-              <p class="eyebrow ident__eyebrow">Task, as written</p>
-              <h1 class="task human" id="run-task" tabindex="-1"></h1>
-              <button id="task-toggle" class="task-toggle" type="button" aria-expanded="false" aria-controls="run-task" hidden>Show full task</button>
-              <p class="ident__line">
-                <span class="ident__k">run</span><span id="run-title"></span>
-                <span class="ident__k">branch</span><span id="run-branch"></span>
+            <header class="run-head">
+              <p class="run-head__id">
+                <span id="run-terminal" class="status-value"></span>
+                <span id="run-title" class="mono"></span>
               </p>
-              <p class="ident__line ident__line--workflow"><span class="ident__k">workflow</span><span id="run-workflow"></span></p>
+              <h1 class="task" id="run-task" tabindex="-1"></h1>
+              <button id="task-toggle" class="task-toggle" type="button" aria-expanded="false" aria-controls="run-task" hidden>Show full task</button>
+              <dl class="run-meta">
+                <div><dt>Branch</dt><dd id="run-branch"></dd></div>
+                <div><dt>Workflow</dt><dd id="run-workflow"></dd></div>
+                <div><dt>Worktree</dt><dd id="run-workspace"></dd></div>
+                <div><dt>Started</dt><dd id="context-started">Unavailable</dd></div>
+                <div><dt>Updated</dt><dd id="updated-value">Unavailable</dd></div>
+              </dl>
               <button class="btn review-jump" type="button" id="review-jump" hidden>
-                <span class="sq" aria-hidden="true"></span> Your decision is required
+                <span class="sq" aria-hidden="true"></span> Checkpoint open: your decision is required
               </button>
             </header>
 
-            <ol id="task-steps" class="trace" aria-label="Run journey"></ol>
+            <dl class="metrics" aria-label="Run evidence and resources">
+              <div><dt>Gates passed</dt><dd id="gate-count">0 / 0</dd></div>
+              <div><dt>Artifacts</dt><dd id="artifact-count">0</dd></div>
+              <div><dt>Agent calls</dt><dd id="agent-count">0</dd></div>
+              <div><dt>Input tokens</dt><dd id="input-count">—</dd></div>
+              <div><dt>Output tokens</dt><dd id="output-count">Unavailable</dd></div>
+              <div><dt>Cost (est.)</dt><dd id="cost-count">Unavailable</dd></div>
+            </dl>
 
-            <div class="task-sheet">
-              <section class="panel record" aria-labelledby="task-evidence-label">
-                <header class="panel__head">
-                  <h2 class="panel__label" id="task-evidence-label">Evidence</h2>
-                  <span class="panel__voice">Machine record</span>
-                </header>
-                <div id="task-evidence" class="record__body"></div>
-                <section class="recent" aria-labelledby="recent-heading">
-                  <h3 id="recent-heading" class="eyebrow">Recent events</h3>
-                  <div id="recent-events"></div>
-                </section>
-              </section>
-
-              <section class="panel decision" aria-labelledby="checkpoint-heading">
-                <header class="panel__head">
-                  <h2 class="panel__label" id="checkpoint-heading">Decision</h2>
-                  <span class="panel__voice">Human record</span>
-                </header>
-                <div id="completion-handoff" class="handoff" hidden></div>
-                <div id="decision-panel" class="decision__body">
-                  <div id="checkpoint-empty" class="checkpoint-empty" tabindex="-1">
-                    <h3>No pending checkpoint</h3>
-                    <p id="checkpoint-empty-copy">Select a run to inspect its decision state.</p>
-                    <dl id="saved-decision" class="saved-decision" hidden></dl>
-                  </div>
-                  <div id="checkpoint-content" hidden>
-                    <h3 id="checkpoint-title" class="decision__title"></h3>
-                    <form class="decision-form" id="decision-form">
-                      <div class="signed">
-                        <label class="signed__label" for="checkpoint-rationale">Rationale <span>required</span></label>
-                        <textarea id="checkpoint-rationale" class="human" name="rationale" rows="5" maxlength="4096" aria-describedby="rationale-help rationale-count" placeholder="What did you check, and why does it justify this decision?" required></textarea>
-                        <div class="rationale-notes">
-                          <p class="field-help" id="rationale-help">Saved verbatim with your decision.</p>
-                          <output id="rationale-count" for="checkpoint-rationale">0 / 4096</output>
-                        </div>
-                      </div>
-                      <p id="decision-error" class="field-error" role="alert" hidden></p>
-                      <fieldset class="decision-actions">
-                        <legend class="visually-hidden">Decision</legend>
-                        <button class="btn btn--primary btn--lg decision-action decision-action--approve" type="button" data-decision="approve">Approve checkpoint</button>
-                        <button class="btn btn--danger decision-action" type="button" data-decision="reject">Reject</button>
-                        <button class="btn decision-action" type="button" data-decision="escalate">Escalate</button>
-                      </fieldset>
-                    </form>
-                    <p class="note decision__terminal">Reject and escalate are terminal. The console cannot resume the run afterwards.</p>
-                    <details class="checkpoint-metadata">
-                      <summary>Checkpoint message and identity</summary>
-                      <p id="checkpoint-message"></p>
-                      <p id="checkpoint-meta" class="checkpoint-meta"></p>
-                    </details>
-                  </div>
-                  <div class="resume-action">
-                    <button id="resume-button" class="btn btn--wide" type="button" disabled>Resume run</button>
-                    <p id="resume-help" class="note">Available after approval, once the runtime has exited.</p>
-                  </div>
-                </div>
-              </section>
-            </div>
-
-            <footer class="task-footer">
-              <span id="task-footer-status"></span>
-              <span class="task-footer__colophon">Recorded locally · no publish controls</span>
-            </footer>
-
-            <details class="appendix" id="run-details">
-              <summary>
-                <span class="appendix__letter" aria-hidden="true">A</span>
-                <span class="appendix__title">Run details</span>
-                <span class="appendix__hint">Gates, resources, event log and run controls</span>
-              </summary>
-              <div class="appendix__body">
-                <div class="appendix__controls">
-                  <nav class="run-controls" aria-label="Run controls">
-                    <button id="stop-button" class="btn" type="button" disabled>Stop at next boundary</button>
-                    <button id="interrupt-button" class="btn btn--danger" type="button" disabled>Interrupt…</button>
-                    <button id="cleanup-button" class="btn btn--danger" type="button" disabled>Clean up worktree…</button>
-                  </nav>
-                  <section class="next-step" aria-labelledby="next-step-heading">
-                    <h3 id="next-step-heading" class="eyebrow">Operator boundary</h3>
-                    <p id="next-step-copy">This console exposes no commit, push, publish, or deploy action.</p>
-                  </section>
-                </div>
-
-                <div class="facts">
-                  <dl class="run-facts">
-                    <div><dt>Workspace</dt><dd id="run-workspace"></dd></div>
-                    <div><dt>Status</dt><dd id="run-terminal" class="status-value"></dd></div>
-                  </dl>
-                  <dl class="run-context">
-                    <div><dt>Run ID</dt><dd id="context-run">Not selected</dd></div>
-                    <div><dt>Worktree</dt><dd id="context-workspace">Not selected</dd></div>
-                    <div><dt>Started</dt><dd id="context-started">Unavailable</dd></div>
-                    <div><dt>Mode</dt><dd>Local session</dd></div>
-                  </dl>
-                </div>
-
-                <section class="figures" aria-label="Run evidence summary">
-                  <article><strong id="gate-count">0 / 0</strong><span>gates passed</span></article>
-                  <article><strong id="artifact-count">0</strong><span>projected artifacts</span></article>
-                  <article><strong id="agent-count">0</strong><span>agent calls</span></article>
-                  <article><strong id="input-count">—</strong><span>input tokens</span></article>
-                </section>
-
-                <section class="ledger" aria-labelledby="progress-heading">
-                  <header class="section-head">
-                    <h3 id="progress-heading">Phase ledger</h3>
-                    <p>Each phase with its artifact, gate and claim binding.</p>
+            <div class="run-grid">
+              <div class="run-main">
+                <section class="panel" aria-labelledby="progress-heading">
+                  <header class="panel__head">
+                    <h2 class="panel__label" id="progress-heading">Phases and gates</h2>
+                    <span class="panel__meta">artifact · gate · claim binding</span>
                   </header>
                   <div class="table-wrap">
                     <table class="docket">
@@ -285,16 +192,22 @@
                   </div>
                 </section>
 
-                <section class="event-log" aria-labelledby="events-heading">
-                  <header class="section-head section-head--split">
-                    <div>
-                      <h3 id="events-heading">Event log</h3>
-                      <p><span id="event-count">Loading…</span> <span id="stream-status"></span></p>
-                    </div>
-                    <div class="section-head__actions">
-                      <button type="button" class="btn btn--quiet" id="expand-all">Expand all</button>
-                      <button type="button" class="btn btn--quiet" id="collapse-all">Collapse all</button>
-                    </div>
+                <section class="panel record" aria-labelledby="task-evidence-label">
+                  <header class="panel__head">
+                    <h2 class="panel__label" id="task-evidence-label">Evidence</h2>
+                    <span class="panel__meta">.pipeline/ run record</span>
+                  </header>
+                  <div id="task-evidence" class="record__body"></div>
+                </section>
+
+                <section class="panel event-log" aria-labelledby="events-heading">
+                  <header class="panel__head">
+                    <h2 id="events-heading" class="panel__label">Event stream</h2>
+                    <span class="panel__meta"><span id="event-count">Loading…</span> <span id="stream-status"></span></span>
+                    <span class="panel__actions">
+                      <button type="button" class="btn btn--quiet btn--sm" id="expand-all">Expand all</button>
+                      <button type="button" class="btn btn--quiet btn--sm" id="collapse-all">Collapse all</button>
+                    </span>
                   </header>
                   <div class="table-wrap">
                     <table class="evidence-table">
@@ -310,27 +223,87 @@
                       <tbody id="event-list"></tbody>
                     </table>
                   </div>
-                  <dl class="resource-strip" aria-label="Resource summary">
-                    <div><dt>Output tokens</dt><dd id="output-count">Unavailable</dd></div>
-                    <div><dt>Estimated cost</dt><dd id="cost-count">Unavailable</dd></div>
-                    <div><dt>Last update</dt><dd id="updated-value">Unavailable</dd></div>
-                    <div><dt>Run ID</dt><dd id="run-id-value">Unavailable</dd></div>
-                  </dl>
                 </section>
               </div>
-            </details>
+
+              <aside class="run-rail" aria-label="Operator controls">
+                <section class="panel lifecycle" aria-labelledby="lifecycle-heading">
+                  <header class="panel__head">
+                    <h2 class="panel__label" id="lifecycle-heading">Lifecycle</h2>
+                  </header>
+                  <ol id="task-steps" class="trace" aria-label="Run journey"></ol>
+                </section>
+
+                <section class="panel decision" aria-labelledby="checkpoint-heading">
+                  <header class="panel__head">
+                    <h2 class="panel__label" id="checkpoint-heading">Decision</h2>
+                  </header>
+                  <div id="completion-handoff" class="handoff" hidden></div>
+                  <div id="decision-panel" class="decision__body">
+                    <div id="checkpoint-empty" class="checkpoint-empty" tabindex="-1">
+                      <h3>No pending checkpoint</h3>
+                      <p id="checkpoint-empty-copy">Select a run to inspect its decision state.</p>
+                      <dl id="saved-decision" class="saved-decision" hidden></dl>
+                    </div>
+                    <div id="checkpoint-content" hidden>
+                      <h3 id="checkpoint-title" class="decision__title"></h3>
+                      <form class="decision-form" id="decision-form">
+                        <div class="signed">
+                          <label class="signed__label" for="checkpoint-rationale">Rationale <span>required</span></label>
+                          <textarea id="checkpoint-rationale" class="human" name="rationale" rows="5" maxlength="4096" aria-describedby="rationale-help rationale-count" placeholder="What did you check, and why does it justify this decision?" required></textarea>
+                          <div class="rationale-notes">
+                            <p class="field-help" id="rationale-help">Saved verbatim with your decision.</p>
+                            <output id="rationale-count" for="checkpoint-rationale">0 / 4096</output>
+                          </div>
+                        </div>
+                        <p id="decision-error" class="field-error" role="alert" hidden></p>
+                        <fieldset class="decision-actions">
+                          <legend class="visually-hidden">Decision</legend>
+                          <button class="btn btn--primary decision-action decision-action--approve" type="button" data-decision="approve">Approve checkpoint</button>
+                          <button class="btn btn--danger decision-action" type="button" data-decision="reject">Reject</button>
+                          <button class="btn decision-action" type="button" data-decision="escalate">Escalate</button>
+                        </fieldset>
+                      </form>
+                      <p class="note decision__terminal">Reject and escalate are terminal. The console cannot resume the run afterwards.</p>
+                      <details class="checkpoint-metadata">
+                        <summary>Checkpoint message and identity</summary>
+                        <p id="checkpoint-message"></p>
+                        <p id="checkpoint-meta" class="checkpoint-meta"></p>
+                      </details>
+                    </div>
+                    <div class="resume-action">
+                      <button id="resume-button" class="btn btn--wide" type="button" disabled>Resume run</button>
+                      <p id="resume-help" class="note">Available after approval, once the runtime has exited.</p>
+                    </div>
+                  </div>
+                </section>
+
+                <section class="panel controls" aria-labelledby="controls-heading">
+                  <header class="panel__head">
+                    <h2 class="panel__label" id="controls-heading">Run controls</h2>
+                  </header>
+                  <div class="panel__body">
+                    <nav class="run-controls" aria-label="Run controls">
+                      <button id="stop-button" class="btn" type="button" disabled>Stop at next boundary</button>
+                      <button id="interrupt-button" class="btn btn--danger" type="button" disabled>Interrupt…</button>
+                      <button id="cleanup-button" class="btn btn--danger" type="button" disabled>Clean up worktree…</button>
+                    </nav>
+                    <p id="next-step-copy" class="note">This console exposes no commit, push, publish, or deploy action.</p>
+                  </div>
+                </section>
+              </aside>
+            </div>
 
             <details class="appendix" id="workflow-section">
               <summary>
-                <span class="appendix__letter" aria-hidden="true">B</span>
                 <span class="appendix__title">Workflow editor</span>
-                <span class="appendix__hint">Revision registry, systems map and activation</span>
+                <span class="appendix__hint">Revision registry · graph · static analysis · activation</span>
               </summary>
               <section class="workflow-editor appendix__body" aria-labelledby="workflow-heading">
                 <header class="section-head section-head--split">
                   <div>
-                    <p class="eyebrow">Revision-controlled</p>
-                    <h3 id="workflow-heading">Workflow systems map</h3>
+                    <h3 id="workflow-heading">Workflow graph</h3>
+                    <p>Revision-controlled. Drafts are validated, then activated by exact digest.</p>
                   </div>
                   <button id="workflow-refresh" class="btn btn--quiet" type="button">Refresh registry</button>
                 </header>

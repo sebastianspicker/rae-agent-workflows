@@ -30,6 +30,7 @@
   padding: var(--s2) var(--s2) var(--s2) var(--s3);
   border-bottom: var(--hair);
   color: var(--ink-2);
+  font-family: var(--mono);
   font-size: var(--t-xs);
   text-align: left;
   overflow-wrap: anywhere;
@@ -37,12 +38,12 @@
 }
 
 .workflow-list button:hover {
-  background: var(--surface);
+  background: var(--sunk);
   color: var(--ink);
 }
 
 .workflow-list button[aria-selected="true"] {
-  background: var(--surface);
+  background: var(--trace-wash);
   box-shadow: inset 2px 0 0 var(--trace);
   color: var(--ink);
   font-weight: 500;
@@ -66,7 +67,11 @@
   padding: var(--s2) 0;
   border-bottom: 2px solid transparent;
   color: var(--mute);
+  font-family: var(--mono);
+  font-size: var(--t-xs);
   font-weight: 500;
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
 }
 
 .workflow-views [role="tab"]:hover {
@@ -74,7 +79,7 @@
 }
 
 .workflow-views [role="tab"][aria-selected="true"] {
-  border-bottom-color: var(--ink);
+  border-bottom-color: var(--trace);
   color: var(--ink);
 }
 
@@ -89,6 +94,7 @@
 .graph-scroll {
   overflow: auto;
   border: var(--hair);
+  border-radius: var(--radius);
   background-color: var(--sunk);
   background-image: radial-gradient(circle, var(--line) 1px, transparent 1.2px);
   background-size: 1.25rem 1.25rem;
@@ -257,7 +263,7 @@
   display: grid;
   gap: var(--s3);
   padding-top: var(--s3);
-  border-top: 1px solid var(--ink);
+  border-top: var(--hair);
 }
 
 .workflow-block__title {
@@ -301,6 +307,7 @@
 .workflow-structure caption {
   padding-bottom: var(--s2);
   color: var(--mute);
+  font-family: var(--mono);
   font-size: var(--t-2xs);
   letter-spacing: var(--track-label);
   text-align: left;
@@ -308,17 +315,21 @@
 }
 
 .workflow-structure th {
-  padding: var(--s1) var(--s2) var(--s1) 0;
-  border-top: 1px solid var(--ink);
+  padding: var(--s1) var(--s2);
   border-bottom: var(--hair);
+  background: var(--sunk);
   color: var(--mute);
+  font-family: var(--mono);
+  font-size: var(--t-2xs);
   font-weight: 500;
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
   text-align: left;
   white-space: nowrap;
 }
 
 .workflow-structure td {
-  padding: var(--s1) var(--s2) var(--s1) 0;
+  padding: var(--s1) var(--s2);
   border-bottom: var(--hair);
   vertical-align: top;
   overflow-wrap: anywhere;

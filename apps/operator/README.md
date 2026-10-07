@@ -8,19 +8,24 @@ is defined by the stylesheets under `static/css/`.
 
 ## Task and evidence review
 
-The selected task places recorded evidence beside the human decision. Text a
-person wrote (the task, rationale and saved decisions) is set in a serif, and
-everything the machine recorded is set in monospace. A stepped trace follows
-task, checkpoint, execution and hand-off from recorded run state only; it does
-not estimate progress or replace the workflow graph. Approval saves its
+A selected run opens with its status, run ID, task and provenance (branch,
+workflow and revision, worktree, start and update times), followed by a metrics
+strip: gates passed, projected artifacts, agent calls, input and output tokens
+and estimated cost. Below it, a telemetry column holds the phase and gate
+ledger, the evidence references with their recorded gate states, and the live
+event stream. An operator column beside it holds the lifecycle (task,
+checkpoint, execution and hand-off, drawn from recorded run state only; it does
+not estimate progress), the checkpoint decision and the run controls.
+Interface text uses the system sans; recorded values such as IDs, references,
+digests, counts and timestamps use IBM Plex Mono. Approval saves its
 outcome and rationale. Resume is a separate action enabled by the server's
 current run controls. Draft rationale survives background updates to the same
 checkpoint. Start validates the task's 32 KiB UTF-8 limit before submission.
 
 Completed runs retain references for local report and worktree-diff inspection.
-Completion does not publish or release changes. Full gate, resource, event and
-recovery controls remain under **Run details**; the complete revision-controlled
-workflow editor remains under **Workflow editor**. **All runs** exposes the
+Completion does not publish or release changes. Stop, Interrupt and Clean up
+are under **Run controls**; the complete revision-controlled workflow editor
+remains under **Workflow editor**. **All runs** exposes the
 catalogue, search, state filters (All, Active, Needs decision, Completed,
 Blocked) and new-run form; Blocked means a failure, while human holds are under
 Needs decision. `Cmd+K` on macOS or `Ctrl+K` elsewhere opens run search and
@@ -40,11 +45,11 @@ screen until dismissed; notices expire.
 
 Without a stored choice the theme follows the operating system live; the theme
 control stores a chosen light or dark preference when browser storage is
-available. Narrow windows stack evidence before decisions. State is always given
+available. Narrow windows stack telemetry before the decision. State is always given
 in text as well as colour.
 
-The console self-hosts two SIL Open Font License typefaces, IBM Plex Mono and
-Newsreader, under `static/fonts/` with their licences. The server's content
+The console self-hosts IBM Plex Mono, licensed under the SIL Open Font License,
+under `static/fonts/` with its licence. The server's content
 security policy allows same-origin fonts only (`font-src 'self'`); no asset is
 loaded from another origin.
 

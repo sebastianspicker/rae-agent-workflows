@@ -1,35 +1,90 @@
-/* Selected run: the task as written, the stepped trace, evidence beside the decision. */
+/* Selected run: identity and metrics, then telemetry beside the operator rail. */
 
 /* ---------- Identity ---------- */
 
-.ident {
+.run-head {
   display: grid;
   gap: var(--s2);
-  max-width: 64rem;
+  padding-bottom: var(--s4);
 }
 
-.ident .task {
-  margin-top: var(--s1);
-  color: var(--ink);
-  font-size: clamp(var(--t-2xl), 3.2vw + 0.5rem, var(--t-4xl));
-  font-weight: 400;
-  line-height: 1.12;
-  letter-spacing: -0.015em;
+.run-head__id {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+  color: var(--ink-2);
+  font-family: var(--mono);
+  font-size: var(--t-xs);
   overflow-wrap: anywhere;
-  text-wrap: balance;
+}
+
+/* Status badge: text plus a square, never colour alone. */
+.status-value {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: 0.125rem var(--s2);
+  border: 1px solid currentColor;
+  border-radius: var(--radius);
+  color: var(--mute);
+  font-family: var(--mono);
+  font-size: var(--t-2xs);
+  font-weight: 600;
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+}
+
+.status-value::before {
+  width: 0.4375rem;
+  height: 0.4375rem;
+  border: 1.5px solid currentColor;
+  content: "";
+}
+
+.status-value[data-tone="pass"] {
+  color: var(--proof);
+}
+
+.status-value[data-tone="pass"]::before {
+  background: currentColor;
+}
+
+.status-value[data-tone="active"] {
+  color: var(--trace);
+}
+
+.status-value[data-tone="error"] {
+  color: var(--fault);
+}
+
+.run-head .task {
+  max-width: 60rem;
+  color: var(--ink);
+  font-size: var(--t-xl);
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
   /* Long tasks are capped; the disclosure below shows the full text as written. */
   display: -webkit-box;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 4;
-  line-clamp: 4;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
   overflow: hidden;
 }
 
-.ident .task[data-expanded="true"] {
+.run-head .task[data-expanded="true"] {
   display: block;
   -webkit-line-clamp: unset;
   line-clamp: none;
   overflow: visible;
+}
+
+/* A programmatic focus target after selection, not a control: no ring. */
+.run-head .task:focus,
+.run-head .task:focus-visible {
+  outline: none;
 }
 
 .task-toggle {
@@ -44,40 +99,41 @@
   color: var(--ink);
 }
 
-/* A programmatic focus target after selection, not a control: no ring. */
-.ident .task:focus,
-.ident .task:focus-visible {
-  outline: none;
-}
-
-.ident__line {
+/* Key/value provenance line. */
+.run-meta {
   display: flex;
   flex-wrap: wrap;
+  gap: var(--s1) var(--s5);
+  margin-top: var(--s1);
+}
+
+.run-meta > div {
+  display: flex;
   align-items: baseline;
-  gap: var(--s1) var(--s2);
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.run-meta dt,
+.metrics dt {
+  color: var(--mute);
+  font-family: var(--mono);
+  font-size: var(--t-2xs);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.run-meta dd {
+  min-width: 0;
   color: var(--ink-2);
   font-size: var(--t-xs);
   overflow-wrap: anywhere;
 }
 
-.ident__line:first-of-type {
-  margin-top: var(--s2);
-}
-
-.ident__k {
-  color: var(--mute);
-  font-size: var(--t-2xs);
-  letter-spacing: var(--track-label);
-  text-transform: uppercase;
-}
-
-.ident__k:not(:first-child) {
-  margin-left: var(--s3);
-}
-
 .review-jump {
   justify-self: start;
-  margin-top: var(--s3);
+  margin-top: var(--s2);
   border-color: var(--hold);
   background: var(--hold-wash);
   color: var(--hold);
@@ -87,105 +143,156 @@
   border-color: var(--hold);
 }
 
-/* ---------- The stepped trace (the mark, drawn from run state) ---------- */
+/* ---------- Metrics strip ---------- */
+
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  border: var(--hair);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.metrics > div {
+  display: grid;
+  gap: var(--s1);
+  min-width: 0;
+  padding: var(--s3) var(--s4);
+}
+
+.metrics > div + div {
+  border-left: var(--hair);
+}
+
+.metrics dd {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: var(--t-lg);
+  font-weight: 500;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- Panels ---------- */
+
+.run-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(19rem, 24rem);
+  align-items: start;
+  gap: var(--s4);
+  margin-top: var(--s4);
+}
+
+.run-main,
+.run-rail {
+  display: grid;
+  gap: var(--s4);
+  min-width: 0;
+}
+
+.panel {
+  min-width: 0;
+  border: var(--hair);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.panel__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s1) var(--s3);
+  min-height: 2.5rem;
+  padding: var(--s2) var(--s4);
+  border-bottom: var(--hair);
+}
+
+.panel__label {
+  font-family: var(--mono);
+  font-size: var(--t-2xs);
+  font-weight: 600;
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+}
+
+.panel__meta {
+  color: var(--mute);
+  font-family: var(--mono);
+  font-size: var(--t-2xs);
+}
+
+.panel__actions {
+  display: flex;
+  gap: var(--s1);
+  margin-left: auto;
+}
+
+.panel__body {
+  display: grid;
+  gap: var(--s3);
+  padding: var(--s4);
+}
+
+/* ---------- Lifecycle: task, checkpoint, execution, hand-off ---------- */
 
 .trace {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  margin: var(--s6) 0 var(--s7);
+  padding: var(--s2) var(--s4);
 }
 
 .trace li {
-  --level: 0;
-  --seg: var(--line);
-  --rise: var(--line);
   position: relative;
-  min-width: 0;
-  padding: calc(var(--level) * var(--step-drop) + var(--step-mark) + var(--s3)) var(--s3) 0 0;
+  display: grid;
+  grid-template-columns: 0.75rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--s3);
+  min-height: 2rem;
 }
 
-.trace li:nth-child(2) {
-  --level: 1;
-}
-
-.trace li:nth-child(3) {
-  --level: 2;
-}
-
-.trace li:nth-child(4) {
-  --level: 3;
-}
-
-/* Horizontal run of this step. */
-.trace li::before {
-  content: "";
+/* Connector between consecutive marks. */
+.trace li + li::before {
   position: absolute;
-  top: calc(var(--level) * var(--step-drop) + var(--step-mark) / 2 - 1px);
-  left: 0;
-  right: 0;
-  height: 2px;
-  background: var(--seg);
-}
-
-/* Riser from the previous level. */
-.trace li + li::after {
+  top: -0.625rem;
+  left: calc(0.375rem - 0.5px);
+  width: 1px;
+  height: 1.25rem;
+  background: var(--line-strong);
   content: "";
-  position: absolute;
-  top: calc((var(--level) - 1) * var(--step-drop) + var(--step-mark) / 2 - 1px);
-  left: 0;
-  width: 2px;
-  height: calc(var(--step-drop) + 2px);
-  background: var(--rise);
 }
 
-.trace li:last-child::before {
-  right: auto;
-  width: var(--step-mark);
+.trace li[data-state="done"] + li::before,
+.trace li[data-state="skipped"] + li::before {
+  background: var(--trace);
 }
 
 .trace__mark {
-  position: absolute;
+  position: relative;
   z-index: 1;
-  top: calc(var(--level) * var(--step-drop));
-  left: 0;
-  width: var(--step-mark);
-  height: var(--step-mark);
+  width: 0.75rem;
+  height: 0.75rem;
   border: 1.5px solid var(--line-strong);
-  background: var(--bg);
+  background: var(--surface);
 }
 
 .trace__label {
-  display: block;
   color: var(--ink-2);
   font-size: var(--t-sm);
-  font-weight: 500;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .trace__note {
-  display: block;
-  margin-top: 0.125rem;
   color: var(--mute);
+  font-family: var(--mono);
   font-size: var(--t-2xs);
-  letter-spacing: 0.02em;
-}
-
-.trace li[data-state="done"] {
-  --seg: var(--trace);
-  --rise: var(--trace);
+  text-align: right;
 }
 
 .trace li[data-state="done"] .trace__mark {
   border-color: var(--proof);
   background: var(--proof);
-}
-
-.trace li[data-state="current"],
-.trace li[data-state="hold"] {
-  --rise: var(--trace);
-  --seg: var(--line-strong);
 }
 
 .trace li[data-state="current"] .trace__mark {
@@ -198,26 +305,13 @@
 }
 
 /* Passed without a recorded entry: the path continues, the mark stays open. */
-.trace li[data-state="skipped"] {
-  --seg: var(--trace);
-  --rise: var(--trace);
-}
-
 .trace li[data-state="skipped"] .trace__mark {
   border-style: dashed;
-}
-
-.trace li[data-state="halted"] {
-  --rise: var(--trace);
 }
 
 .trace li[data-state="halted"] .trace__mark {
   border: 2px solid var(--fault);
   background: var(--fault-wash);
-}
-
-.trace li[data-state="halted"] .trace__note {
-  color: var(--fault);
 }
 
 .trace li[data-state="current"] .trace__label,
@@ -235,76 +329,26 @@
   color: var(--hold);
 }
 
-/* ---------- Two-column record ---------- */
-
-.task-sheet {
-  display: grid;
-  grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
-  align-items: start;
-  gap: var(--s7);
+.trace li[data-state="halted"] .trace__note {
+  color: var(--fault);
 }
 
-.panel__head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--s3);
-  padding-bottom: var(--s2);
-  border-bottom: 1px solid var(--ink);
-}
-
-.panel__label {
-  font-size: var(--t-2xs);
-  font-weight: 600;
-  letter-spacing: var(--track-label);
-  text-transform: uppercase;
-}
-
-.panel__voice {
-  color: var(--mute);
-  font-size: var(--t-2xs);
-  letter-spacing: 0.02em;
-}
-
-.record .panel__voice::before,
-.decision .panel__voice::before {
-  display: inline-block;
-  margin-right: var(--s2);
-  vertical-align: 0.05em;
-  content: "";
-}
-
-.record .panel__voice::before {
-  width: 0.5rem;
-  height: 0.5rem;
-  border: 1.5px solid currentColor;
-}
-
-.decision .panel__voice::before {
-  width: 0.75rem;
-  height: 2px;
-  vertical-align: 0.25em;
-  background: currentColor;
-}
-
-/* ---------- Evidence (machine record) ---------- */
+/* ---------- Evidence ---------- */
 
 .record__body {
   display: grid;
   gap: var(--s3);
-  padding-top: var(--s5);
+  padding: var(--s4);
 }
 
 .record__body > h3 {
-  font-size: var(--t-xl);
-  font-weight: 500;
-  letter-spacing: -0.01em;
+  font-size: var(--t-md);
+  font-weight: 600;
 }
 
 .record__body > p:not([class]) {
   max-width: 44rem;
   color: var(--ink-2);
-  font-size: var(--t-sm);
 }
 
 .record-status {
@@ -313,6 +357,7 @@
   justify-self: start;
   gap: var(--s2);
   color: var(--mute);
+  font-family: var(--mono);
   font-size: var(--t-2xs);
   font-weight: 600;
   letter-spacing: var(--track-label);
@@ -351,7 +396,6 @@
 
 .record-table {
   width: 100%;
-  margin-top: var(--s2);
   border-collapse: collapse;
   font-size: var(--t-xs);
 }
@@ -360,6 +404,7 @@
   padding: var(--s2) 0;
   border-bottom: var(--hair);
   color: var(--mute);
+  font-family: var(--mono);
   font-size: var(--t-2xs);
   font-weight: 500;
   letter-spacing: var(--track-label);
@@ -385,7 +430,6 @@
 .reference-row {
   display: flex;
   align-items: stretch;
-  margin-top: var(--s2);
   border: var(--hair);
   border-radius: var(--radius);
   background: var(--sunk);
@@ -422,13 +466,13 @@
 .checkpoint-record {
   display: grid;
   gap: var(--s2);
-  margin-top: var(--s4);
-  padding-top: var(--s4);
+  padding-top: var(--s3);
   border-top: var(--hair);
 }
 
 .checkpoint-record h4 {
   color: var(--mute);
+  font-family: var(--mono);
   font-size: var(--t-2xs);
   font-weight: 500;
   letter-spacing: var(--track-label);
@@ -437,55 +481,18 @@
 
 .checkpoint-record p {
   color: var(--ink-2);
+  font-family: var(--mono);
   font-size: var(--t-xs);
 }
 
-.recent {
-  margin-top: var(--s6);
-}
+/* ---------- Decision ---------- */
 
-.recent h3 {
-  padding-bottom: var(--s2);
-  border-bottom: var(--hair);
-}
-
-.recent-event {
-  display: grid;
-  grid-template-columns: 5.5rem minmax(0, 1fr) auto;
-  gap: var(--s3);
-  padding: var(--s2) 0;
-  border-bottom: var(--hair);
-  font-size: var(--t-xs);
-}
-
-.recent-event time,
-.recent-event span:last-child {
-  color: var(--mute);
-  font-variant-numeric: tabular-nums;
-}
-
-.recent-event span {
-  overflow-wrap: anywhere;
-}
-
-/* ---------- Decision (human record) ---------- */
-
-.decision {
-  padding: 0 var(--s5) var(--s5);
-  border: var(--hair);
-  border-top: 0;
-  background: var(--surface);
-}
-
-.decision .panel__head {
-  margin: 0 calc(-1 * var(--s5));
-  padding: var(--s3) var(--s5) var(--s2);
-  border-top: 2px solid var(--ink);
-  border-bottom-color: var(--line);
+.decision:has(#checkpoint-content:not([hidden])) {
+  border-color: var(--hold);
 }
 
 .decision:has(#checkpoint-content:not([hidden])) .panel__head {
-  border-top-color: var(--hold);
+  border-bottom-color: var(--hold);
   background: var(--hold-wash);
 }
 
@@ -494,14 +501,13 @@
 }
 
 .decision__body {
-  padding-top: var(--s5);
+  padding: var(--s4);
 }
 
 .decision__title {
-  margin-bottom: var(--s4);
-  font-size: var(--t-xl);
-  font-weight: 500;
-  letter-spacing: -0.01em;
+  margin-bottom: var(--s3);
+  font-size: var(--t-md);
+  font-weight: 600;
 }
 
 .checkpoint-empty:focus {
@@ -509,25 +515,28 @@
 }
 
 .checkpoint-empty h3 {
-  font-size: var(--t-lg);
-  font-weight: 500;
+  font-size: var(--t-sm);
+  font-weight: 600;
 }
 
 .checkpoint-empty p {
-  margin-top: var(--s2);
+  margin-top: var(--s1);
   color: var(--ink-2);
 }
 
 .saved-decision {
   display: grid;
   gap: var(--s3);
-  margin-top: var(--s4);
-  padding-left: var(--s4);
-  border-left: 3px solid var(--ink);
+  margin-top: var(--s3);
+  padding: var(--s3);
+  border: var(--hair);
+  border-radius: var(--radius);
+  background: var(--sunk);
 }
 
 .saved-decision dt {
   color: var(--mute);
+  font-family: var(--mono);
   font-size: var(--t-2xs);
   letter-spacing: var(--track-label);
   text-transform: uppercase;
@@ -535,17 +544,18 @@
 
 .saved-decision dd {
   margin-top: 0.125rem;
+  font-size: var(--t-xs);
   overflow-wrap: anywhere;
 }
 
+/* The rationale is prose a person wrote. */
 .saved-decision > div:last-child dd {
-  font-family: var(--serif);
-  font-size: var(--t-lg);
-  line-height: 1.4;
+  font-family: var(--sans);
+  font-size: var(--t-sm);
+  line-height: 1.5;
   white-space: pre-wrap;
 }
 
-/* Signed entry: the serif field behind a margin rule. */
 .signed {
   display: grid;
   gap: var(--s2);
@@ -556,11 +566,12 @@
   justify-content: space-between;
   color: var(--ink);
   font-size: var(--t-xs);
-  font-weight: 500;
+  font-weight: 600;
 }
 
 .signed__label span {
   color: var(--mute);
+  font-family: var(--mono);
   font-size: var(--t-2xs);
   font-weight: 400;
   letter-spacing: var(--track-label);
@@ -568,14 +579,8 @@
 }
 
 .signed textarea {
-  min-height: 8.5rem;
-  padding: var(--s3) var(--s4);
-  border-left: 3px solid var(--ink);
+  min-height: 7.5rem;
   background: var(--bg);
-}
-
-.signed textarea:focus {
-  border-left-color: var(--trace);
 }
 
 .rationale-notes {
@@ -589,7 +594,9 @@
 }
 
 .rationale-notes output {
+  flex: none;
   color: var(--mute);
+  font-family: var(--mono);
   font-size: var(--t-2xs);
   font-variant-numeric: tabular-nums;
 }
@@ -598,7 +605,7 @@
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: var(--s2);
-  margin: var(--s4) 0 0;
+  margin: var(--s3) 0 0;
   padding: 0;
   border: 0;
   min-width: 0;
@@ -606,6 +613,7 @@
 
 .decision-action--approve {
   grid-column: 1 / -1;
+  min-height: 2.5rem;
 }
 
 .decision__terminal {
@@ -613,7 +621,7 @@
 }
 
 .checkpoint-metadata {
-  margin-top: var(--s4);
+  margin-top: var(--s3);
   color: var(--mute);
   font-size: var(--t-xs);
 }
@@ -625,13 +633,14 @@
 
 .checkpoint-metadata p {
   margin-top: var(--s2);
+  font-family: var(--mono);
   overflow-wrap: anywhere;
 }
 
 .resume-action {
   display: grid;
   gap: var(--s2);
-  margin-top: var(--s5);
+  margin-top: var(--s4);
   padding-top: var(--s4);
   border-top: var(--hair);
 }
@@ -651,13 +660,13 @@
 /* ---------- Completion hand-off ---------- */
 
 .handoff {
-  padding-top: var(--s5);
+  padding: var(--s4);
 }
 
 .handoff-list {
   display: grid;
-  gap: var(--s5);
-  margin-bottom: var(--s5);
+  gap: var(--s4);
+  margin-bottom: var(--s4);
   counter-reset: handoff;
 }
 
@@ -669,7 +678,7 @@
 
 .handoff-list li::before {
   position: absolute;
-  top: 0.1rem;
+  top: 0.05rem;
   left: 0;
   display: grid;
   place-items: center;
@@ -677,14 +686,15 @@
   height: 1.25rem;
   border: 1.5px solid var(--proof);
   color: var(--proof);
+  font-family: var(--mono);
   font-size: var(--t-2xs);
   font-weight: 600;
   content: counter(handoff);
 }
 
 .handoff-list h3 {
-  font-size: var(--t-md);
-  font-weight: 500;
+  font-size: var(--t-sm);
+  font-weight: 600;
 }
 
 .handoff-list p {
@@ -693,66 +703,67 @@
   font-size: var(--t-xs);
 }
 
-/* ---------- Footer ---------- */
-
-.task-footer {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: space-between;
-  gap: var(--s2) var(--s4);
-  margin-top: var(--s7);
-  padding: var(--s3) 0;
-  border-top: 1px solid var(--ink);
-  color: var(--mute);
-  font-size: var(--t-xs);
+.handoff-list .reference-row {
+  margin-top: var(--s2);
 }
 
-#task-footer-status {
-  color: var(--ink-2);
+/* ---------- Run controls ---------- */
+
+.run-controls {
+  display: grid;
+  gap: var(--s2);
 }
 
-/* ---------- Wide windows: keep the decision in view while reading evidence ---------- */
+/* ---------- Layout breakpoints ---------- */
 
-/* The decision jump stays visible at every width; wide and narrow queries do not overlap. */
+/* Keep the decision in view while reading telemetry. */
 @media (min-width: 64rem) and (min-height: 46rem) {
-  .decision {
+  .run-rail {
     position: sticky;
-    top: calc(var(--topbar-h) + var(--s5));
+    top: calc(var(--topbar-h) + var(--s4));
+  }
+}
+
+@media (max-width: 80rem) {
+  .metrics {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .metrics > div:nth-child(4) {
+    border-left: 0;
+  }
+
+  .metrics > div:nth-child(n + 4) {
+    border-top: var(--hair);
   }
 }
 
 @media (max-width: 63.99rem) {
-  .task-sheet {
+  .run-grid {
     grid-template-columns: minmax(0, 1fr);
-    gap: var(--s7);
   }
 }
 
 @media (max-width: 47.5rem) {
-  .trace {
-    margin: var(--s5) 0 var(--s6);
+  .run-head .task {
+    font-size: var(--t-lg);
   }
 
-  .trace li {
-    padding-right: var(--s2);
+  .metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .trace__label {
-    font-size: var(--t-xs);
+  .metrics > div:nth-child(n) {
+    border-left: 0;
+    border-top: 0;
   }
 
-  /* Phones keep only the notes that need attention. */
-  .trace li:not([data-state="hold"], [data-state="halted"], [data-state="current"]) .trace__note {
-    display: none;
+  .metrics > div:nth-child(even) {
+    border-left: var(--hair);
   }
 
-  .decision {
-    padding: 0 var(--s4) var(--s4);
-  }
-
-  .decision .panel__head {
-    margin: 0 calc(-1 * var(--s4));
-    padding-inline: var(--s4);
+  .metrics > div:nth-child(n + 3) {
+    border-top: var(--hair);
   }
 
   .reference-row {

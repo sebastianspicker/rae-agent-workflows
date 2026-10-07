@@ -5,7 +5,6 @@
   max-height: calc(100dvh - 2rem);
   padding: 0;
   border: 1px solid var(--line-strong);
-  border-top: 2px solid var(--ink);
   border-radius: var(--radius);
   background: var(--surface);
   color: var(--ink);
@@ -22,7 +21,7 @@
 
 .app-dialog--confirm {
   width: min(30rem, calc(100vw - 2rem));
-  border-top-color: var(--fault);
+  border-color: var(--fault);
 }
 
 .app-dialog__head {
@@ -36,8 +35,8 @@
 
 .app-dialog__head h2 {
   margin-top: var(--s1);
-  font-size: var(--t-xl);
-  font-weight: 500;
+  font-size: var(--t-lg);
+  font-weight: 600;
 }
 
 .app-dialog--confirm .eyebrow {
@@ -84,7 +83,7 @@
   border-left: 2px solid var(--line-strong);
   background: var(--sunk);
   color: var(--ink);
-  font-size: var(--t-md);
+  font-size: var(--t-sm);
   line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;

@@ -1,6 +1,6 @@
 /** Presents the task journey using only sanitized, recorded run evidence. */
-import type { OperatorEvent, OperatorRun } from "./types.js";
-import { formatTime, humanize, tone } from "./format.js";
+import type { OperatorRun } from "./types.js";
+import { humanize, tone } from "./format.js";
 
 function element<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -42,7 +42,10 @@ function evidenceRows(run: OperatorRun): Array<[string, string]> {
   if (run.workflow) {
     return (run.gates ?? [])
       .filter((gate) => gate.artifact_ref)
-      .map((gate) => [gate.artifact_ref ?? "Not recorded", "Reference recorded"]);
+      .map((gate) => [
+        gate.artifact_ref ?? "Not recorded",
+        gate.status ? `Gate ${humanize(gate.status).toLowerCase()}` : "Gate not recorded",
+      ]);
   }
   return (run.gates ?? []).map((gate) => [
     gate.phase ?? gate.gate_id ?? "Unnamed gate",
@@ -56,7 +59,7 @@ function evidenceTable(run: OperatorRun): HTMLElement {
   const table = element("table", "", "record-table");
   const head = element("thead");
   const header = element("tr");
-  for (const title of ["Evidence", "State"]) {
+  for (const title of ["Reference", "Recorded state"]) {
     const cell = element("th", title);
     cell.scope = "col";
     header.append(cell);
@@ -195,11 +198,12 @@ function renderEvidence(run: OperatorRun): void {
     status,
     element("p", copy),
     evidenceTable(run),
-    element("p", "Recorded evidence is not a pass verdict.", "note"),
-  );
-  target.append(
-    reference(`.pipeline/runs/${run.id}/`, "Copy reference"),
-    element("p", "References only. Open artifact contents locally.", "note"),
+    reference(`.pipeline/runs/${run.id}/`, "Copy"),
+    element(
+      "p",
+      "References only; open artifact contents locally. A recorded gate state is not a pass verdict.",
+      "note",
+    ),
   );
   if (!pending) target.append(checkpointRecord(run));
   const label = document.getElementById("task-evidence-label");
@@ -266,7 +270,6 @@ export function renderTaskView(run: OperatorRun): void {
   const identity = [
     text(workflow.workflow_id, "Workflow not recorded"),
     workflow.revision === undefined ? null : `revision ${text(workflow.revision)}`,
-    humanize(run.workspace_mode ?? "workspace unavailable"),
   ]
     .filter(Boolean)
     .join(" · ");
@@ -274,9 +277,6 @@ export function renderTaskView(run: OperatorRun): void {
   if (workflowLine) workflowLine.textContent = identity;
   const heading = document.getElementById("checkpoint-heading");
   if (heading) heading.textContent = taskCompleted(run) ? "Continue locally" : "Decision";
-  const footer = document.getElementById("task-footer-status");
-  if (footer)
-    footer.textContent = `${run.project_id ?? "Local project"} / ${taskCompleted(run) ? "human release review remains" : humanize(run.status ?? "unknown")}`;
 }
 
 /** Displays the actual recorded outcome and rationale after the decision form closes. */
@@ -307,27 +307,4 @@ export function renderSavedDecision(run: OperatorRun | null): void {
       checkpoint.status === "approved"
         ? "Approval is recorded. Resume remains a separate action."
         : "This checkpoint decision is terminal; the operator cannot resume it.";
-}
-export function renderRecentEvents(events: OperatorEvent[], error: string | null): void {
-  const target = document.getElementById("recent-events");
-  if (!target) return;
-  if (error || !events.length) {
-    target.replaceChildren(
-      element("p", error ? `Evidence unavailable: ${error}` : "No projected events yet.", "note"),
-    );
-    return;
-  }
-  target.replaceChildren(
-    ...events.slice(-3).map((event) => {
-      const row = element("div", "", "recent-event");
-      const time = element("time", formatTime(event.ts));
-      if (event.ts) time.dateTime = event.ts;
-      row.append(
-        time,
-        element("span", event.phase ?? humanize(event.event)),
-        element("span", humanize(event.status ?? event.event ?? "unknown")),
-      );
-      return row;
-    }),
-  );
 }

@@ -1,9 +1,8 @@
 /*
- * Instrument Record tokens. Two voices share the console: Plex Mono for what the
- * machine recorded, Newsreader for what a person wrote. Colour is semantic only:
- * trace (interaction and path), hold (a human is required), proof (recorded pass),
- * fault (failure or destructive action). See "Task and evidence review" in
- * apps/operator/README.md.
+ * Operator tokens. Interface text is set in the system sans; everything the runtime recorded
+ * (IDs, references, digests, counts, timestamps) is set in Plex Mono. Colour is semantic only:
+ * trace (interaction and path), hold (a human is required), proof (recorded pass), fault
+ * (failure or destructive action). The hues come from the brand mark in docs/assets/brand/.
  */
 
 @font-face {
@@ -30,30 +29,6 @@
   src: url("../fonts/plex-mono-600.woff2") format("woff2");
 }
 
-@font-face {
-  font-family: "Newsreader";
-  font-style: normal;
-  font-weight: 400;
-  font-display: swap;
-  src: url("../fonts/newsreader-400.woff2") format("woff2");
-}
-
-@font-face {
-  font-family: "Newsreader";
-  font-style: normal;
-  font-weight: 500;
-  font-display: swap;
-  src: url("../fonts/newsreader-500.woff2") format("woff2");
-}
-
-@font-face {
-  font-family: "Newsreader";
-  font-style: italic;
-  font-weight: 400;
-  font-display: swap;
-  src: url("../fonts/newsreader-400-italic.woff2") format("woff2");
-}
-
 /*
  * Colours come in two equivalent forms. Browsers without light-dark() get the plain light
  * block below, the dark values under the OS preference (unless a light choice is stored) or an
@@ -64,13 +39,13 @@
  */
 :root {
   color-scheme: light;
-  --bg: #f2f5f6;
-  --surface: #fbfcfc;
-  --sunk: #e8edef;
+  --bg: #f4f6f7;
+  --surface: #ffffff;
+  --sunk: #eef1f3;
   --ink: #14232b;
   --ink-2: #384c57;
   --mute: #566a74;
-  --line: #cdd6db;
+  --line: #dbe1e5;
   --line-strong: #768892;
   --trace: #1d4ed8;
   --trace-wash: #e4ebfc;
@@ -89,13 +64,13 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
-    --bg: #0e171c;
-    --surface: #132028;
-    --sunk: #0a1115;
+    --bg: #0b1115;
+    --surface: #10181d;
+    --sunk: #080d10;
     --ink: #ecf2f1;
     --ink-2: #b4c3c9;
     --mute: #8c9fa8;
-    --line: #24343d;
+    --line: #1f2b32;
     --line-strong: #5b7583;
     --trace: #8aabff;
     --trace-wash: #16223d;
@@ -105,7 +80,7 @@
     --proof-wash: #10291f;
     --fault: #ff8f80;
     --fault-wash: #2e1714;
-    --on-accent: #0e171c;
+    --on-accent: #0b1115;
     --scrim: rgb(5 10 13 / 72%);
     --lift: 0 1px 0 transparent, 0 0 0 1px rgb(0 0 0 / 30%), 0 24px 64px -24px rgb(0 0 0 / 70%);
   }
@@ -113,13 +88,13 @@
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg: #0e171c;
-  --surface: #132028;
-  --sunk: #0a1115;
+  --bg: #0b1115;
+  --surface: #10181d;
+  --sunk: #080d10;
   --ink: #ecf2f1;
   --ink-2: #b4c3c9;
   --mute: #8c9fa8;
-  --line: #24343d;
+  --line: #1f2b32;
   --line-strong: #5b7583;
   --trace: #8aabff;
   --trace-wash: #16223d;
@@ -129,7 +104,7 @@
   --proof-wash: #10291f;
   --fault: #ff8f80;
   --fault-wash: #2e1714;
-  --on-accent: #0e171c;
+  --on-accent: #0b1115;
   --scrim: rgb(5 10 13 / 72%);
   --lift: 0 1px 0 transparent, 0 0 0 1px rgb(0 0 0 / 30%), 0 24px 64px -24px rgb(0 0 0 / 70%);
 }
@@ -137,13 +112,13 @@
 @supports (color: light-dark(#000, #fff)) {
 :root {
   color-scheme: dark light;
-  --bg: light-dark(#f2f5f6, #0e171c);
-  --surface: light-dark(#fbfcfc, #132028);
-  --sunk: light-dark(#e8edef, #0a1115);
+  --bg: light-dark(#f4f6f7, #0b1115);
+  --surface: light-dark(#ffffff, #10181d);
+  --sunk: light-dark(#eef1f3, #080d10);
   --ink: light-dark(#14232b, #ecf2f1);
   --ink-2: light-dark(#384c57, #b4c3c9);
   --mute: light-dark(#566a74, #8c9fa8);
-  --line: light-dark(#cdd6db, #24343d);
+  --line: light-dark(#dbe1e5, #1f2b32);
   --line-strong: light-dark(#768892, #5b7583);
   --trace: light-dark(#1d4ed8, #8aabff);
   --trace-wash: light-dark(#e4ebfc, #16223d);
@@ -153,7 +128,7 @@
   --proof-wash: light-dark(#e0f0ea, #10291f);
   --fault: light-dark(#b42318, #ff8f80);
   --fault-wash: light-dark(#fbe9e7, #2e1714);
-  --on-accent: light-dark(#fbfcfc, #0e171c);
+  --on-accent: light-dark(#ffffff, #0b1115);
   --scrim: light-dark(rgb(20 35 43 / 55%), rgb(5 10 13 / 72%));
   --lift:
     0 1px 0 light-dark(rgb(20 35 43 / 4%), transparent),
@@ -171,9 +146,11 @@
 }
 
 :root {
-  /* Voices */
+  /* Faces: the system sans for the interface, Plex Mono for recorded values. */
+  --sans:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial,
+    sans-serif;
   --mono: "Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
-  --serif: "Newsreader", ui-serif, "New York", Georgia, "Times New Roman", serif;
 
   /* Type scale: 1.2 ratio from 13px. */
   --t-2xs: 0.6875rem; /* 11 */
@@ -185,7 +162,7 @@
   --t-2xl: 1.75rem; /* 28 */
   --t-3xl: 2.25rem; /* 36 */
   --t-4xl: 2.75rem; /* 44 */
-  --track-label: 0.08em;
+  --track-label: 0.06em;
 
   /* Space: 4px base. */
   --s1: 0.25rem;
@@ -200,17 +177,14 @@
   /* Frame */
   --gutter: clamp(1rem, 3.5vw, 2.5rem);
   --measure: 88rem;
-  --topbar-h: 3.5rem;
-  --radius: 2px;
+  --topbar-h: 3.25rem;
+  --radius: 3px;
   --hair: 1px solid var(--line);
-  --control-h: 2.25rem;
+  --control-h: 2rem;
+  --row-h: 2.25rem;
 
   /* Motion */
   --dur-fast: 120ms;
   --dur-base: 160ms;
   --ease: cubic-bezier(0.2, 0, 0, 1);
-
-  /* The trace step: vertical drop between journey levels, as in the mark. */
-  --step-drop: 0.625rem;
-  --step-mark: 0.75rem;
 }

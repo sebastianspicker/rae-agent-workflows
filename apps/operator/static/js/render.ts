@@ -1,11 +1,6 @@
 /** DOM renderers for runs, docket ledger, checkpoint, and evidence. */
 
-import {
-  renderTaskView,
-  renderRecentEvents,
-  renderSavedDecision,
-  taskCompleted,
-} from "./task-view.js";
+import { renderTaskView, renderSavedDecision, taskCompleted } from "./task-view.js";
 import { currentRun, elements, selectedSummary, state } from "./state.js";
 import {
   formatCost,
@@ -294,7 +289,8 @@ function phaseRow(
 
 export function renderRunPhases(run: OperatorRun): void {
   const phases = run.phase_order ?? [];
-  const activeIndex = phases.indexOf(run.current_phase ?? "");
+  // A completed run has no live phase; rows show only gates the run actually recorded.
+  const activeIndex = taskCompleted(run) ? -1 : phases.indexOf(run.current_phase ?? "");
   const pending = run.checkpoints?.find((item) => item.status === "pending") ?? null;
   elements["phase-list"].replaceChildren(
     ...phases.map((phase, index) => phaseRow(run, phase, index, activeIndex, pending)),
@@ -312,7 +308,6 @@ export function renderRunSummary(run: OperatorRun): void {
   elements["output-count"].textContent = formatNumber(resources.output, "Unavailable");
   elements["cost-count"].textContent = formatCost(resources.cost);
   elements["updated-value"].textContent = formatDateTime(run.updated_at);
-  elements["run-id-value"].textContent = run.id;
 }
 
 function renderEmptyWorkspace(): void {
@@ -340,8 +335,6 @@ export function renderRun(): void {
   renderRunControls(run);
   renderCheckpoint(run);
   if (!run) {
-    elements["context-run"].textContent = "Not selected";
-    elements["context-workspace"].textContent = "Not selected";
     elements["context-started"].textContent = "Unavailable";
     return;
   }
@@ -354,8 +347,6 @@ export function renderRun(): void {
       : `${run.workspace_label} · ${humanize(run.workspace_mode)}`;
   elements["run-terminal"].textContent = humanize(run.status);
   elements["run-terminal"].dataset.tone = tone(run.status);
-  elements["context-run"].textContent = run.id;
-  elements["context-workspace"].textContent = run.workspace_label || "Unavailable";
   elements["context-started"].textContent = formatDateTime(run.started_at);
   renderTaskView(run);
   renderRunPhases(run);
@@ -549,7 +540,6 @@ let renderedError: string | null = null;
 let renderedWithDate = false;
 
 export function renderEvents(): void {
-  renderRecentEvents(state.events, state.eventError);
   // Rows carry the date once the history crosses a day boundary; existing rows are redrawn then.
   const withDate = spansMultipleDays([state.events[0]?.ts, state.events.at(-1)?.ts]);
   const reset =

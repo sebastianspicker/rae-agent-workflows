@@ -1,98 +1,86 @@
-/* Lettered appendices below the record: run details and the workflow editor. */
+/* Data tables (phases, events), gate and result glyphs, and the collapsible editor section. */
+
+/* ---------- Collapsible section (workflow editor) ---------- */
 
 .appendix {
-  margin-top: var(--s2);
-  border-bottom: var(--hair);
-}
-
-.appendix:first-of-type {
-  margin-top: var(--s6);
-  border-top: var(--hair);
+  margin-top: var(--s4);
+  border: var(--hair);
+  border-radius: var(--radius);
+  background: var(--surface);
 }
 
 .appendix > summary {
-  display: grid;
-  grid-template-columns: 2rem auto minmax(0, 1fr) 1rem;
+  display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
-  gap: var(--s3);
-  padding: var(--s4) 0;
+  gap: var(--s1) var(--s3);
+  padding: var(--s3) var(--s4);
   cursor: pointer;
   list-style: none;
-  transition: color var(--dur-fast) var(--ease);
 }
 
 .appendix > summary::-webkit-details-marker {
   display: none;
 }
 
-.appendix > summary::after {
-  justify-self: end;
-  color: var(--mute);
-  font-size: var(--t-md);
-  line-height: 1;
-  content: "+";
+.appendix > summary::before {
+  align-self: center;
+  width: 0.4rem;
+  height: 0.4rem;
+  border-right: 1.5px solid var(--mute);
+  border-bottom: 1.5px solid var(--mute);
+  transform: rotate(-45deg);
+  transition: transform var(--dur-fast) var(--ease);
+  content: "";
 }
 
-.appendix[open] > summary::after {
-  content: "−";
+.appendix[open] > summary::before {
+  transform: rotate(45deg);
+}
+
+.appendix[open] > summary {
+  border-bottom: var(--hair);
 }
 
 .appendix > summary:hover .appendix__title {
-  text-decoration: underline;
-  text-decoration-color: var(--line-strong);
-  text-underline-offset: 0.3em;
+  color: var(--trace);
 }
 
 .appendix > summary:focus-visible {
   outline-offset: -2px;
 }
 
-.appendix__letter {
-  display: grid;
-  place-items: center;
-  width: 1.5rem;
-  height: 1.5rem;
-  border: 1.5px solid var(--line-strong);
-  color: var(--ink-2);
-  font-size: var(--t-xs);
-  font-weight: 600;
-}
-
-.appendix[open] .appendix__letter {
-  border-color: var(--ink);
-  color: var(--ink);
-}
-
 .appendix__title {
-  font-size: var(--t-md);
+  font-family: var(--mono);
+  font-size: var(--t-2xs);
   font-weight: 600;
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
 }
 
 .appendix__hint {
-  overflow: hidden;
+  min-width: 0;
   color: var(--mute);
-  font-size: var(--t-xs);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: var(--t-2xs);
 }
 
 .appendix__body {
   display: grid;
-  gap: var(--s7);
-  padding: var(--s3) 0 var(--s7);
+  gap: var(--s5);
+  padding: var(--s4);
 }
 
-/* ---------- Section heads and tables ---------- */
+/* ---------- Section heads ---------- */
 
 .section-head {
   display: grid;
   gap: var(--s1);
-  margin-bottom: var(--s3);
 }
 
 .section-head h3 {
-  font-size: var(--t-lg);
-  font-weight: 500;
+  font-size: var(--t-md);
+  font-weight: 600;
 }
 
 .section-head p {
@@ -128,9 +116,10 @@
   animation: breathe 1.6s var(--ease) infinite alternate;
 }
 
+/* ---------- Tables ---------- */
+
 .table-wrap {
   overflow-x: auto;
-  border-top: 1px solid var(--ink);
 }
 
 .table-wrap table {
@@ -140,9 +129,12 @@
 }
 
 .table-wrap th {
-  padding: var(--s2) var(--s3);
+  height: var(--row-h);
+  padding: 0 var(--s3);
   border-bottom: var(--hair);
+  background: var(--sunk);
   color: var(--mute);
+  font-family: var(--mono);
   font-size: var(--t-2xs);
   font-weight: 500;
   letter-spacing: var(--track-label);
@@ -152,122 +144,30 @@
 }
 
 .table-wrap td {
-  padding: var(--s2) var(--s3);
+  height: var(--row-h);
+  padding: var(--s1) var(--s3);
   border-bottom: var(--hair);
-  vertical-align: baseline;
+  vertical-align: middle;
+}
+
+.table-wrap tbody tr:last-child td {
+  border-bottom: 0;
 }
 
 .table-wrap th:first-child,
 .table-wrap td:first-child {
-  padding-left: 0;
-}
-
-/* ---------- Controls and boundary ---------- */
-
-.appendix__controls {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: center;
-  gap: var(--s3) var(--s6);
-}
-
-.run-controls {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--s2);
-}
-
-.next-step {
-  display: grid;
-  gap: var(--s1);
   padding-left: var(--s4);
-  border-left: var(--hair);
 }
 
-.next-step p {
-  color: var(--ink-2);
-  font-size: var(--t-xs);
+.table-wrap th:last-child,
+.table-wrap td:last-child {
+  padding-right: var(--s4);
 }
 
-/* ---------- Facts and figures ---------- */
-
-.facts {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
-  gap: 0 var(--s5);
-}
-
-.facts dl {
-  display: contents;
-}
-
-.facts dl > div {
-  padding: var(--s3) 0;
-  border-top: var(--hair);
-}
-
-.facts dt,
-.resource-strip dt {
-  color: var(--mute);
-  font-size: var(--t-2xs);
-  letter-spacing: var(--track-label);
-  text-transform: uppercase;
-}
-
-.facts dd,
-.resource-strip dd {
-  margin-top: 0.125rem;
-  font-size: var(--t-xs);
-  overflow-wrap: anywhere;
-}
-
-.status-value[data-tone="pass"] {
-  color: var(--proof);
-}
-
-.status-value[data-tone="active"] {
-  color: var(--trace);
-}
-
-.status-value[data-tone="error"] {
-  color: var(--fault);
-}
-
-.figures {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  border-top: 1px solid var(--ink);
-  border-bottom: var(--hair);
-}
-
-.figures article {
-  display: grid;
-  gap: var(--s1);
-  padding: var(--s4) var(--s4) var(--s4) 0;
-}
-
-.figures article + article {
-  padding-left: var(--s4);
-  border-left: var(--hair);
-}
-
-.figures strong {
-  font-size: var(--t-2xl);
-  font-weight: 500;
-  line-height: 1.1;
-  letter-spacing: -0.02em;
-  font-variant-numeric: tabular-nums;
-}
-
-.figures span {
-  color: var(--mute);
-  font-size: var(--t-xs);
-}
-
-/* ---------- Phase ledger ---------- */
+/* ---------- Phases and gates ---------- */
 
 .docket td:first-child {
-  width: 3rem;
+  width: 3.5rem;
   color: var(--mute);
 }
 
@@ -276,12 +176,11 @@
 }
 
 .docket tr.is-live td {
-  background: var(--sunk);
+  background: var(--trace-wash);
 }
 
 .docket tr.is-live td:first-child {
   box-shadow: inset 2px 0 0 var(--trace);
-  padding-left: var(--s3);
 }
 
 .g {
@@ -327,11 +226,11 @@
   font-weight: 500;
 }
 
-/* ---------- Event log ---------- */
+/* ---------- Event stream ---------- */
 
-.evidence-table td:first-child {
+/* Recorded tokens never break mid-word; narrow windows scroll the table instead. */
+.evidence-table td {
   white-space: nowrap;
-  font-variant-numeric: tabular-nums;
 }
 
 .evidence-toggle {
@@ -363,16 +262,12 @@
 }
 
 .evidence-title {
+  color: var(--ink);
   font-weight: 500;
 }
 
 .evidence-reference {
   color: var(--ink-2);
-  overflow-wrap: anywhere;
-}
-
-.evidence-table td:nth-child(4) {
-  min-width: 12rem;
 }
 
 .result {
@@ -403,65 +298,18 @@
   color: var(--mute);
 }
 
+.evidence-table .evidence-extra td {
+  white-space: normal;
+}
+
 .evidence-extra td {
-  padding-left: calc(1.5rem + var(--s1)) !important;
+  padding-left: calc(var(--s4) + 1.5rem + var(--s1)) !important;
   background: var(--sunk);
   color: var(--ink-2);
 }
 
-.resource-strip {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: var(--s4);
-  margin-top: var(--s4);
-}
-
-@media (max-width: 64rem) {
-  .appendix__controls {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .next-step {
-    padding-left: 0;
-    border-left: 0;
-  }
-}
-
 @media (max-width: 47.5rem) {
-  .appendix > summary {
-    grid-template-columns: 2rem minmax(0, 1fr) 1rem;
-    row-gap: 0;
-  }
-
-  .appendix__hint {
-    grid-column: 2;
-    grid-row: 2;
-    white-space: normal;
-  }
-
-  .appendix > summary::after {
-    grid-column: 3;
-    grid-row: 1;
-  }
-
-  .figures {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .figures article:nth-child(3) {
-    padding-left: 0;
-    border-left: 0;
-  }
-
-  .figures article:nth-child(n + 3) {
-    border-top: var(--hair);
-  }
-
-  .resource-strip {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .run-controls .btn {
-    flex: 1 1 100%;
+  .appendix__body {
+    padding: var(--s3);
   }
 }

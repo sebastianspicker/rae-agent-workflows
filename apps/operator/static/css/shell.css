@@ -47,6 +47,7 @@
 }
 
 .brand__name {
+  font-family: var(--mono);
   font-size: var(--t-md);
   font-weight: 600;
   letter-spacing: 0.12em;
@@ -56,7 +57,10 @@
   padding-left: var(--s2);
   border-left: var(--hair);
   color: var(--mute);
-  font-size: var(--t-sm);
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
 }
 
 .topbar__find {
@@ -81,6 +85,7 @@
   position: absolute;
   left: var(--s3);
   color: var(--mute);
+  font-family: var(--mono);
   font-size: var(--t-2xs);
   letter-spacing: var(--track-label);
   text-transform: uppercase;
@@ -89,6 +94,8 @@
 
 .project-switcher select {
   padding-left: 3.25rem;
+  font-family: var(--mono);
+  font-size: var(--t-xs);
   border-color: var(--line);
   background-color: transparent;
 }
@@ -140,6 +147,7 @@
 
 .session-state small {
   color: var(--mute);
+  font-family: var(--mono);
   font-size: var(--t-2xs);
 }
 
@@ -214,7 +222,7 @@ body[data-run-view="list"] .nav-link {
   width: 100%;
   max-width: var(--measure);
   margin: 0 auto;
-  padding: var(--s6) var(--gutter) var(--s8);
+  padding: var(--s5) var(--gutter) var(--s8);
 }
 
 /* The skip-link target is a landmark for focus, not a control: no ring. */
@@ -233,9 +241,9 @@ body[data-run-view="selected"] .index {
 @media (min-width: 90rem) {
   body[data-run-view] .body {
     display: grid;
-    grid-template-columns: minmax(20rem, 26rem) minmax(0, 1fr);
+    grid-template-columns: minmax(17rem, 21rem) minmax(0, 1fr);
     align-items: start;
-    gap: var(--s7);
+    gap: var(--s5);
     max-width: 120rem;
   }
 
@@ -249,6 +257,9 @@ body[data-run-view="selected"] .index {
     top: calc(var(--topbar-h) + var(--s5));
     max-height: calc(100dvh - var(--topbar-h) - var(--s6));
     overflow-y: auto;
+    border: var(--hair);
+    border-radius: var(--radius);
+    background: var(--surface);
   }
 }
 
@@ -284,9 +295,8 @@ body[data-run-view="selected"] .index {
 }
 
 .workspace-empty h1 {
-  font-family: var(--serif);
-  font-size: var(--t-3xl);
-  font-weight: 400;
+  font-size: var(--t-xl);
+  font-weight: 600;
   letter-spacing: -0.01em;
 }
 
@@ -386,6 +396,6 @@ body[data-run-view="selected"] .index {
   }
 
   .workspace-empty h1 {
-    font-size: var(--t-2xl);
+    font-size: var(--t-lg);
   }
 }
