@@ -33,6 +33,9 @@ The package exports:
 - execution-profile loading and route resolution
 - workflow loading, validation, digesting, registry access, proposal,
   analysis, and template compilation
+- experiment loading, planning, report aggregation, benchmark cards, trial
+  exports, the seeded estimators behind them, and the experiment CLI entry
+  point
 
 Consumers import these functions from `@rae/engine`. Applications must not
 import `packages/engine/src/*`, duplicate versioned schemas, or depend on CLI
@@ -132,6 +135,47 @@ action. The `command` provider is an unsandboxed test integration, always
 fails `agent doctor`, and requires a fresh unsafe opt-in for every run or
 resume.
 
+## Experiments
+
+`rae experiment validate|plan|run|label|report|export|analyze|verify-evidence` compares run
+configurations (arms) over a frozen task suite. The pipeline is:
+
+1. `run/experiment-contract.ts` loads and validates the suite and the
+   experiment, and checks the pinned suite digest.
+2. `run/experiment-plan.ts` derives the deterministic, interleaved trial order
+   from the design seed and builds the `agent run` arguments.
+3. `run/experiment-runner.ts` materializes each trial's repository as a fresh
+   Git repository and launches `agent run` with checkpoint policy `none`. It
+   deletes only `work/<trial_id>` directories of an output directory that
+   holds the `.rae-experiment` marker.
+4. `run/experiment-collect.ts` reads the run evidence, evaluates the
+   acceptance checks and seeded-defect detectors, and builds the trial record.
+5. `run/experiment-report.ts` and `run/experiment-export.ts` derive the
+   report, the benchmark card and the exports from the trial records, using
+   `run/experiment-statistics.ts`.
+
+`run/experiment-journal.ts` publishes durable start/finish/acknowledgment
+receipts. V3 locks require those receipts; v1/v2 outputs remain reportable but
+need a new output directory for execution. Interrupted slots are preserved
+and new dispatch requires `--acknowledge-interrupted`. Cumulative wall budgets
+and unknown cost accounting survive resume. Cost ceilings are soft thresholds
+checked between trials. `run/experiment-evidence.ts` retains a private archive
+of raw evidence and evaluated source before verified workspace cleanup;
+`verifyTrialEvidence` is public. Ordinary analysis exports omit raw archives.
+
+Output goes to `.pipeline/experiments/<experiment-id>/` (or `--output`):
+`.rae-experiment`, `experiment.lock.json`, `trials/<trial_id>.json`,
+`work/<trial_id>/repository`, `logs/`, `report.json`, `report.md` and
+`export/`. Report v2 defaults to task-level inference, shows coverage and
+missing-outcome bounds, and withholds confirmatory verdicts for incomplete
+primary outcomes. Locks fingerprint fixture/configuration contents; resume
+preserves failures. `experiment analyze --bundle <export-dir>` regenerates
+the analysis offline. Trial records are authoritative; a report is reproducible from the
+records, the experiment file and the design seed. The data is under
+`experiments/` at the repository root. See [Run an
+experiment](../../docs/how-to/run-an-experiment.md) and the [contract
+reference](../../docs/reference/contracts/experiments-v1.md).
+
 ## Run and registry state
 
 The engine stores each local run under `.pipeline/runs/<run-id>/`, including
@@ -226,7 +270,7 @@ See [Security](../../SECURITY.md) for the complete trust model and the
 
 | Path | Responsibility |
 | --- | --- |
-| `src/cli/` | Autonomous, graph, worker, and staged command entry points |
+| `src/cli/` | Autonomous, experiment, graph, worker, and staged command entry points |
 | `src/run/` | Run lifecycle, state, artifacts, gates, trace, and recovery |
 | `src/workflow/` | Contracts, registry, design, scheduling, and transforms |
 | `src/agents/` | Provider processes, capability checks, and containment |

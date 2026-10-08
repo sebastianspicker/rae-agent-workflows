@@ -1,7 +1,7 @@
 ---
 status: stable
 owner: science
-last_reviewed: 2026-10-07
+last_reviewed: 2026-10-08
 source_of_truth: editorial
 evidence_links: ../../reference/claims/claims-ledger.md
 ---
@@ -54,6 +54,7 @@ RAE takes five linked positions:
 - [Drift and Self-Certification](drift-and-self-certification.md)
 - [Contracts and Gates](contracts-and-gates.md)
 - [Cognitive Tiering](cognitive-tiering.md)
+- [Experimental Method](experimental-method.md)
 - [Threats to Validity](threats-to-validity.md)
 - [Limitations](limitations.md)
 

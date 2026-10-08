@@ -1,0 +1,253 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rae.local/contracts/experiments/experiment-report-v1.schema.json",
+  "title": "RAE experiment report v1",
+  "description": "Aggregated, reproducible analysis of an experiment's trial records: per-arm estimates with intervals, paired comparisons against the control arm, the preregistered verdict, and the benchmark card.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "experiment_id", "experiment_digest", "suite_digest", "generated_at", "analysis", "trials", "arms", "comparisons", "verdict", "card"],
+  "properties": {
+    "schema_version": { "const": "1.0.0" },
+    "experiment_id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{2,63}$" },
+    "experiment_digest": { "$ref": "#/$defs/digest" },
+    "suite_digest": { "$ref": "#/$defs/digest" },
+    "generated_at": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$" },
+    "analysis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["alpha", "bootstrap_samples", "permutation_samples", "correction", "seed", "paired", "primary_metric"],
+      "properties": {
+        "alpha": { "type": "number", "exclusiveMinimum": 0, "maximum": 0.5 },
+        "bootstrap_samples": { "type": "integer", "minimum": 1 },
+        "permutation_samples": { "type": "integer", "minimum": 1 },
+        "correction": { "enum": ["none", "holm"] },
+        "seed": { "type": "integer", "minimum": 0 },
+        "paired": { "type": "boolean" },
+        "primary_metric": { "$ref": "#/$defs/metricName" },
+        "minimum_detectable_effect": { "type": "number" }
+      }
+    },
+    "trials": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["planned", "completed", "launch_failed", "collect_failed", "skipped", "missing"],
+      "properties": {
+        "planned": { "type": "integer", "minimum": 0 },
+        "completed": { "type": "integer", "minimum": 0 },
+        "launch_failed": { "type": "integer", "minimum": 0 },
+        "collect_failed": { "type": "integer", "minimum": 0 },
+        "skipped": { "type": "integer", "minimum": 0 },
+        "missing": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "arms": { "type": "array", "minItems": 1, "maxItems": 16, "items": { "$ref": "#/$defs/armSummary" } },
+    "comparisons": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/comparison" } },
+    "agreement": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["raters", "n", "cohens_kappa", "observed_agreement"],
+      "properties": {
+        "raters": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "string" } },
+        "n": { "type": "integer", "minimum": 0 },
+        "cohens_kappa": { "type": ["number", "null"] },
+        "observed_agreement": { "type": ["number", "null"] }
+      }
+    },
+    "verdict": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "primary_metric", "treatment_arm", "control_arm", "expected", "rationale"],
+      "properties": {
+        "status": { "enum": ["supported", "refuted", "inconclusive", "not-evaluated"] },
+        "primary_metric": { "$ref": "#/$defs/metricName" },
+        "treatment_arm": { "type": "string" },
+        "control_arm": { "type": "string" },
+        "expected": { "enum": ["treatment-greater", "treatment-less"] },
+        "rationale": { "type": "string", "minLength": 1, "maxLength": 8000 }
+      }
+    },
+    "card": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "suite", "hypothesis", "arms", "provenance", "limitations", "reproduction"],
+      "properties": {
+        "title": { "type": "string" },
+        "suite": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["suite_id", "revision", "task_count", "contamination_note", "license"],
+          "properties": {
+            "suite_id": { "type": "string" },
+            "revision": { "type": "integer" },
+            "task_count": { "type": "integer", "minimum": 0 },
+            "contamination_note": { "type": "string" },
+            "license": { "type": "string" }
+          }
+        },
+        "hypothesis": { "type": "object" },
+        "arms": { "type": "array", "items": { "type": "object", "additionalProperties": false, "required": ["arm_id", "label", "run"], "properties": { "arm_id": { "type": "string" }, "label": { "type": "string" }, "run": { "type": "object" } } } },
+        "provenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["workflow_digests", "policy_digests", "execution_profile_digests", "providers", "models", "runtime_identities"],
+          "properties": {
+            "workflow_digests": { "type": "array", "items": { "type": "string" } },
+            "policy_digests": { "type": "array", "items": { "type": "string" } },
+            "execution_profile_digests": { "type": "array", "items": { "type": "string" } },
+            "providers": { "type": "array", "items": { "type": "string" } },
+            "models": { "type": "array", "items": { "type": "string" } },
+            "runtime_identities": { "type": "array", "items": { "type": "object" } }
+          }
+        },
+        "limitations": { "type": "array", "items": { "type": "string" } },
+        "reproduction": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["commands"],
+          "properties": { "commands": { "type": "array", "items": { "type": "string" } } }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "metricName": {
+      "enum": [
+        "pass_rate",
+        "ship_rate",
+        "acceptance_rate",
+        "wall_clock_ms",
+        "provider_attempts",
+        "repair_rounds",
+        "total_tokens",
+        "output_tokens",
+        "estimated_cost",
+        "seeded_defects_shipped",
+        "changed_paths"
+      ]
+    },
+    "interval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["estimate", "ci_low", "ci_high", "method"],
+      "properties": {
+        "estimate": { "type": ["number", "null"] },
+        "ci_low": { "type": ["number", "null"] },
+        "ci_high": { "type": ["number", "null"] },
+        "method": { "enum": ["wilson", "bootstrap-percentile", "exact"] }
+      }
+    },
+    "proportion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["successes", "trials", "estimate", "ci_low", "ci_high", "method"],
+      "properties": {
+        "successes": { "type": "integer", "minimum": 0 },
+        "trials": { "type": "integer", "minimum": 0 },
+        "estimate": { "type": ["number", "null"] },
+        "ci_low": { "type": ["number", "null"] },
+        "ci_high": { "type": ["number", "null"] },
+        "method": { "const": "wilson" }
+      }
+    },
+    "continuous": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["n", "mean", "median", "sd", "min", "max", "ci_low", "ci_high", "method"],
+      "properties": {
+        "n": { "type": "integer", "minimum": 0 },
+        "mean": { "type": ["number", "null"] },
+        "median": { "type": ["number", "null"] },
+        "sd": { "type": ["number", "null"] },
+        "min": { "type": ["number", "null"] },
+        "max": { "type": ["number", "null"] },
+        "ci_low": { "type": ["number", "null"] },
+        "ci_high": { "type": ["number", "null"] },
+        "method": { "const": "bootstrap-percentile" }
+      }
+    },
+    "armSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["arm_id", "label", "n", "proportions", "metrics", "pass_at_k", "tokens_measurement"],
+      "properties": {
+        "arm_id": { "type": "string" },
+        "label": { "type": "string" },
+        "n": { "type": "integer", "minimum": 0 },
+        "proportions": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["pass_rate", "ship_rate", "acceptance_rate"],
+          "properties": {
+            "pass_rate": { "$ref": "#/$defs/proportion" },
+            "ship_rate": { "$ref": "#/$defs/proportion" },
+            "acceptance_rate": { "$ref": "#/$defs/proportion" }
+          }
+        },
+        "metrics": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/metricName" },
+          "additionalProperties": { "$ref": "#/$defs/continuous" }
+        },
+        "pass_at_k": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["k", "estimate", "tasks"],
+            "properties": {
+              "k": { "type": "integer", "minimum": 1 },
+              "estimate": { "type": ["number", "null"] },
+              "tasks": { "type": "integer", "minimum": 0 }
+            }
+          }
+        },
+        "tokens_measurement": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["complete", "partial", "unavailable"],
+          "properties": {
+            "complete": { "type": "integer", "minimum": 0 },
+            "partial": { "type": "integer", "minimum": 0 },
+            "unavailable": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    },
+    "comparison": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["arm", "control", "metric", "paired", "n", "difference", "test", "p_value", "p_value_adjusted", "effect_size", "significant"],
+      "properties": {
+        "arm": { "type": "string" },
+        "control": { "type": "string" },
+        "metric": { "$ref": "#/$defs/metricName" },
+        "paired": { "type": "boolean" },
+        "n": { "type": "integer", "minimum": 0, "description": "Matched pairs when paired, otherwise the smaller arm size." },
+        "difference": { "$ref": "#/$defs/interval" },
+        "test": { "enum": ["mcnemar-exact", "paired-permutation", "unpaired-permutation", "none"] },
+        "p_value": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "p_value_adjusted": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "effect_size": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "value"],
+          "properties": {
+            "name": { "enum": ["risk-difference", "cliffs-delta"] },
+            "value": { "type": ["number", "null"] }
+          }
+        },
+        "discordant": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["arm_only", "control_only"],
+          "properties": {
+            "arm_only": { "type": "integer", "minimum": 0 },
+            "control_only": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "significant": { "type": "boolean" }
+      }
+    }
+  }
+}

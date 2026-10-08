@@ -16,6 +16,12 @@ remain valid against them.
 The engine resolves these files through its contract catalog. Applications
 must not duplicate or patch them.
 
+Experiment report v2 adds independent analysis units, per-arm coverage,
+per-task results and exact-record/input digests. Report v1 remains immutable
+for historical artifacts. The design v1 schema gains optional `analysis.unit`;
+report v2 defaults it to `task`. See the [experiment contracts](../../docs/reference/contracts/experiments-v1.md)
+for migration and inference semantics.
+
 ## TypeScript contracts
 
 The package root exports generated structural types, canonical schema digests
@@ -37,3 +43,8 @@ run generate:types`. Existing schema paths and identifiers remain unchanged.
 Generation and freshness checks use the repository's pinned Biome formatter,
 so install the root workspace before running either command. Generated files
 must be reproduced through the generator.
+
+Experiment execution also has additive `trial-execution-v1` and
+`evidence-manifest-v1` contracts for durable lifecycle receipts and private
+retained file hashes. Execution lock v3 requires journal receipts; existing
+v1/v2 locks are analysis-only. See [DR-003](../../docs/reference/decisions/dr-003-durable-experiment-execution.md).

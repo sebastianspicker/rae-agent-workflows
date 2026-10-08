@@ -1,7 +1,7 @@
 ---
 status: stable
 owner: core
-last_reviewed: 2026-10-07
+last_reviewed: 2026-10-08
 source_of_truth: editorial
 evidence_links: claims/claims-ledger.md
 ---
@@ -49,6 +49,30 @@ evidence_links: claims/claims-ledger.md
   An operator-owned executor and model mapping selected by a logical tier or a
   node-specific override. Routes are stored in execution profile 3.0, not in
   workflow revisions.
+- `task suite`
+  A frozen, model-agnostic set of repository tasks with acceptance checks,
+  identified by `suite_id` and `revision` and pinned by digest.
+- `experiment`
+  A preregistered comparison of arms over one task suite, with a hypothesis, a
+  falsifier, metrics and analysis settings.
+- `arm`
+  One run configuration in an experiment: a workflow, execution profile,
+  context mode or model, with all other options held fixed.
+- `trial`
+  One execution of one task under one arm in one repetition.
+- `trial record`
+  The immutable JSON outcome of a trial: run identity, outcome, measurements
+  and evidence references. Failure-layer labels may be appended.
+- `benchmark card`
+  The generated report of an experiment: suite, hypothesis, arms, estimates,
+  provenance, limitations and reproduction commands. It is derived from trial
+  records.
+- `preregistration digest`
+  The SHA-256 of a suite's or experiment's canonical JSON. An experiment pins the
+  suite digest before any trial runs.
+- `failure layer label`
+  A rater's assignment of a failed trial to `representation`, `inference`,
+  `coordination`, `governance` or `none`.
 
 ## Thesis validation
 

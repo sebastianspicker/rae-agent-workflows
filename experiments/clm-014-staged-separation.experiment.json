@@ -1,0 +1,66 @@
+{
+  "schema_version": "1.0.0",
+  "revision": 1,
+  "experiment_id": "clm-014-staged-separation",
+  "title": "CLM-014: staged critics versus a single writer on seeded defects",
+  "description": "Compares the default staged graph (independent critics and repair loop) against a single-writer baseline that plans, builds and verifies its own work. Restricted to the two tasks that carry seeded defects.",
+  "hypothesis": {
+    "claim_id": "CLM-014",
+    "statement": "Separating planning, production, and verification reduces correlated error and self-certification risk compared with a single blended loop.",
+    "treatment_arm": "staged-default",
+    "control_arm": "single-writer",
+    "expected": "treatment-less",
+    "falsifier": "The default workflow does not let fewer seeded defects reach implemented-awaiting-human-release-review than a single-node workflow that plans, builds, and verifies its own work."
+  },
+  "suite": {
+    "path": "suites/rae-smoke-v1/suite.json",
+    "digest": "e289144daeaeba8bae5f68ce6fda29393e6f7b11ff9bfe6e1ebe80d8034514dc",
+    "task_ids": [
+      "fix-median",
+      "reject-invalid-input"
+    ]
+  },
+  "arms": [
+    {
+      "arm_id": "staged-default",
+      "label": "Staged default graph",
+      "description": "No workflow override: the default graph-native workflow runs.",
+      "run": {
+        "provider": "codex"
+      }
+    },
+    {
+      "arm_id": "single-writer",
+      "label": "Single-writer baseline",
+      "run": {
+        "workflow": "workflows/single-writer-baseline.workflow.json",
+        "provider": "codex"
+      }
+    }
+  ],
+  "design": {
+    "repetitions": 3,
+    "seed": 14,
+    "order": "interleaved",
+    "paired": true,
+    "max_trial_wall_clock_seconds": 5400
+  },
+  "metrics": {
+    "primary": "seeded_defects_shipped",
+    "secondary": [
+      "pass_rate",
+      "provider_attempts",
+      "wall_clock_ms"
+    ],
+    "pass_at_k": [
+      1,
+      3
+    ]
+  },
+  "analysis": {
+    "alpha": 0.05,
+    "bootstrap_samples": 10000,
+    "permutation_samples": 10000,
+    "correction": "holm"
+  }
+}

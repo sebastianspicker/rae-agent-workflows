@@ -69,6 +69,10 @@ export const navigation: DefaultTheme.SidebarItem[] = [
         text: "Recover a Workflow 2.2 Wait",
         link: "/how-to/recover-workflow-v2.2-wait",
       },
+      {
+        text: "Run an Experiment",
+        link: "/how-to/run-an-experiment",
+      },
     ],
   },
   {
@@ -131,6 +135,10 @@ export const navigation: DefaultTheme.SidebarItem[] = [
             link: "/reference/contracts/graph-memory",
           },
           {
+            text: "Experiments 1.0",
+            link: "/reference/contracts/experiments-v1",
+          },
+          {
             text: "Workflow 2.0 and 2.1",
             link: "/reference/contracts/workflow-v2",
           },
@@ -171,6 +179,23 @@ export const navigation: DefaultTheme.SidebarItem[] = [
           {
             text: "Adapter Platforms",
             link: "/reference/engine/adapter-platforms",
+          },
+        ],
+      },
+      {
+        text: "Decisions",
+        items: [
+          {
+            text: "DR-001 Experiment Layer",
+            link: "/reference/decisions/dr-001-experiment-layer",
+          },
+          {
+            text: "DR-002: Research integrity",
+            link: "/reference/decisions/dr-002-research-integrity",
+          },
+          {
+            text: "DR-003: Durable execution",
+            link: "/reference/decisions/dr-003-durable-experiment-execution",
           },
         ],
       },
@@ -301,6 +326,10 @@ export const navigation: DefaultTheme.SidebarItem[] = [
           {
             text: "Cognitive Tiering",
             link: "/explanation/science/cognitive-tiering",
+          },
+          {
+            text: "Experimental Method",
+            link: "/explanation/science/experimental-method",
           },
           {
             text: "Threats to Validity",

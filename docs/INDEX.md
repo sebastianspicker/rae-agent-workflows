@@ -1,7 +1,7 @@
 ---
 status: stable
 owner: core
-last_reviewed: 2026-10-07
+last_reviewed: 2026-10-08
 source_of_truth: README.md
 evidence_links: reference/claims/evidence-index.md
 ---
@@ -36,6 +36,7 @@ corpus. This is a curated path, not a file listing.
 - [Write a contract](how-to/write-a-contract.md)
 - [Add a tool](how-to/add-a-tool.md)
 - [Publish a sanitized profile](how-to/publish-a-sanitized-profile.md)
+- [Run an experiment](how-to/run-an-experiment.md)
 
 ## Reference
 
@@ -46,6 +47,7 @@ corpus. This is a curated path, not a file listing.
 - [Module boundaries](reference/architecture/module-boundaries.md)
 - [Artifact schemas](reference/contracts/artifact-schemas.md)
 - [Execution profile 3.0](reference/contracts/execution-profile-v3.md)
+- [Experiment contracts](reference/contracts/experiments-v1.md)
 - [Local graph and memory](reference/contracts/graph-memory.md)
 - [Workflow 2.0 and 2.1](reference/contracts/workflow-v2.md)
 - [Workflow 2.2](reference/contracts/workflow-v2.2.md)
@@ -53,6 +55,9 @@ corpus. This is a curated path, not a file listing.
 - [Safety boundaries](reference/invariants/safety-boundaries.md)
 - [Terminology](reference/terminology.md)
 - [Assumptions register](reference/claims/assumptions-register.md)
+- [DR-001: In-repository experiment layer](reference/decisions/dr-001-experiment-layer.md)
+- [DR-002: Research integrity and report v2](reference/decisions/dr-002-research-integrity.md)
+- [DR-003: Durable experiment execution and evidence](reference/decisions/dr-003-durable-experiment-execution.md)
 
 Package-owned command details:
 
@@ -65,6 +70,7 @@ Package-owned command details:
 
 - [Decision tree](explanation/overview/decision-tree.md)
 - [Contracts and gates](explanation/science/contracts-and-gates.md)
+- [Experimental method](explanation/science/experimental-method.md)
 - [Limitations](explanation/science/limitations.md)
 - [Threats to validity](explanation/science/threats-to-validity.md)
 

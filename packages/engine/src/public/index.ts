@@ -1,6 +1,7 @@
 /** The sole supported import boundary for RAE engine consumers. */
 import {
   cliAutonomousEntrypoint,
+  cliExperimentEntrypoint,
   cliGraphEntrypoint,
   cliRunnerEntrypoint,
   cliWorkflowAgentWorkerEntrypoint,
@@ -53,9 +54,42 @@ export {
   compileWorkflowTemplate,
   listWorkflowTemplates,
 } from "../workflow/workflow-designer.js";
+export {
+  loadExperiment,
+  loadTaskSuite,
+  type LoadedExperiment,
+  type LoadedTaskSuite,
+} from "../run/experiment-contract.js";
+export { planTrials, type PlannedTrial } from "../run/experiment-plan.js";
+export {
+  aggregateExperiment,
+  renderBenchmarkCard,
+  type AggregateInput,
+} from "../run/experiment-report.js";
+export {
+  exportTrials,
+  exportTaskResults,
+  flattenTrialRecord,
+  renderDatasheet,
+  type ExportFormat,
+} from "../run/experiment-export.js";
+export {
+  bootstrapMeanInterval,
+  cohensKappa,
+  createSeededRandom,
+  holmBonferroni,
+  mcnemarExactTest,
+  pairedPermutationTest,
+  passAtK,
+  wilsonInterval,
+} from "../run/experiment-statistics.js";
 
 export function autonomousEntrypoint(): string {
   return cliAutonomousEntrypoint();
+}
+
+export function experimentEntrypoint(): string {
+  return cliExperimentEntrypoint();
 }
 
 export function graphCliEntrypoint(): string {
@@ -75,3 +109,7 @@ export function executionRuntimeCwd(): string {
 }
 
 export { pipelineInitEntrypoint };
+
+export { analyzeExperimentBundle } from "../run/experiment-bundle.js";
+
+export { verifyTrialEvidence } from "../run/experiment-evidence.js";

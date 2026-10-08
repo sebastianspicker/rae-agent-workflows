@@ -1,0 +1,212 @@
+{
+  "schema_version": "2.0.0",
+  "workflow_id": "single-writer-baseline",
+  "revision": 1,
+  "title": "Single-writer baseline (plans, builds and verifies its own work)",
+  "entry_node": "self-plan",
+  "terminal_node": "complete",
+  "budgets": {
+    "max_concurrency": 1,
+    "max_repair_rounds": 1,
+    "max_attempts_per_node": 3,
+    "max_wall_clock_seconds": 14400,
+    "max_provider_attempts": 96
+  },
+  "payload_contracts": {
+    "findings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "summary",
+        "findings"
+      ],
+      "properties": {
+        "summary": {
+          "type": "string",
+          "maxLength": 8000
+        },
+        "findings": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "object",
+            "required": [
+              "severity"
+            ],
+            "properties": {
+              "severity": {
+                "enum": [
+                  "blocking",
+                  "major",
+                  "minor",
+                  "info"
+                ]
+              },
+              "blocking": {
+                "type": "boolean"
+              },
+              "evidence_ref": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "summary": {
+                "type": "string",
+                "maxLength": 8000
+              }
+            }
+          }
+        }
+      }
+    },
+    "ownership-plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "summary",
+        "findings",
+        "file_ownership",
+        "documentation"
+      ],
+      "properties": {
+        "summary": {
+          "type": "string",
+          "maxLength": 8000
+        },
+        "findings": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "object",
+            "required": [
+              "severity"
+            ],
+            "properties": {
+              "severity": {
+                "enum": [
+                  "blocking",
+                  "major",
+                  "minor",
+                  "info"
+                ]
+              },
+              "blocking": {
+                "type": "boolean"
+              },
+              "evidence_ref": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "summary": {
+                "type": "string",
+                "maxLength": 8000
+              }
+            }
+          }
+        },
+        "file_ownership": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        "documentation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "required",
+            "paths",
+            "rationale"
+          ],
+          "properties": {
+            "required": {
+              "type": "boolean"
+            },
+            "paths": {
+              "type": "array",
+              "maxItems": 128,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              }
+            },
+            "rationale": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4000
+            }
+          }
+        }
+      }
+    }
+  },
+  "nodes": [
+    {
+      "id": "self-plan",
+      "kind": "agent",
+      "access": "read",
+      "role": "planner and builder",
+      "guidance": "Read the task and the repository, then write the ownership plan. List every file you will change and state whether documentation is required.",
+      "payload_contract": "ownership-plan",
+      "ownership_plan": true
+    },
+    {
+      "id": "mutation-checkpoint",
+      "kind": "checkpoint",
+      "access": "control",
+      "guidance": "Human pause before mutation when the configured policy requires approval; pass through otherwise.",
+      "mutation_checkpoint": true
+    },
+    {
+      "id": "build-and-verify",
+      "kind": "agent",
+      "access": "write",
+      "role": "builder",
+      "guidance": "Implement the plan, run the project's checks yourself and report findings. There are no independent critics in this workflow.",
+      "payload_contract": "findings"
+    },
+    {
+      "id": "verification",
+      "kind": "gate",
+      "access": "control",
+      "guidance": "Pass when the builder reports no blocking findings.",
+      "verification": true
+    },
+    {
+      "id": "complete",
+      "kind": "terminal",
+      "access": "control",
+      "guidance": "Run complete."
+    }
+  ],
+  "edges": [
+    {
+      "from": "self-plan",
+      "to": "mutation-checkpoint",
+      "type": "sequence"
+    },
+    {
+      "from": "mutation-checkpoint",
+      "to": "build-and-verify",
+      "type": "sequence"
+    },
+    {
+      "from": "build-and-verify",
+      "to": "verification",
+      "type": "artifact",
+      "artifact": "findings"
+    },
+    {
+      "from": "verification",
+      "to": "complete",
+      "type": "condition",
+      "condition": "success"
+    }
+  ]
+}

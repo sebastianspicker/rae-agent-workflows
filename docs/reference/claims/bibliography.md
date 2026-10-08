@@ -91,6 +91,11 @@ OpenAI. "How evals drive the next chapter in AI for businesses." November 19,
 2025.
 https://openai.com/index/evals-drive-next-chapter-of-ai/
 
+### SRC-CHEN-CODEX-PASS-AT-K
+
+Chen et al. "Evaluating Large Language Models Trained on Code." 2021.
+https://arxiv.org/abs/2107.03374
+
 ### SRC-OPENAI-SWEBENCH-VERIFIED
 
 OpenAI. "Why SWE-bench Verified no longer measures frontier coding

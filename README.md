@@ -26,6 +26,9 @@ code and workflow 2.2 are experimental.
 - autonomous repository work in isolated Git worktrees, with Codex as the
   default provider and explicit macOS-only OpenCode routes
 - a bearer-authenticated operator console bound to loopback
+- a preregistered experiment runner: frozen task suites, interleaved arms,
+  retained trial records, task-level uncertainty, missing-outcome coverage,
+  benchmark cards and portable offline analysis bundles
 - optional local repository, run, and temporal-memory graph projections
 - the independent Ralph audit, linting, and transactional fixing loop
 - deterministic quality, review, trace, profile-installation, and repository
@@ -132,6 +135,19 @@ before completion, or `--through plan` to stop before a writer node. New
 isolated runs use a `pipeline/<run-id>` branch and place the worktree under the
 target repository's Git metadata at `.git/rae-worktrees/<run-id>`.
 
+Run a preregistered experiment from `experiments/` (this calls the provider and
+takes minutes per trial; add `--dry-run` to list the trials first):
+
+```bash
+npm run rae -- experiment validate --experiment experiments/clm-007-context-mode.experiment.json
+npm run rae -- experiment run --experiment experiments/clm-007-context-mode.experiment.json
+npm run rae -- experiment report --experiment experiments/clm-007-context-mode.experiment.json
+```
+
+Interrupted trials retain durable outcomes, and verified private evidence
+archives survive workspace cleanup. Use `experiment verify-evidence` to check
+retained bytes. See [Run an experiment](docs/how-to/run-an-experiment.md).
+
 Serve the local operator for explicitly allowed repositories:
 
 ```bash
@@ -164,6 +180,7 @@ their complete interfaces.
 | `packages/ralph/` | Independent TypeScript story loop | [Ralph](packages/ralph/README.md) |
 | `packages/dev-tools/` | Independently invoked TypeScript quality, review, and trace tools | [Quality gate](packages/dev-tools/quality-gate/README.md), [review](packages/dev-tools/multi-model-review/README.md), [trace](packages/dev-tools/trace-collector/README.md) |
 | `workflows/` | Repository-owned workflow definitions and recipes | [Graph tutorial](docs/tutorials/graph-engineering-with-rae.md) |
+| `experiments/` | Frozen task suites and preregistered experiment designs (data) | [Experiments](experiments/README.md) |
 | `integrations/agent-adapters/` | Adapter manifest, templates, generator, and derived runner guidance | [Adapter generation](integrations/agent-adapters/README.md) |
 | `profiles/agent-environments/` | Sanitized profile templates and transactional installers | [Profiles](profiles/agent-environments/README.md) |
 | `tools/repo-hygiene/` | Narrow repository-maintenance utilities | [History cleaner](tools/repo-hygiene/coauthor-trailer-cleaner/README.md) |

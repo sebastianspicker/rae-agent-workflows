@@ -1,7 +1,7 @@
 ---
 status: stable
 owner: core
-last_reviewed: 2026-10-07
+last_reviewed: 2026-10-08
 source_of_truth: scripts/src/architecture-check.ts
 evidence_links: reference/claims/evidence-index.md
 ---
@@ -41,6 +41,7 @@ flowchart LR
 | `packages/engine/` | Workflows, scheduling, providers, run state, graph projection, gates, and evidence | Private root npm workspace package |
 | `packages/contracts/v1/` | Versioned JSON Schemas crossing package and process boundaries | Private root workspace package; existing versions are immutable |
 | `workflows/` | Committed workflow topology and policy | Engine-owned data, not executable provider code |
+| `experiments/` | Repository-owned frozen task suites and preregistered experiment designs | Data, not code; read by the engine experiment runner |
 | `apps/operator/` | Authenticated loopback run and workflow interface | Private root workspace application |
 | `apps/platform/` | PostgreSQL control plane, HTTP/MCP API, object storage, and remote worker | Experimental package with a separate lockfile |
 | `packages/ralph/` | Story selection, read-only audit/lint, and recoverable fixing transactions | Independent TypeScript runtime |
@@ -117,6 +118,18 @@ is retained only for explicit `--legacy-linear` runs and existing v1 resumes.
 Workflow 2.2 adds experimental local wait-and-signal behavior without changing
 stored 2.0 or 2.1 runs.
 
+## Experiment flow
+
+`rae experiment` runs preregistered comparisons over a frozen task suite. It
+loads the experiment and verifies the pinned suite digest, plans an interleaved
+trial order from the design seed, and materializes the target repository as a
+fresh Git repository for each trial. Each trial is an ordinary autonomous run
+with checkpoint policy `none`. The runner then collects the run evidence,
+evaluates the acceptance checks, writes one trial record, and later derives the
+report and benchmark card from the records. See
+[Experiments 1.0 contracts](reference/contracts/experiments-v1.md) and
+[Run an experiment](how-to/run-an-experiment.md).
+
 ## State ownership
 
 | State | Owner and location | Authority |
@@ -124,6 +137,7 @@ stored 2.0 or 2.1 runs.
 | Run requests, attempts, gates, events, traces, checkpoints, graph projection | Engine, `.pipeline/runs/<run-id>/` | Authoritative for that local run |
 | Workflow revisions and activations | Human operator, Git common directory `rae-workflows/v2/` | Affects future runs only |
 | Cross-run graph memory | Human operator, Git common directory `rae-memory/v1/` | Advisory; promotion and rejection are explicit |
+| Experiment lock, trial records, logs, reports and exports | Engine experiment runner, `.pipeline/experiments/<experiment-id>/` | Authoritative for that experiment's trial records; reports are derived |
 | Ralph PRD, reports, and runtime log | Ralph package or embedded installation | Separate from engine run state |
 | Ralph fixing journals and immutable baselines | Private external transaction directory | Recovery authority for a fixing transaction |
 | Hosted runs, leases, events, outbox, and artifact metadata | Experimental platform PostgreSQL | Hosted control-plane state only |
@@ -190,6 +204,7 @@ publication.
 - [System overview](reference/architecture/system-overview.md)
 - [Module boundaries](reference/architecture/module-boundaries.md)
 - [Workflow 2.0 and 2.1 contract](reference/contracts/workflow-v2.md)
+- [Experiments 1.0 contracts](reference/contracts/experiments-v1.md)
 - [Experimental hosted platform](reference/architecture/experimental-hosted-platform.md)
 - Engine guide (`packages/engine/README.md` at the repository root)
 - Operator guide (`apps/operator/README.md` at the repository root)

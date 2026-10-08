@@ -722,6 +722,552 @@ export type AutonomousPolicy = {
   };
 };
 
+export type ExperimentsEvidenceManifestV1 = {
+  schema_version: "1.0.0";
+  experiment_id: string;
+  experiment_digest: string;
+  suite_digest: string;
+  input_digest: string;
+  trial_id: string;
+  arm_id: string;
+  task_id: string;
+  repetition: number;
+  sequence: number;
+  run_id: string;
+  created_at: string;
+  files: Array<{ path: string; sha256: string; bytes: number; executable: boolean }>;
+};
+
+export type ExperimentsExperimentReportV1DefsDigest = string;
+
+export type ExperimentsExperimentReportV1DefsMetricName =
+  | "pass_rate"
+  | "ship_rate"
+  | "acceptance_rate"
+  | "wall_clock_ms"
+  | "provider_attempts"
+  | "repair_rounds"
+  | "total_tokens"
+  | "output_tokens"
+  | "estimated_cost"
+  | "seeded_defects_shipped"
+  | "changed_paths";
+
+export type ExperimentsExperimentReportV1DefsProportion = {
+  successes: number;
+  trials: number;
+  estimate: number | null;
+  ci_low: number | null;
+  ci_high: number | null;
+  method: "wilson";
+};
+
+export type ExperimentsExperimentReportV1DefsArmSummary = {
+  arm_id: string;
+  label: string;
+  n: number;
+  proportions: {
+    pass_rate: ExperimentsExperimentReportV1DefsProportion;
+    ship_rate: ExperimentsExperimentReportV1DefsProportion;
+    acceptance_rate: ExperimentsExperimentReportV1DefsProportion;
+  };
+  metrics: { [key: string]: unknown };
+  pass_at_k: Array<{ k: number; estimate: number | null; tasks: number }>;
+  tokens_measurement: { complete: number; partial: number; unavailable: number };
+};
+
+export type ExperimentsExperimentReportV1DefsInterval = {
+  estimate: number | null;
+  ci_low: number | null;
+  ci_high: number | null;
+  method: "wilson" | "bootstrap-percentile" | "exact";
+};
+
+export type ExperimentsExperimentReportV1DefsComparison = {
+  arm: string;
+  control: string;
+  metric: ExperimentsExperimentReportV1DefsMetricName;
+  paired: boolean;
+  n: number;
+  difference: ExperimentsExperimentReportV1DefsInterval;
+  test: "mcnemar-exact" | "paired-permutation" | "unpaired-permutation" | "none";
+  p_value: number | null;
+  p_value_adjusted: number | null;
+  effect_size: { name: "risk-difference" | "cliffs-delta"; value: number | null };
+  discordant?: { arm_only: number; control_only: number };
+  significant: boolean;
+};
+
+export type ExperimentsExperimentReportV1 = {
+  schema_version: "1.0.0";
+  experiment_id: string;
+  experiment_digest: ExperimentsExperimentReportV1DefsDigest;
+  suite_digest: ExperimentsExperimentReportV1DefsDigest;
+  generated_at: string;
+  analysis: {
+    alpha: number;
+    bootstrap_samples: number;
+    permutation_samples: number;
+    correction: "none" | "holm";
+    seed: number;
+    paired: boolean;
+    primary_metric: ExperimentsExperimentReportV1DefsMetricName;
+    minimum_detectable_effect?: number;
+  };
+  trials: {
+    planned: number;
+    completed: number;
+    launch_failed: number;
+    collect_failed: number;
+    skipped: number;
+    missing: number;
+  };
+  arms: Array<ExperimentsExperimentReportV1DefsArmSummary>;
+  comparisons: Array<ExperimentsExperimentReportV1DefsComparison>;
+  agreement?: {
+    raters: Array<string>;
+    n: number;
+    cohens_kappa: number | null;
+    observed_agreement: number | null;
+  } | null;
+  verdict: {
+    status: "supported" | "refuted" | "inconclusive" | "not-evaluated";
+    primary_metric: ExperimentsExperimentReportV1DefsMetricName;
+    treatment_arm: string;
+    control_arm: string;
+    expected: "treatment-greater" | "treatment-less";
+    rationale: string;
+  };
+  card: {
+    title: string;
+    suite: {
+      suite_id: string;
+      revision: number;
+      task_count: number;
+      contamination_note: string;
+      license: string;
+    };
+    hypothesis: { [key: string]: unknown };
+    arms: Array<{ arm_id: string; label: string; run: { [key: string]: unknown } }>;
+    provenance: {
+      workflow_digests: Array<string>;
+      policy_digests: Array<string>;
+      execution_profile_digests: Array<string>;
+      providers: Array<string>;
+      models: Array<string>;
+      runtime_identities: Array<{ [key: string]: unknown }>;
+    };
+    limitations: Array<string>;
+    reproduction: { commands: Array<string> };
+  };
+};
+
+export type ExperimentsExperimentReportV2DefsDigest = string;
+
+export type ExperimentsExperimentReportV2DefsMetricName =
+  | "pass_rate"
+  | "ship_rate"
+  | "acceptance_rate"
+  | "wall_clock_ms"
+  | "provider_attempts"
+  | "repair_rounds"
+  | "total_tokens"
+  | "output_tokens"
+  | "estimated_cost"
+  | "seeded_defects_shipped"
+  | "changed_paths";
+
+export type ExperimentsExperimentReportV2DefsProportion = {
+  successes: number;
+  trials: number;
+  estimate: number | null;
+  ci_low: number | null;
+  ci_high: number | null;
+  method: "wilson" | "task-bootstrap-percentile";
+  units: number;
+};
+
+export type ExperimentsExperimentReportV2DefsArmSummary = {
+  arm_id: string;
+  label: string;
+  n: number;
+  proportions: {
+    pass_rate: ExperimentsExperimentReportV2DefsProportion;
+    ship_rate: ExperimentsExperimentReportV2DefsProportion;
+    acceptance_rate: ExperimentsExperimentReportV2DefsProportion;
+  };
+  metrics: { [key: string]: unknown };
+  pass_at_k: Array<{ k: number; estimate: number | null; tasks: number }>;
+  tokens_measurement: { complete: number; partial: number; unavailable: number };
+  coverage: {
+    planned: number;
+    completed: number;
+    launch_failed: number;
+    collect_failed: number;
+    skipped: number;
+    missing: number;
+    pass_observed: number;
+    pass_unknown: number;
+    pass_rate_lower: number | null;
+    pass_rate_upper: number | null;
+  };
+};
+
+export type ExperimentsExperimentReportV2DefsInterval = {
+  estimate: number | null;
+  ci_low: number | null;
+  ci_high: number | null;
+  method: "wilson" | "bootstrap-percentile" | "exact";
+};
+
+export type ExperimentsExperimentReportV2DefsComparison = {
+  arm: string;
+  control: string;
+  metric: ExperimentsExperimentReportV2DefsMetricName;
+  paired: boolean;
+  n: number;
+  difference: ExperimentsExperimentReportV2DefsInterval;
+  test: "mcnemar-exact" | "paired-permutation" | "unpaired-permutation" | "none";
+  p_value: number | null;
+  p_value_adjusted: number | null;
+  effect_size: { name: "risk-difference" | "cliffs-delta"; value: number | null };
+  discordant?: { arm_only: number; control_only: number };
+  significant: boolean;
+  arm_observed: number;
+  control_observed: number;
+  matched_trials: number;
+  unit: "task" | "trial";
+};
+
+export type ExperimentsExperimentReportV2 = {
+  schema_version: "2.0.0";
+  experiment_id: string;
+  experiment_digest: ExperimentsExperimentReportV2DefsDigest;
+  suite_digest: ExperimentsExperimentReportV2DefsDigest;
+  generated_at: string;
+  analysis: {
+    alpha: number;
+    bootstrap_samples: number;
+    permutation_samples: number;
+    correction: "none" | "holm";
+    seed: number;
+    paired: boolean;
+    primary_metric: ExperimentsExperimentReportV2DefsMetricName;
+    minimum_detectable_effect?: number;
+    unit: "task" | "trial";
+    multiplicity_family: "all-arm-metric-comparisons";
+    implementation: string;
+  };
+  trials: {
+    planned: number;
+    completed: number;
+    launch_failed: number;
+    collect_failed: number;
+    skipped: number;
+    missing: number;
+  };
+  arms: Array<ExperimentsExperimentReportV2DefsArmSummary>;
+  comparisons: Array<ExperimentsExperimentReportV2DefsComparison>;
+  agreement?: {
+    raters: Array<string>;
+    n: number;
+    cohens_kappa: number | null;
+    observed_agreement: number | null;
+  } | null;
+  verdict: {
+    status: "supported" | "refuted" | "inconclusive" | "not-evaluated";
+    primary_metric: ExperimentsExperimentReportV2DefsMetricName;
+    treatment_arm: string;
+    control_arm: string;
+    expected: "treatment-greater" | "treatment-less";
+    rationale: string;
+  };
+  card: {
+    title: string;
+    suite: {
+      suite_id: string;
+      revision: number;
+      task_count: number;
+      contamination_note: string;
+      license: string;
+    };
+    hypothesis: { [key: string]: unknown };
+    arms: Array<{ arm_id: string; label: string; run: { [key: string]: unknown } }>;
+    provenance: {
+      workflow_digests: Array<string>;
+      policy_digests: Array<string>;
+      execution_profile_digests: Array<string>;
+      providers: Array<string>;
+      models: Array<string>;
+      runtime_identities: Array<{ [key: string]: unknown }>;
+    };
+    limitations: Array<string>;
+    reproduction: { commands: Array<string> };
+  };
+  task_results: Array<{
+    arm_id: string;
+    task_id: string;
+    metric: ExperimentsExperimentReportV2DefsMetricName;
+    planned: number;
+    observed: number;
+    mean: number | null;
+  }>;
+  records_digest: ExperimentsExperimentReportV2DefsDigest;
+  input_digest: string | null;
+};
+
+export type ExperimentsExperimentV1DefsArmId = string;
+
+export type ExperimentsExperimentV1DefsRelativePath = string;
+
+export type ExperimentsExperimentV1DefsIdentifier = string;
+
+export type ExperimentsExperimentV1DefsArm = {
+  arm_id: ExperimentsExperimentV1DefsArmId;
+  label: string;
+  description?: string;
+  run: {
+    workflow?: ExperimentsExperimentV1DefsRelativePath;
+    execution_profile?: ExperimentsExperimentV1DefsRelativePath;
+    policy?: ExperimentsExperimentV1DefsRelativePath;
+    context_mode?: "legacy" | "bounded";
+    provider?: "auto" | "codex" | "opencode" | "command";
+    model?: string;
+    reasoning_effort?: "low" | "medium" | "high" | "xhigh";
+    variant?: string;
+    graph_memory?: "off" | "read" | "read-write";
+    max_concurrency?: number;
+    max_repair_rounds?: number;
+    timeout_seconds?: number;
+    agent_command?: string;
+    agent_args?: Array<string>;
+    allow_unsafe_command_provider?: boolean;
+  };
+  pricing?: {
+    currency: string;
+    input_per_million: number;
+    cached_input_per_million?: number;
+    output_per_million: number;
+    reasoning_output_per_million?: number;
+  };
+};
+
+export type ExperimentsExperimentV1DefsMetricName =
+  | "pass_rate"
+  | "ship_rate"
+  | "acceptance_rate"
+  | "wall_clock_ms"
+  | "provider_attempts"
+  | "repair_rounds"
+  | "total_tokens"
+  | "output_tokens"
+  | "estimated_cost"
+  | "seeded_defects_shipped"
+  | "changed_paths";
+
+export type ExperimentsExperimentV1 = {
+  schema_version: "1.0.0";
+  experiment_id: string;
+  revision: number;
+  title: string;
+  description?: string;
+  hypothesis: {
+    claim_id?: string;
+    statement: string;
+    treatment_arm: ExperimentsExperimentV1DefsArmId;
+    control_arm: ExperimentsExperimentV1DefsArmId;
+    expected: "treatment-greater" | "treatment-less";
+    falsifier: string;
+  };
+  suite: {
+    path: ExperimentsExperimentV1DefsRelativePath;
+    digest?: string;
+    task_ids?: Array<ExperimentsExperimentV1DefsIdentifier>;
+    tags?: Array<string>;
+  };
+  arms: Array<ExperimentsExperimentV1DefsArm>;
+  design: {
+    repetitions: number;
+    seed: number;
+    order?: "interleaved" | "sequential";
+    paired?: boolean;
+    max_trial_wall_clock_seconds?: number;
+  };
+  metrics: {
+    primary: ExperimentsExperimentV1DefsMetricName;
+    secondary?: Array<ExperimentsExperimentV1DefsMetricName>;
+    pass_at_k?: Array<number>;
+  };
+  analysis: {
+    unit?: "task" | "trial";
+    alpha: number;
+    bootstrap_samples?: number;
+    permutation_samples?: number;
+    correction?: "none" | "holm";
+    minimum_detectable_effect?: number;
+  };
+  budgets?: { max_trials?: number; max_wall_clock_seconds?: number; max_estimated_cost?: number };
+};
+
+export type ExperimentsTaskSuiteV1DefsIdentifier = string;
+
+export type ExperimentsTaskSuiteV1DefsArgv = Array<string>;
+
+export type ExperimentsTaskSuiteV1DefsRelativePath = string;
+
+export type ExperimentsTaskSuiteV1DefsCheck =
+  | {
+      check_id: ExperimentsTaskSuiteV1DefsIdentifier;
+      kind: "command";
+      command: ExperimentsTaskSuiteV1DefsArgv;
+      expected_exit_code?: number;
+      timeout_seconds?: number;
+      description?: string;
+    }
+  | {
+      check_id: ExperimentsTaskSuiteV1DefsIdentifier;
+      kind: "path-exists" | "path-absent";
+      path: ExperimentsTaskSuiteV1DefsRelativePath;
+      description?: string;
+    }
+  | {
+      check_id: ExperimentsTaskSuiteV1DefsIdentifier;
+      kind: "file-contains" | "file-lacks";
+      path: ExperimentsTaskSuiteV1DefsRelativePath;
+      pattern: string;
+      description?: string;
+    };
+
+export type ExperimentsTaskSuiteV1DefsSeededDefect = {
+  defect_id: ExperimentsTaskSuiteV1DefsIdentifier;
+  description: string;
+  detector: ExperimentsTaskSuiteV1DefsCheck;
+};
+
+export type ExperimentsTaskSuiteV1DefsTask = {
+  task_id: ExperimentsTaskSuiteV1DefsIdentifier;
+  title: string;
+  prompt: string;
+  repository: ExperimentsTaskSuiteV1DefsIdentifier;
+  tags?: Array<string>;
+  difficulty?: "trivial" | "easy" | "medium" | "hard";
+  acceptance: { checks: Array<ExperimentsTaskSuiteV1DefsCheck>; require_all?: boolean };
+  seeded_defects?: Array<ExperimentsTaskSuiteV1DefsSeededDefect>;
+  reference_note?: string;
+};
+
+export type ExperimentsTaskSuiteV1 = {
+  schema_version: "1.0.0";
+  suite_id: string;
+  revision: number;
+  title: string;
+  description?: string;
+  provenance: {
+    created?: string;
+    authors: Array<string>;
+    license: string;
+    sources?: Array<string>;
+    contamination_note: string;
+  };
+  repositories: { [key: string]: unknown };
+  tasks: Array<ExperimentsTaskSuiteV1DefsTask>;
+};
+
+export type ExperimentsTrialExecutionV1 = {
+  schema_version: "1.0.0";
+  experiment_id: string;
+  experiment_digest: string;
+  suite_digest: string;
+  input_digest: string;
+  trial_id: string;
+  arm_id: string;
+  task_id: string;
+  repetition: number;
+  sequence: number;
+  phase: "started" | "finished" | "acknowledged";
+  started_at: string;
+  finished_at?: string;
+  elapsed_ms?: number | null;
+  record_digest?: string;
+  recovered?: boolean;
+  runner: { pid: number; hostname: string };
+  acknowledged_at?: string;
+  requires_acknowledgment?: boolean;
+};
+
+export type ExperimentsTrialRecordV1DefsDigest = string;
+
+export type ExperimentsTrialRecordV1DefsTimestamp = string;
+
+export type ExperimentsTrialRecordV1DefsCheckResult = {
+  check_id: string;
+  kind: "command" | "path-exists" | "path-absent" | "file-contains" | "file-lacks";
+  passed: boolean;
+  exit_code?: number | null;
+  detail?: string;
+};
+
+export type ExperimentsTrialRecordV1 = {
+  schema_version: "1.0.0";
+  experiment_id: string;
+  experiment_digest: ExperimentsTrialRecordV1DefsDigest;
+  suite_digest: ExperimentsTrialRecordV1DefsDigest;
+  trial_id: string;
+  arm_id: string;
+  task_id: string;
+  repetition: number;
+  sequence: number;
+  status: "completed" | "launch-failed" | "collect-failed" | "skipped";
+  run: {
+    run_id?: string;
+    status?: string;
+    workspace_root?: string;
+    report_path?: string;
+    workflow_digest?: ExperimentsTrialRecordV1DefsDigest;
+    policy_digest?: ExperimentsTrialRecordV1DefsDigest;
+    execution_profile_digest?: ExperimentsTrialRecordV1DefsDigest;
+    context_mode?: "legacy" | "bounded";
+    provider?: string;
+    model?: string | null;
+    reasoning_effort?: string | null;
+    runtime_identity?: { [key: string]: unknown } | null;
+    started_at: ExperimentsTrialRecordV1DefsTimestamp;
+    finished_at: ExperimentsTrialRecordV1DefsTimestamp;
+    wall_clock_ms: number;
+  };
+  outcome: {
+    pass: boolean | null;
+    reached_ship_state: boolean;
+    acceptance_pass: boolean | null;
+    acceptance: Array<ExperimentsTrialRecordV1DefsCheckResult>;
+    seeded_defects_shipped: number | null;
+    seeded_defects: Array<ExperimentsTrialRecordV1DefsCheckResult>;
+  };
+  measurements: {
+    provider_attempts: number;
+    nodes: { passed: number; failed: number; blocked: number; stopped: number; skipped: number };
+    repair_rounds: number;
+    changed_paths: number;
+    tokens: {
+      measurement_status: "complete" | "partial" | "unavailable";
+      attempts_measured: number;
+      input_tokens?: number;
+      cached_input_tokens?: number;
+      output_tokens?: number;
+      reasoning_output_tokens?: number;
+    };
+    estimated_cost: { currency: string; value: number; basis: "arm-pricing" } | null;
+  };
+  failure_layer_labels: Array<{
+    rater: string;
+    layer: "representation" | "inference" | "coordination" | "governance" | "none";
+    note?: string;
+    labeled_at: ExperimentsTrialRecordV1DefsTimestamp;
+  }>;
+  evidence_refs: Array<string>;
+  error?: string;
+};
+
 export type GraphGraphContext = {
   schema_version: "1.0.0";
   repository_id: string;
@@ -1245,6 +1791,13 @@ export interface ContractTypes {
   "artifacts/review-report.schema.json": ArtifactsReviewReport;
   "artifacts/traceability-check.schema.json": ArtifactsTraceabilityCheck;
   "autonomous-policy.schema.json": AutonomousPolicy;
+  "experiments/evidence-manifest-v1.schema.json": ExperimentsEvidenceManifestV1;
+  "experiments/experiment-report-v1.schema.json": ExperimentsExperimentReportV1;
+  "experiments/experiment-report-v2.schema.json": ExperimentsExperimentReportV2;
+  "experiments/experiment-v1.schema.json": ExperimentsExperimentV1;
+  "experiments/task-suite-v1.schema.json": ExperimentsTaskSuiteV1;
+  "experiments/trial-execution-v1.schema.json": ExperimentsTrialExecutionV1;
+  "experiments/trial-record-v1.schema.json": ExperimentsTrialRecordV1;
   "graph/graph-context.schema.json": GraphGraphContext;
   "graph/graph-edge.schema.json": GraphGraphEdge;
   "graph/graph-manifest.schema.json": GraphGraphManifest;
@@ -1297,6 +1850,20 @@ export const schemaDigests = {
     "d9b30cc2ca26ad046ccbbec683c3684cb2e447f7bc5364b26377cfbddf76c2c1",
   "autonomous-policy.schema.json":
     "2fd824dc499a994f34c13654b49c1b0770f1d94918151d59657848903040fad9",
+  "experiments/evidence-manifest-v1.schema.json":
+    "599f191f8c8415de2f2b58be90a0c23d1fb780aa671decdf2dded845247e8d54",
+  "experiments/experiment-report-v1.schema.json":
+    "37a5084efbe6981ec78aec04ea8fcba62de11dee9f5f07200f7138d9a73e5f72",
+  "experiments/experiment-report-v2.schema.json":
+    "70616174032a691ce476e89d5b3719591f4648641b36e1c8090bf59a44bc099c",
+  "experiments/experiment-v1.schema.json":
+    "97f3d5fda9e322786152eb0bc9384739fbcb7aa764fc9dbbf77b8b3871d71d44",
+  "experiments/task-suite-v1.schema.json":
+    "46f800601434edb35058d26028ea94bcb93518e911608207b2736337f0aafab6",
+  "experiments/trial-execution-v1.schema.json":
+    "ca352896c9ae17c163d7eee4add6c8ba34f6e4a05af934675319a24491f5c8bd",
+  "experiments/trial-record-v1.schema.json":
+    "e165de67e32840aa14375ed87d76f5e4236a20e125be2304ac6f2fdc75f8afc8",
   "graph/graph-context.schema.json":
     "d91bbeacc4d7dec22fb2e0d2ab1570c7beba19f8316dbb9839e94f29edb69b05",
   "graph/graph-edge.schema.json":

@@ -1,0 +1,227 @@
+{
+  "schema_version": "1.0.0",
+  "suite_id": "rae-smoke-v1",
+  "revision": 1,
+  "title": "RAE smoke suite: four small maintenance tasks on a dependency-free Node.js project",
+  "description": "A tooling check for the experiment runner. Four short tasks (one feature, one bugfix, one documentation change and one robustness change) on the tiny-service fixture repository. It exercises materialization, isolated runs, acceptance checks and seeded-defect detection. It is not a capability benchmark.",
+  "provenance": {
+    "created": "2026-10-08",
+    "authors": [
+      "RAE maintainers"
+    ],
+    "license": "MIT",
+    "sources": [],
+    "contamination_note": "The tasks and the tiny-service repository were authored for this repository on 2026-10-08 against a private toy project. They are not drawn from public benchmarks, so training-set contamination of the task text is unlikely. The underlying patterns (median, percentile, duration formatting) are ubiquitous in public code, so models may solve them from general knowledge."
+  },
+  "repositories": {
+    "tiny-service": {
+      "kind": "directory",
+      "path": "repositories/tiny-service",
+      "description": "Dependency-free Node.js project with a stats module (including a seeded median defect), a duration formatter and a minimal check suite."
+    }
+  },
+  "tasks": [
+    {
+      "task_id": "add-percentile",
+      "title": "Add a percentile function to the stats module",
+      "prompt": "Add a function percentile(values, p) to src/stats.js and export it. It takes an array of numbers and a fraction p between 0 and 1 and returns the p-th percentile using linear interpolation between closest ranks (the type-7 definition, as used by NumPy's default). For example percentile([1, 2, 3, 4], 0.25) is 1.75. Add a check file under checks/ whose name ends in .check.js that covers the interpolated, minimum and maximum cases. Mention the new function in README.md and make sure npm run check passes.",
+      "repository": "tiny-service",
+      "tags": [
+        "feature",
+        "tests"
+      ],
+      "difficulty": "easy",
+      "acceptance": {
+        "checks": [
+          {
+            "check_id": "percentile-value",
+            "kind": "command",
+            "command": [
+              "node",
+              "--input-type=module",
+              "-e",
+              "import { percentile } from './src/stats.js'; const v = percentile([1, 2, 3, 4], 0.25); process.exit(Math.abs(v - 1.75) < 1e-9 ? 0 : 1);"
+            ],
+            "timeout_seconds": 60,
+            "description": "percentile([1, 2, 3, 4], 0.25) is 1.75."
+          },
+          {
+            "check_id": "project-checks",
+            "kind": "command",
+            "command": [
+              "node",
+              "--test",
+              "checks/*.check.js"
+            ],
+            "timeout_seconds": 120,
+            "description": "The project's own check suite passes and runs at least one check file."
+          },
+          {
+            "check_id": "readme-mentions-percentile",
+            "kind": "file-contains",
+            "path": "README.md",
+            "pattern": "percentile",
+            "description": "The README mentions the new function."
+          }
+        ],
+        "require_all": true
+      },
+      "reference_note": "A correct solution sorts a copy of the input, computes the index (n - 1) * p and interpolates between the two neighbouring elements."
+    },
+    {
+      "task_id": "fix-median",
+      "title": "Fix median for even-length input",
+      "prompt": "median in src/stats.js returns the wrong value for arrays with an even number of elements: median([1, 2, 3, 4]) returns 3 instead of 2.5. Fix it so that even-length input returns the average of the two middle values, and keep the behaviour for odd-length input. Add a regression check to a file under checks/ whose name ends in .check.js. Run npm run check before you finish.",
+      "repository": "tiny-service",
+      "tags": [
+        "bugfix",
+        "tests"
+      ],
+      "difficulty": "easy",
+      "acceptance": {
+        "checks": [
+          {
+            "check_id": "median-values",
+            "kind": "command",
+            "command": [
+              "node",
+              "--input-type=module",
+              "-e",
+              "import { median } from './src/stats.js'; process.exit(median([1, 2, 3, 4]) === 2.5 && median([3, 1, 2]) === 2 ? 0 : 1);"
+            ],
+            "timeout_seconds": 60,
+            "description": "median is correct for even-length and odd-length input."
+          },
+          {
+            "check_id": "project-checks",
+            "kind": "command",
+            "command": [
+              "node",
+              "--test",
+              "checks/*.check.js"
+            ],
+            "timeout_seconds": 120,
+            "description": "The project's own check suite passes and runs at least one check file."
+          }
+        ],
+        "require_all": true
+      },
+      "seeded_defects": [
+        {
+          "defect_id": "even-length-median",
+          "description": "median still returns the upper middle element for even-length input.",
+          "detector": {
+            "check_id": "detect-even-length-median",
+            "kind": "command",
+            "command": [
+              "node",
+              "--input-type=module",
+              "-e",
+              "import { median } from './src/stats.js'; process.exit(median([1, 2, 3, 4]) === 3 ? 0 : 1);"
+            ],
+            "timeout_seconds": 60,
+            "description": "Exits 0 while median([1, 2, 3, 4]) still returns 3."
+          }
+        }
+      ],
+      "reference_note": "The fix averages sorted[n / 2 - 1] and sorted[n / 2] when n is even."
+    },
+    {
+      "task_id": "document-format",
+      "title": "Document formatDuration",
+      "prompt": "formatDuration in src/format.js has no documentation. Add a JSDoc comment that describes the function, its ms parameter with @param and its return value with @returns. Then add a section about formatDuration to README.md with three short examples of input and output, such as 1500 giving 1.5s. Do not change the behaviour of the function, and make sure npm run check still passes.",
+      "repository": "tiny-service",
+      "tags": [
+        "docs"
+      ],
+      "difficulty": "trivial",
+      "acceptance": {
+        "checks": [
+          {
+            "check_id": "jsdoc-param",
+            "kind": "file-contains",
+            "path": "src/format.js",
+            "pattern": "@param",
+            "description": "formatDuration documents its parameter."
+          },
+          {
+            "check_id": "readme-mentions-format",
+            "kind": "file-contains",
+            "path": "README.md",
+            "pattern": "formatDuration",
+            "description": "The README has a formatDuration section."
+          },
+          {
+            "check_id": "project-checks",
+            "kind": "command",
+            "command": [
+              "node",
+              "--test",
+              "checks/*.check.js"
+            ],
+            "timeout_seconds": 120,
+            "description": "The project's own check suite passes and runs at least one check file."
+          }
+        ],
+        "require_all": true
+      }
+    },
+    {
+      "task_id": "reject-invalid-input",
+      "title": "Reject empty and non-finite input in mean and median",
+      "prompt": "mean and median in src/stats.js accept anything. mean([]) silently returns NaN, and arrays containing NaN or Infinity produce meaningless results. Make both functions throw a TypeError when the array is empty or when any element is not a finite number. Valid input must keep working: mean([1, 2, 3]) is still 2. Add checks for the new behaviour in a file under checks/ whose name ends in .check.js and make sure npm run check passes.",
+      "repository": "tiny-service",
+      "tags": [
+        "robustness",
+        "tests"
+      ],
+      "difficulty": "medium",
+      "acceptance": {
+        "checks": [
+          {
+            "check_id": "invalid-input-throws",
+            "kind": "command",
+            "command": [
+              "node",
+              "--input-type=module",
+              "-e",
+              "import assert from 'node:assert/strict'; import { mean, median } from './src/stats.js'; try { assert.throws(() => mean([]), TypeError); assert.throws(() => median([1, NaN])); assert.equal(mean([1, 2, 3]), 2); } catch { process.exit(1); } process.exit(0);"
+            ],
+            "timeout_seconds": 60,
+            "description": "mean([]) throws a TypeError, median([1, NaN]) throws, and valid input still works."
+          },
+          {
+            "check_id": "project-checks",
+            "kind": "command",
+            "command": [
+              "node",
+              "--test",
+              "checks/*.check.js"
+            ],
+            "timeout_seconds": 120,
+            "description": "The project's own check suite passes and runs at least one check file."
+          }
+        ],
+        "require_all": true
+      },
+      "seeded_defects": [
+        {
+          "defect_id": "silent-nan-mean",
+          "description": "mean([]) still returns NaN instead of throwing.",
+          "detector": {
+            "check_id": "detect-silent-nan-mean",
+            "kind": "command",
+            "command": [
+              "node",
+              "--input-type=module",
+              "-e",
+              "import { mean } from './src/stats.js'; try { process.exit(Number.isNaN(mean([])) ? 0 : 1); } catch { process.exit(1); }"
+            ],
+            "timeout_seconds": 60,
+            "description": "Exits 0 while mean([]) returns NaN without throwing."
+          }
+        }
+      ]
+    }
+  ]
+}

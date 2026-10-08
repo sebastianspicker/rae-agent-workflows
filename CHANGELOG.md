@@ -7,6 +7,21 @@ packages retain their own changelogs where applicable.
 
 ### Added
 
+- Experiment report v2: task-level inference, global Holm correction, explicit
+  coverage and missing-outcome bounds, per-task CSV, and content digests.
+- Durable experiment start/finish/acknowledgment receipts, crash recovery that
+  preserves unknown outcomes, cumulative wall budgets and conservative unknown
+  cost accounting. V3 locks replace v1/v2 for new execution; old outputs remain
+  reportable. DR-003 documents migration and soft cost-limit semantics.
+- Private execution evidence archives survive verified workspace cleanup:
+  exact run bytes, committed source, tracked patches and nonignored new files.
+  `experiment verify-evidence` checks provenance and file hashes. Interrupted
+  evaluators remain unknown rather than becoming measured model failures.
+- Offline `experiment analyze --bundle` reproduces exported analyses without
+  providers or original fixtures. Execution locks now fingerprint input
+  contents; resume preserves failed records and limits only new trials.
+  See DR-002 for legacy-lock/report migration.
+
 - Autonomous `agent doctor|run|resume|status|stop|signal|resolve-checkpoint|events`
   workflow with isolated Git worktrees, typed phase artifacts, plan ownership
   checks, command evidence, durable human control, and a reviewed release
@@ -48,6 +63,20 @@ packages retain their own changelogs where applicable.
 - Per-workspace test scripts, tracked test directories for every package, and
   a CI step that runs the developer-tool image protocol tests.
 - [Workflow 2.0 and 2.1 reference](docs/reference/contracts/workflow-v2.md).
+- Preregistered experiment layer. Four additive v1 contracts (task suite,
+  experiment, trial record, experiment report) under
+  `packages/contracts/v1/schemas/experiments/`; the `rae experiment`
+  `validate|plan|run|label|report|export` commands, which run interleaved arms
+  as isolated `agent run` trials and keep one record per trial; seeded
+  statistics (Wilson intervals, bootstrap, exact McNemar, sign-flip permutation,
+  Holm correction, pass@k, Cliff's delta, Cohen's kappa), benchmark cards and
+  JSON lines/CSV exports with a datasheet; committed data under `experiments/`
+  (the four-task `rae-smoke-v1` suite, a single-writer baseline workflow, two
+  execution profiles and designs for CLM-007, CLM-014 and CLM-016); and the
+  [contract reference](docs/reference/contracts/experiments-v1.md),
+  [how-to](docs/how-to/run-an-experiment.md),
+  [method](docs/explanation/science/experimental-method.md) and
+  [decision record](docs/reference/decisions/dr-001-experiment-layer.md) pages.
 
 ### Changed
 

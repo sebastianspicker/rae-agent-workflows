@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rae.local/contracts/experiments/trial-execution-v1.schema.json",
+  "title": "RAE experiment trial execution journal v1",
+  "description": "Immutable start and finish receipts. A start without a terminal trial must never authorize an automatic retry. A null elapsed_ms means duration is unknown after interruption.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "experiment_id",
+    "experiment_digest",
+    "suite_digest",
+    "input_digest",
+    "trial_id",
+    "arm_id",
+    "task_id",
+    "repetition",
+    "sequence",
+    "phase",
+    "started_at",
+    "runner"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "experiment_id": {
+      "type": "string"
+    },
+    "experiment_digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "suite_digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "input_digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "trial_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,191}$"
+    },
+    "arm_id": {
+      "type": "string"
+    },
+    "task_id": {
+      "type": "string"
+    },
+    "repetition": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "phase": {
+      "enum": [
+        "started",
+        "finished",
+        "acknowledged"
+      ]
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "finished_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "elapsed_ms": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "record_digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "recovered": {
+      "type": "boolean"
+    },
+    "runner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pid",
+        "hostname"
+      ],
+      "properties": {
+        "pid": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "hostname": {
+          "type": "string"
+        }
+      }
+    },
+    "acknowledged_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "requires_acknowledgment": {
+      "type": "boolean"
+    }
+  },
+  "if": {
+    "properties": {
+      "phase": {
+        "const": "finished"
+      }
+    }
+  },
+  "then": {
+    "required": [
+      "finished_at",
+      "elapsed_ms",
+      "record_digest",
+      "recovered",
+      "requires_acknowledgment"
+    ]
+  },
+  "else": {
+    "if": {
+      "properties": {
+        "phase": {
+          "const": "acknowledged"
+        }
+      }
+    },
+    "then": {
+      "required": [
+        "acknowledged_at",
+        "record_digest"
+      ]
+    }
+  }
+}

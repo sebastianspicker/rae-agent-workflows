@@ -16,6 +16,7 @@ Commands:
   doctor                            Check Node and compiled package entrypoints
   agent <subcommand> [args]         Autonomous coding-agent orchestrator
   graph <subcommand> [args]         Repository graph projections and memory
+  experiment <subcommand> [args]    Preregistered experiments over frozen task suites
   operator serve [args]             Authenticated loopback operator console
   orchestrate <subcommand> [args]   Staged workflow interface
   worktree <subcommand> [args]      Worktree orchestration aliases
@@ -103,6 +104,7 @@ async function doctor(): Promise<number> {
   });
   for (const entry of [
     "autonomousEntrypoint",
+    "experimentEntrypoint",
     "graphCliEntrypoint",
     "stagedEntrypoint",
     "pipelineInitEntrypoint",
@@ -266,6 +268,9 @@ export async function main(args: string[]): Promise<number> {
       return execute(await engineEntry("autonomousEntrypoint"), rest);
     case "graph":
       return execute(await engineEntry("graphCliEntrypoint"), rest);
+    case "experiment":
+    case "experiments":
+      return execute(await engineEntry("experimentEntrypoint"), rest);
     case "orchestrate":
     case "orchestration":
       return orchestrate(rest);

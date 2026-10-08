@@ -1,7 +1,7 @@
 ---
 status: stable
 owner: core
-last_reviewed: 2026-08-27
+last_reviewed: 2026-10-08
 source_of_truth: README.md
 evidence_links: claims/evidence-index.md
 ---
@@ -17,6 +17,7 @@ evidence_links: claims/evidence-index.md
 | `packages/ralph/` | Independent deterministic story loop |
 | `packages/dev-tools/` | Isolated quality, review, and trace tools |
 | `workflows/` | Repository-owned workflow definitions and recipes |
+| `experiments/` | Frozen task suites, experiment workflows and profiles, and preregistered experiment designs (data) |
 | `integrations/agent-adapters/` | Adapter templates, generated guidance, and sync tooling |
 | `profiles/agent-environments/` | Sanitized portable environment publication lane |
 | `tools/` | Narrow repository-maintenance utilities |

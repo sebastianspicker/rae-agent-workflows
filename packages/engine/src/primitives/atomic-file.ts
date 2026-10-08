@@ -34,7 +34,7 @@ function syncDirectory(directory: string): void {
 }
 
 /** Exclusive but non-atomic create for filesystems without hard links; readers may see a prefix. */
-function writeExclusiveFileDirect(pathValue: string, content: string): void {
+function writeExclusiveFileDirect(pathValue: string, content: string | Uint8Array): void {
   const descriptor = openSync(pathValue, "wx", 0o600);
   try {
     writeFileSync(descriptor, content);
@@ -50,7 +50,7 @@ function writeExclusiveFileDirect(pathValue: string, content: string): void {
  * no-overwrite guarantee of an exclusive create. Where the filesystem cannot hard-link (EPERM,
  * ENOTSUP, EXDEV) the file is created exclusively in place instead, without the atomic guarantee.
  */
-export function writeExclusiveFileAtomic(pathValue: string, content: string): void {
+export function writeExclusiveFileAtomic(pathValue: string, content: string | Uint8Array): void {
   const directory = dirname(pathValue);
   const temporary = resolve(
     directory,

@@ -1,7 +1,7 @@
 ---
 status: stable
 owner: core
-last_reviewed: 2026-10-07
+last_reviewed: 2026-10-08
 source_of_truth: scripts/src/rae.ts
 evidence_links: ../claims/evidence-index.md
 ---
@@ -22,6 +22,7 @@ before dispatching to the package that owns each command.
 | `operator serve` (alias `console serve`) | orchestration operator console | Serve the loopback console for allowlisted repositories |
 | `orchestrate` (alias `orchestration`) | orchestration stage runner | Manage pipeline stages, artifacts, gates, and summaries |
 | `worktree` | orchestration worktree CLI | Create, summarize, record review state for, or clean isolated runs |
+| `experiment` (alias `experiments`) | orchestration experiment CLI | Validate, plan, run, label, report, export and reproduce experiment analyses |
 | `ralph` | Ralph package | Run audit, linting, or story-scoped fixing |
 | `hygiene` | repository hygiene tools | Run an explicitly selected maintenance utility |
 | `profile` | `profiles/agent-environments` | Install or uninstall a public agent profile transactionally |
@@ -58,8 +59,8 @@ The command prints the repository root and the invoking directory, then one
 - `git`: `git --version` succeeds
 - `native-filesystem`: the compiled `@rae/fs-bridge` module opens the
   repository root
-- `autonomousEntrypoint`, `graphCliEntrypoint`, `stagedEntrypoint`, and
-  `pipelineInitEntrypoint`: `@rae/engine` exports the entrypoint and its
+- `autonomousEntrypoint`, `experimentEntrypoint`, `graphCliEntrypoint`,
+  `stagedEntrypoint`, and `pipelineInitEntrypoint`: `@rae/engine` exports the entrypoint and its
   compiled file exists
 - `operator`, `ralph`, `profiles`, and `history`: the compiled entrypoints of
   the operator, Ralph, the profile installer, and the coauthor trailer cleaner
@@ -146,6 +147,44 @@ npm run rae -- agent run \
 
 OpenCode writes require the isolated macOS worktree backend and reject
 `--in-place`. `auto` never selects OpenCode.
+
+## Experiments
+
+```bash
+npm run rae -- experiment validate --experiment experiments/clm-007-context-mode.experiment.json
+npm run rae -- experiment plan     --experiment <file> [--output <dir>]
+npm run rae -- experiment run      --experiment <file> [--output <dir>] [--max-trials <n>] [--dry-run] [--cleanup-work] [--acknowledge-interrupted]
+npm run rae -- experiment label    --experiment <file> --trial <id> --rater <name> --layer <layer> [--note <text>]
+npm run rae -- experiment report   --experiment <file> [--output <dir>]
+npm run rae -- experiment export   --experiment <file> [--output <dir>] [--format jsonl|csv|all]
+npm run rae -- experiment analyze  --bundle <export-dir> [--json]
+npm run rae -- experiment verify-evidence --experiment <file> [--output <dir>] [--json]
+```
+
+- `validate` loads the experiment and its suite, checks the pinned suite digest, and
+  prints the digests and the planned trial count.
+- `plan` writes the lock file and prints the trial table.
+- `run` plans, then executes the trials as ordinary isolated `agent run` runs with
+  checkpoint policy `none`. Re-running resumes. It exits 0 when every executed
+  or encountered retained trial completed with no stop reason, and 2 otherwise. Recorded failures
+  are preserved; `--max-trials` counts only newly executed trials. Interrupted
+  slots require explicit acknowledgment before new dispatch, never auto-retry.
+- `label` records a failure-layer label (`representation`, `inference`,
+  `coordination`, `governance` or `none`) from a named rater on a trial record.
+- `report` writes `report.json` and the benchmark card `report.md` and prints the
+  verdict.
+- `export` writes flat trial tables and, in `all` mode, a datasheet, per-task
+  CSV, report v2, full trial records, design, suite and execution lock.
+- `analyze` validates that exported bundle and writes its `report.json` and
+  `report.md` offline; no original fixture paths or provider calls are needed.
+
+- `verify-evidence` verifies retained archive identities and file bytes without
+  the original trial worktrees. Exit 2 means missing archives, exit 1 corruption.
+
+`--json` is available on `validate`, `plan`, `run`, `report`, `analyze` and `verify-evidence`. The output
+directory defaults to `.pipeline/experiments/<experiment-id>/` in the invoking
+directory. See [Run an experiment](../../how-to/run-an-experiment.md) and the
+[experiment contracts](../contracts/experiments-v1.md).
 
 ## Local graph and memory
 

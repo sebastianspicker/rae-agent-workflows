@@ -52,6 +52,11 @@ npm --workspace @rae/agent-adapters run generate --
 npm run check:adapters
 ```
 
+Task suites and experiment files under `experiments/` are immutable once a
+digest has been pinned. Change them by adding a `revision` and pinning the new
+digest. Never edit a suite's repository fixture after a retained report used
+it.
+
 ## Verification
 
 Test sources, fixtures, snapshots, and local test helpers are private and

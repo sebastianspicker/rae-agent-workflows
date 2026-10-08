@@ -1,7 +1,7 @@
 ---
 status: stable
 owner: core
-last_reviewed: 2026-10-07
+last_reviewed: 2026-10-08
 source_of_truth: editorial
 evidence_links: evidence-index.md
 ---
@@ -40,18 +40,21 @@ evidence_links: evidence-index.md
 No claim below has a retained measurement yet. Each stays `provisional` until
 the named measurement is run and recorded in the
 [Evidence Index](evidence-index.md). Each sentence states the observation that
-would count against the claim.
+would count against the claim. Three of the metrics are encoded as
+preregistered experiments that the `rae experiment` runner executes; see
+[Run an experiment](../../how-to/run-an-experiment.md). An encoding may
+approximate the ledger wording, and the ledger wording stays the claim.
 
 | Claim ID | Falsifiable metric |
 | --- | --- |
 | CLM-002 | Over two releases, count drift corrections per page in `docs/`; the claim fails if pages that mix tutorial, how-to, reference, and explanation content need no more corrections per page than single-category pages. |
 | CLM-005 | Over one release, count commits that change `tools/` or `profiles/`; the claim fails if more than 10 percent of them also require a change under `packages/engine/src/`. |
-| CLM-007 | Run one frozen task set with `--context-mode legacy` and `--context-mode bounded`; the claim fails if the longer legacy context does not lower the gate pass rate by more than the run-to-run spread. |
+| CLM-007 | Run one frozen task set with `--context-mode legacy` and `--context-mode bounded`; the claim fails if the longer legacy context does not lower the gate pass rate by more than the run-to-run spread. Encoded as [`experiments/clm-007-context-mode.experiment.json`](https://github.com/sebastianspicker/rae-agent-workflows/blob/main/experiments/clm-007-context-mode.experiment.json). |
 | CLM-008 | For 2, 3, and 4 parallel reviewers on one frozen task set, the claim fails if a fully connected review topology does not use more provider attempts and wall-clock time per accepted result than the hub-and-spoke default. |
-| CLM-014 | On a frozen task set with seeded defects, the claim fails if the default workflow does not let fewer seeded defects reach `implemented-awaiting-human-release-review` than a single-node workflow that plans, builds, and verifies its own work. |
-| CLM-016 | On one frozen task set, the claim fails if a tiered execution profile does not lower provider cost per passed task compared with running every node at the `judgment` tier, or if it lowers the pass rate by more than the run-to-run spread. |
+| CLM-014 | On a frozen task set with seeded defects, the claim fails if the default workflow does not let fewer seeded defects reach `implemented-awaiting-human-release-review` than a single-node workflow that plans, builds, and verifies its own work. Encoded as [`experiments/clm-014-staged-separation.experiment.json`](https://github.com/sebastianspicker/rae-agent-workflows/blob/main/experiments/clm-014-staged-separation.experiment.json). |
+| CLM-016 | On one frozen task set, the claim fails if a tiered execution profile does not lower provider cost per passed task compared with running every node at the `judgment` tier, or if it lowers the pass rate by more than the run-to-run spread. Encoded as [`experiments/clm-016-cognitive-tiering.experiment.json`](https://github.com/sebastianspicker/rae-agent-workflows/blob/main/experiments/clm-016-cognitive-tiering.experiment.json), which compares mean estimated cost per trial and reports the pass rate as a secondary metric. |
 | CLM-017 | Over two releases, count support issues and failed operator actions traced to a documentation page; the claim fails if correcting those pages does not reduce the count for the corrected surface. |
-| CLM-020 | Two reviewers label a sample of blocked runs by the four failure layers; the claim fails if their agreement (Cohen's kappa) is below 0.6 or if the layered label changes the chosen remediation in no more cases than a single "agent failed" label. |
+| CLM-020 | Two reviewers label a sample of blocked runs by the four failure layers; the claim fails if their agreement (Cohen's kappa) is below 0.6 or if the layered label changes the chosen remediation in no more cases than a single "agent failed" label. Labels are recorded with `rae experiment label`, and the experiment report's `agreement` block gives Cohen's kappa. |
 
 ## Status meanings
 

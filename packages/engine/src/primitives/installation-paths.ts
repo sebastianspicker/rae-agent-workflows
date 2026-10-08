@@ -26,6 +26,10 @@ export function cliWorkflowAgentWorkerEntrypoint(): string {
   return resolve(engineRoot, "dist/src/cli/workflow-agent-worker.js");
 }
 
+export function cliExperimentEntrypoint(): string {
+  return resolve(engineRoot, "dist/src/cli/experiment.js");
+}
+
 export function cliRunnerEntrypoint(): string {
   return resolve(engineRoot, "dist/src/cli/runner.js");
 }

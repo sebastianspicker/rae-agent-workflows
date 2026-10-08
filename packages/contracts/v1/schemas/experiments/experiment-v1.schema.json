@@ -1,0 +1,173 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rae.local/contracts/experiments/experiment-v1.schema.json",
+  "title": "RAE preregistered experiment design v1",
+  "description": "A controlled comparison of run configurations (arms) over one frozen task suite. The canonical digest of this document is the preregistration identity recorded in every trial and report.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "experiment_id", "revision", "title", "hypothesis", "suite", "arms", "design", "metrics", "analysis"],
+  "properties": {
+    "schema_version": { "const": "1.0.0" },
+    "experiment_id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{2,63}$" },
+    "revision": { "type": "integer", "minimum": 1 },
+    "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "description": { "type": "string", "maxLength": 8000 },
+    "hypothesis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["statement", "treatment_arm", "control_arm", "expected", "falsifier"],
+      "properties": {
+        "claim_id": { "type": "string", "pattern": "^CLM-[0-9]{3}$" },
+        "statement": { "type": "string", "minLength": 1, "maxLength": 4000 },
+        "treatment_arm": { "$ref": "#/$defs/armId" },
+        "control_arm": { "$ref": "#/$defs/armId" },
+        "expected": {
+          "enum": ["treatment-greater", "treatment-less"],
+          "description": "Predicted direction of the primary metric for the treatment arm relative to the control arm."
+        },
+        "falsifier": { "type": "string", "minLength": 1, "maxLength": 4000 }
+      }
+    },
+    "suite": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path"],
+      "properties": {
+        "path": { "$ref": "#/$defs/relativePath" },
+        "digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "When present, the suite's canonical digest must match or the experiment refuses to run."
+        },
+        "task_ids": { "type": "array", "minItems": 1, "maxItems": 512, "uniqueItems": true, "items": { "$ref": "#/$defs/identifier" } },
+        "tags": { "type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 64 } }
+      }
+    },
+    "arms": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 16,
+      "items": { "$ref": "#/$defs/arm" }
+    },
+    "design": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repetitions", "seed"],
+      "properties": {
+        "repetitions": { "type": "integer", "minimum": 1, "maximum": 64 },
+        "seed": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "order": {
+          "enum": ["interleaved", "sequential"],
+          "description": "interleaved rotates arms within each task so time-of-day and provider drift are spread across arms; sequential runs each arm's block in turn."
+        },
+        "paired": { "type": "boolean", "description": "Compare arms on matched (task, repetition) pairs. Default true." },
+        "max_trial_wall_clock_seconds": { "type": "integer", "minimum": 60, "maximum": 86400 }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["primary"],
+      "properties": {
+        "primary": { "$ref": "#/$defs/metricName" },
+        "secondary": { "type": "array", "maxItems": 16, "uniqueItems": true, "items": { "$ref": "#/$defs/metricName" } },
+        "pass_at_k": { "type": "array", "maxItems": 8, "uniqueItems": true, "items": { "type": "integer", "minimum": 1, "maximum": 64 } }
+      }
+    },
+    "analysis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["alpha"],
+      "properties": {
+        "unit": { "enum": ["task", "trial"], "description": "Report v2 defaults to task: average repetitions within task, then weight tasks equally. trial selects legacy conditional inference." },
+        "alpha": { "type": "number", "exclusiveMinimum": 0, "maximum": 0.5 },
+        "bootstrap_samples": { "type": "integer", "minimum": 200, "maximum": 200000 },
+        "permutation_samples": { "type": "integer", "minimum": 200, "maximum": 200000 },
+        "correction": { "enum": ["none", "holm"] },
+        "minimum_detectable_effect": {
+          "type": "number",
+          "description": "The smallest primary-metric difference the authors consider practically meaningful; reported next to the estimate."
+        }
+      }
+    },
+    "budgets": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_trials": { "type": "integer", "minimum": 1, "maximum": 65536 },
+        "max_wall_clock_seconds": { "type": "integer", "minimum": 60, "maximum": 2592000 },
+        "max_estimated_cost": { "type": "number", "minimum": 0 }
+      }
+    }
+  },
+  "$defs": {
+    "identifier": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$" },
+    "armId": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$" },
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^(?!/)(?!.*(^|/)\\.\\.(/|$)).*$"
+    },
+    "metricName": {
+      "enum": [
+        "pass_rate",
+        "ship_rate",
+        "acceptance_rate",
+        "wall_clock_ms",
+        "provider_attempts",
+        "repair_rounds",
+        "total_tokens",
+        "output_tokens",
+        "estimated_cost",
+        "seeded_defects_shipped",
+        "changed_paths"
+      ]
+    },
+    "arm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["arm_id", "label", "run"],
+      "properties": {
+        "arm_id": { "$ref": "#/$defs/armId" },
+        "label": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "description": { "type": "string", "maxLength": 4000 },
+        "run": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Options forwarded to `rae agent run`. Experiments always run with checkpoint policy none and an isolated worktree.",
+          "properties": {
+            "workflow": { "$ref": "#/$defs/relativePath" },
+            "execution_profile": { "$ref": "#/$defs/relativePath" },
+            "policy": { "$ref": "#/$defs/relativePath" },
+            "context_mode": { "enum": ["legacy", "bounded"] },
+            "provider": { "enum": ["auto", "codex", "opencode", "command"] },
+            "model": { "type": "string", "minLength": 1, "maxLength": 160 },
+            "reasoning_effort": { "enum": ["low", "medium", "high", "xhigh"] },
+            "variant": { "type": "string", "minLength": 1, "maxLength": 64 },
+            "graph_memory": { "enum": ["off", "read", "read-write"] },
+            "max_concurrency": { "type": "integer", "minimum": 1, "maximum": 4 },
+            "max_repair_rounds": { "type": "integer", "minimum": 1, "maximum": 5 },
+            "timeout_seconds": { "type": "integer", "minimum": 60, "maximum": 86400 },
+            "agent_command": { "type": "string", "minLength": 1, "maxLength": 1024 },
+            "agent_args": { "type": "array", "maxItems": 64, "items": { "type": "string", "maxLength": 4096 } },
+            "allow_unsafe_command_provider": { "type": "boolean" }
+          }
+        },
+        "pricing": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["currency", "input_per_million", "output_per_million"],
+          "description": "Operator-supplied list prices used only to derive estimated_cost from measured tokens.",
+          "properties": {
+            "currency": { "type": "string", "pattern": "^[A-Z]{3}$" },
+            "input_per_million": { "type": "number", "minimum": 0 },
+            "cached_input_per_million": { "type": "number", "minimum": 0 },
+            "output_per_million": { "type": "number", "minimum": 0 },
+            "reasoning_output_per_million": { "type": "number", "minimum": 0 }
+          }
+        }
+      }
+    }
+  }
+}
