@@ -46,6 +46,8 @@ export interface RunEvidence {
   runDir: string;
   request: Record<string, unknown>;
   providerAttempts: number;
+  /** Agent or map node envelopes with `status: "passed"`. */
+  passedProviderAttempts: number;
   nodes: TrialNodeCounts;
   repairRounds: number;
   tokens: TrialTokens;
@@ -58,6 +60,7 @@ export interface RunResultSummary {
   workspace_root: string;
   status?: string;
   report?: string;
+  error?: string;
 }
 
 export interface TrialRecordInput {
@@ -197,6 +200,8 @@ export function collectRunEvidence(workspaceRoot: string, runId: string): RunEvi
     runDir,
     request,
     providerAttempts: providerEnvelopes.length,
+    passedProviderAttempts: providerEnvelopes.filter((envelope) => envelope.status === "passed")
+      .length,
     nodes: countNodes(runDir),
     repairRounds: Math.max(0, Math.floor(maxIteration) - 1),
     tokens: sumTokens(providerEnvelopes),

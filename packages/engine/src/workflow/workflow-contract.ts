@@ -58,7 +58,7 @@ interface WorkflowNodeShape {
 interface WorkflowEdgeShape {
   from: string;
   to: string;
-  type: "sequence" | "artifact" | "stream" | "condition" | "loop-back";
+  type: "sequence" | "artifact" | "stream" | "condition" | "loop-back" | "context";
   artifact?: string;
   condition?: "success" | "failure" | "blocking-findings" | "budget-available";
 }
@@ -300,6 +300,7 @@ function validatePayloadContracts(contracts: Record<string, unknown> = {}): void
   for (const [name, schema] of Object.entries(contracts)) validatePayloadContract(name, schema);
 }
 
+/** Readiness graph; `context` edges only carry data, so they never order, enable or dominate. */
 function adjacency(
   workflow: WorkflowShape,
   { includeLoopBack = false }: { includeLoopBack?: boolean } = {},
@@ -310,7 +311,7 @@ function adjacency(
     if (!outgoing.has(edge.from) || !incoming.has(edge.to)) {
       throw contractError(`edge ${edge.from} -> ${edge.to} references an unknown node`);
     }
-    if (!includeLoopBack && edge.type === "loop-back") continue;
+    if (edge.type === "context" || (!includeLoopBack && edge.type === "loop-back")) continue;
     outgoing.get(edge.from)?.push(edge.to);
     incoming.get(edge.to)?.push(edge.from);
   }
@@ -596,7 +597,7 @@ function assertFailureCollection(
   if (node.failure_handling?.mode === "collect") {
     if (node.access === "write") throw contractError(`writer ${node.id} may not collect failures`);
     const successors = workflow.edges
-      .filter((edge) => edge.from === node.id && edge.type !== "loop-back")
+      .filter((edge) => edge.from === node.id && !["loop-back", "context"].includes(edge.type))
       .map((edge) => nodes.get(edge.to));
     if (
       !successors.some((successor) => successor?.join === "any" || successor?.join === "quorum")
@@ -836,17 +837,49 @@ function assertNamedArtifacts(workflow: WorkflowShape): void {
   }
 }
 
+function assertUnconditionalContextEdges(workflow: WorkflowShape): void {
+  for (const edge of workflow.edges) {
+    if (edge.type === "context" && edge.condition) {
+      throw contractError(`context edge ${edge.from} -> ${edge.to} may not declare a condition`);
+    }
+  }
+}
+
+/**
+ * A context edge carries data that must already exist, so its source runs strictly before its
+ * target; it feeds only agent or map nodes, because a gate, join or checkpoint would count the
+ * source's findings as its own.
+ */
+function assertUpstreamContextEdges(workflow: WorkflowShape): void {
+  const { outgoing } = adjacency(workflow);
+  for (const edge of workflow.edges.filter(({ type }) => type === "context")) {
+    if (edge.from === edge.to || !reachableFrom(edge.from, outgoing).has(edge.to)) {
+      throw contractError(
+        `context edge ${edge.from} -> ${edge.to} must come from an earlier node: ${edge.from} is not upstream of ${edge.to}`,
+      );
+    }
+    const target = workflow.nodes.find(({ id }) => id === edge.to);
+    if (target && !["agent", "map"].includes(target.kind)) {
+      throw contractError(
+        `context edge ${edge.from} -> ${edge.to} must target an agent or map node, not ${target.kind}`,
+      );
+    }
+  }
+}
+
 function assertAuthoringRules(workflow: WorkflowShape): void {
   assertOwnershipPlans(workflow);
   assertMarkerPlacement(workflow);
   assertFindingContracts(workflow);
   assertNamedArtifacts(workflow);
+  assertUnconditionalContextEdges(workflow);
 }
 
 /**
  * Validates one workflow. `authoring` (the default: registry drafts, new runs, designer and
- * proposal output) also enforces the marker, finding-schema, artifact-name and ownership-plan
- * rules; `snapshot` enforces structure and topology only, so a stored run keeps resuming.
+ * proposal output) also enforces the marker, finding-schema, artifact-name, context-edge and
+ * ownership-plan rules; `snapshot` enforces structure and topology only, so a stored run keeps
+ * resuming.
  */
 export function validateWorkflow(
   value: unknown,
@@ -874,6 +907,7 @@ export function validateWorkflow(
   }
   if (mode === "authoring") assertAuthoringRules(typedWorkflow);
   validateTopology(typedWorkflow);
+  if (mode === "authoring") assertUpstreamContextEdges(typedWorkflow);
   return typedWorkflow as WorkflowContract;
 }
 

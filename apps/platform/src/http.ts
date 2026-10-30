@@ -546,7 +546,15 @@ export async function handlePlatformRequest(
       return send(res, 200, await artifactService.download({ artifact }));
     }
     if (req.method === "POST" && route === "/mcp")
-      return handleStreamableMcp({ request: req, response: res, body: input, store, principal });
+      return handleStreamableMcp({
+        request: req,
+        response: res,
+        body: input,
+        store,
+        principal,
+        errorStatus,
+        logger,
+      });
     return send(res, 404, { error: "not found" });
   } catch (error) {
     const status = errorStatus(error);

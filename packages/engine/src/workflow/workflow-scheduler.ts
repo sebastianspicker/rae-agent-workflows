@@ -7,12 +7,16 @@ import { scheduleWorkflowV22 } from "./workflow-scheduler-v22.js";
 import {
   abortOnStop,
   conditionMatches as edgeConditionMatches,
+  contextInputs,
   decideBoundedRepeat,
   drainSettled,
   gateProgress,
+  isContextEdge,
   isProviderKind,
+  latestPersistedEnvelope,
   noProgressMessage,
   MAX_LOOP_ITERATION,
+  ownershipPlanInput,
   persistEnvelope,
   runBudgetStop,
 } from "./workflow-scheduler-common.js";
@@ -123,8 +127,11 @@ function conditionMatches(edge: WorkflowV2Edge, envelope: WorkflowsNodeEnvelopeV
   return edgeConditionMatches("2.0.0", edge, envelope);
 }
 
+/** Edges that enable the node; loop-back and `context` edges never do. */
 function predecessors(workflow: WorkflowsWorkflowV2, nodeId: string): WorkflowV2Edge[] {
-  return workflow.edges.filter((edge) => edge.to === nodeId && edge.type !== "loop-back");
+  return workflow.edges.filter(
+    (edge) => edge.to === nodeId && edge.type !== "loop-back" && !isContextEdge(edge),
+  );
 }
 
 function inputsFor(
@@ -347,6 +354,8 @@ export async function scheduleWorkflow({
   const loopIterations = new Map<string, number>();
   const loopRepairs = new Map<string, number>();
   const loopProgress = new Map<string, string[]>();
+  // Failing gate and previous output handed to a loop-back target when its loop restarts (F-063).
+  const loopFeedback = new Map<string, WorkflowInput[]>();
   const loopIterationLimits = new Map<string, number>();
   let attemptsUsed = v2ResumeEnvelopes.reduce((total, envelope) => total + envelope.attempt, 0);
   // Provider attempts carry across resumes, like the per-node attempt total above.
@@ -419,16 +428,75 @@ export async function scheduleWorkflow({
   const emit = (event: string, metadata: Record<string, unknown> = {}): void =>
     onEvent({ seq: ++sequence, event, ...metadata });
 
+  /**
+   * The failing gate and the target's own previous output for a restarted loop-back target; after a
+   * resume they are rebuilt from the persisted envelopes of the previous iteration.
+   */
+  function feedbackFor(nodeId: string, iteration: number): WorkflowInput[] {
+    const known = loopFeedback.get(nodeId);
+    if (known || !runDir) return known ?? [];
+    const loopBack = workflow.edges.find((edge) => edge.type === "loop-back" && edge.to === nodeId);
+    if (!loopBack) return [];
+    const gate = latestPersistedEnvelope(runDir, loopBack.from, iteration - 1);
+    if (gate?.schema_version !== "2.0.0" || gate.status === "passed") return [];
+    const own = latestPersistedEnvelope(runDir, nodeId, iteration - 1);
+    const rebuilt = loopFeedbackInputs(
+      loopBack,
+      gate,
+      own?.schema_version === "2.0.0" ? own : undefined,
+    );
+    loopFeedback.set(nodeId, rebuilt);
+    return rebuilt;
+  }
+
+  /** Pairs the loop-back edge with the failed gate, then the target's synthesized previous output. */
+  function loopFeedbackInputs(
+    edge: WorkflowV2Edge,
+    gate: WorkflowsNodeEnvelopeV2,
+    previous: WorkflowsNodeEnvelopeV2 | undefined,
+  ): WorkflowInput[] {
+    return [
+      { edge, envelope: gate },
+      ...(previous
+        ? [
+            {
+              edge: {
+                from: edge.to,
+                to: edge.to,
+                type: "loop-back",
+                artifact: "previous-output",
+              } as WorkflowV2Edge,
+              envelope: previous,
+            },
+          ]
+        : []),
+    ];
+  }
+
   async function invoke(node: WorkflowV2Node): Promise<Readonly<WorkflowsNodeEnvelopeV2>> {
     const attempt = (attempts.get(node.id) ?? 0) + 1;
     attempts.set(node.id, attempt);
     attemptsUsed++;
     if (isProviderKind(node.kind)) providerAttempts++;
-    const inputs = inputsFor(workflow, node.id, completed);
-    const inputDigest = digest(inputs.map(({ envelope }) => envelope.output_digest));
-    const sessionId = randomUUID();
+    const edgeInputs = [
+      ...inputsFor(workflow, node.id, completed),
+      ...contextInputs(workflow.edges, node.id, (id) => {
+        const envelope = completed.get(id);
+        return envelope?.status === "passed" ? envelope : undefined;
+      }),
+    ];
+    const planInput = ownershipPlanInput<WorkflowV2Edge, WorkflowsNodeEnvelopeV2>(
+      workflow.nodes,
+      node.id,
+      edgeInputs,
+      (id) => completed.get(id) as WorkflowsNodeEnvelopeV2 | undefined,
+    );
     const loop = loopForMember(workflow, node.id);
     const loopIteration = loop ? (loopIterations.get(loop.id) ?? 1) : 1;
+    const feedback = loopIteration > 1 ? feedbackFor(node.id, loopIteration) : [];
+    const inputs = [...edgeInputs, ...(planInput ? [planInput] : []), ...feedback];
+    const inputDigest = digest(inputs.map(({ envelope }) => envelope.output_digest));
+    const sessionId = randomUUID();
     const execution = tierResolver("standard", node.id);
     const context =
       contextMode === "bounded" && ["agent", "map"].includes(node.kind)
@@ -526,6 +594,10 @@ export async function scheduleWorkflow({
     const state = decideBoundedRepeat(ledger, loop.id, envelope, repairLimit);
     if (state !== "repeat") return state;
     const iteration = loopIterations.get(loop.id) ?? 1;
+    for (const edge of workflow.edges) {
+      if (edge.type !== "loop-back" || edge.from !== node.id) continue;
+      loopFeedback.set(edge.to, loopFeedbackInputs(edge, envelope, completed.get(edge.to)));
+    }
     for (const member of loop.loop?.members ?? []) {
       completed.delete(member);
       attempts.delete(member);

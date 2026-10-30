@@ -29,7 +29,10 @@ const COLUMN_DICTIONARY = [
   ["sequence", "Planned execution order across all trials."],
   ["status", "completed, launch-failed, collect-failed or skipped."],
   ["run_id", "Autonomous run identifier; empty when no run started."],
-  ["run_status", "Final status reported by the autonomous run."],
+  [
+    "run_status",
+    "Final status of the autonomous run; `blocked (exit N)` marks a launch-failed trial.",
+  ],
   ["provider", "Agent provider that executed the run."],
   ["model", "Model requested for the run, if any."],
   ["reasoning_effort", "Reasoning effort requested for the run, if any."],

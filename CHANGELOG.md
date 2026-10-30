@@ -77,6 +77,9 @@ packages retain their own changelogs where applicable.
   [how-to](docs/how-to/run-an-experiment.md),
   [method](docs/explanation/science/experimental-method.md) and
   [decision record](docs/reference/decisions/dr-001-experiment-layer.md) pages.
+- Workflow edge type `context` (schemas 2.0, 2.1 and 2.2, additive): passes the
+  source's latest passed envelope as data and never enables its target. The
+  default workflow draws `plan` to `build` and `repair` as context edges.
 
 ### Changed
 
@@ -142,6 +145,17 @@ packages retain their own changelogs where applicable.
 
 ### Fixed
 
+- Experimental platform: without `oidc.tokenType`, ID tokens (`nonce` or
+  `at_hash` claims) are rejected as bearer tokens; `oidc.audience` must be a
+  dedicated API identifier.
+- Experimental platform: workers report artifact upload failures to the control
+  plane only as `upload failed` (detail stays in the local log) and pin the
+  upload connection to a single resolved address.
+- Experimental platform: failure and log text now also redacts `file://` URLs,
+  UNC paths and `password=`, `secret=`, `api_key=`, `credential=` and
+  `X-Api-Key:` values.
+- Experimental platform: the hosted example config caps token lifetime at one
+  hour (`maxTokenLifetimeSeconds = 3600`) instead of a day.
 - Workflow gates fail on any blocking finding or any input that did not pass.
 - Autonomous runs check Git state per phase, report ignored paths, retire
   stale locks, roll back the worktree when run setup fails, resume from the
@@ -149,6 +163,91 @@ packages retain their own changelogs where applicable.
 - Operator cleanup awaits worktree removal before responding.
 - Ralph `--dry-run` no longer recovers transactions, switches branches, or
   archives state.
+- Writers now receive the ownership plan they are checked against: every
+  `access: write` node, and every agent or map node in a loop that contains
+  one, gets the planner's latest passed envelope as an input. The default workflow
+  (revision 2) also passes the build envelope to the repair-loop critics.
+- A restarted bounded loop's loop-back target now receives the failing gate's
+  envelope and its own previous output instead of re-running blind.
+- The default plan declares `verification_commands`; Codex writers must show
+  exit-0 workspace-root evidence for each. A writer's own blocking findings
+  reach `diagnose` over a `context` edge and go through the repair loop, and the
+  run report lists them under "Writer-reported blocking findings".
+- Writer runs with more than 1024 commands or 4096 changed paths no longer fail
+  envelope persistence: the envelope keeps the cap-sized tail/head, records the
+  totals in `resource_usage.evidence_truncation` and adds a warning finding.
+- A provider payload that fails its contract now names the failing properties
+  (first five Ajv errors) in the node failure, trace event and blocked result.
+- `agent run --through <node>` validates the node against the resolved workflow
+  before creating the worktree, branch or run state, so a typo leaves no orphan run.
+- `agent run` and `agent resume` handle SIGINT/SIGTERM like `agent stop` (provider
+  group killed, run stopped with a report, lock released); a second signal exits.
+- `experiment run` runs the provider doctor for each distinct arm configuration
+  before the first new trial (not with `--dry-run`) and stops after 3
+  consecutive infrastructure failures instead of burning every slot.
+- `experiment run` records a trial whose `agent run` ended `blocked` with no
+  passed agent or map envelope as `launch-failed` (infrastructure), not as a
+  measured `pass: false`; the child exit code goes in `run.status`.
+- The README experiment quick start uses `--dry-run` then `--max-trials 1`, and
+  `experiment run` warns on stderr with the trial count when the experiment has
+  no budgets and `--max-trials` is not set.
+- The `experiment run` input-drift and lock-mismatch errors now say to start a
+  fresh output directory with `--output <dir>`; the how-to and
+  `experiments/README.md` document the retry flow.
+- The operator logs one stderr line (method, path without query, message, stack)
+  for every masked 5xx; the response body stays `internal server error`.
+- Reading or probing operator workflow routes no longer creates
+  `<git-common-dir>/rae-workflows`; the registry and its seeded default revision
+  are created on the first draft or activation, and only after the request
+  validated. A registry seeded with an older default revision reports the
+  committed default revision without writing.
+- The operator console isolates its startup steps: a workflow-registry or profile
+  failure shows in its own panel and no longer replaces the loaded run catalogue.
+- Operator start accepts `provider` (`codex` default, `opencode`) and `model`; the
+  server runs the provider doctor at startup, logs a warning and reports
+  `provider_health` in `GET /api/v1/projects`, and the new-run dialog shows it.
+  The doctor runs as a child process, so it no longer blocks the operator's event
+  loop; `provider_health` stays `null` until it finishes.
+- The operator exits 0 on SIGINT/SIGTERM after closing the server; runs it started
+  are detached and keep running (stop them with `agent stop`). The engine CLI
+  ignores EPIPE on stdout and stderr, so such a run no longer exits 1 after it
+  completed when its starter's pipes are gone.
+- Operator runs started with an execution profile no longer pass `--provider`,
+  which the engine rejects alongside a profile; a request combining a profile
+  with a provider or model gets 400. Resuming such a run likewise omits
+  `--provider` and lets the engine restore the stored profile.
+- Platform OIDC verification no longer requires a JWT `typ` header unless
+  `oidc.tokenType` is set (Keycloak, Auth0 and Azure send `typ: JWT`), and a
+  rejected bearer token logs the jose error code server-side.
+- Platform workers report a scrubbed executor error instead of "worker execution
+  failed", registration errors include the control plane's reason, and
+  `rae-platform-worker doctor` validates digests, the token and `/healthz`.
+- Platform nodes fail with "attempts exhausted" after 3 expired leases instead
+  of requeueing forever; duplicate node keys are rejected with 400 (409 on a
+  racing unique violation); claims are ordered by run age then node key.
+- Platform MCP tools and resources mask non-client errors as `internal error` and
+  log them.
+- `rae-platform doctor` fails unless the artifact bucket has versioning
+  `Enabled`, which verification requires; the requirement is documented.
+- The platform worker's control-plane endpoint rules (public HTTPS only,
+  loopback HTTP in development) and the supported topologies are documented.
+- The platform worker can upload attempt artifacts (`RAE_PLATFORM_UPLOAD_ARTIFACTS=true`):
+  it reserves, PUTs the exact bytes to the presigned URL and verifies each
+  artifact, and lists the outcomes in the report's `artifactUploads`.
+- Platform run submission rejects project IDs and node keys a worker cannot
+  claim with 400; a hosted example configuration, the configuration
+  requirements and the revision and profile digest computation are documented,
+  and the hosted API guide now matches the health-probe Host check and
+  heartbeat retry behaviour.
+- Ralph no longer defaults to the retired `gpt-5.3` model; without a configured
+  model it lets Codex choose. `--check` probes the PRD, Node, the native bridge
+  and Codex and fails when one is missing; `--doctor` reports the real bridge.
+- Ralph bootstrap copies only the compiled bridge addon, records the build
+  platform and refuses to run on another one.
+- The minimal Ralph example and the first-run tutorial use real commands and
+  the correct state directory.
+- A missing Ralph `prd.json` error now names the example to copy, and the
+  README quick start copies it before `ralph --check`.
 
 ### Removed
 

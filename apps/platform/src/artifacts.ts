@@ -3,7 +3,9 @@ import crypto from "node:crypto";
 import { Readable } from "node:stream";
 import {
   CopyObjectCommand,
+  GetBucketVersioningCommand,
   GetObjectCommand,
+  HeadBucketCommand,
   PutObjectCommand,
   S3Client,
 } from "@aws-sdk/client-s3";
@@ -112,6 +114,38 @@ export function s3ArtifactStorage(
         expiresIn: 300,
       }),
   };
+}
+/**
+ * Probes the bucket with HeadBucket, then requires versioning `Enabled`: verification pins the
+ * object version it read and rejects unversioned uploads, so an unversioned bucket never verifies.
+ */
+export async function probeArtifactStorage(
+  storage: StorageConfig,
+  client = new S3Client({
+    region: storage.region,
+    ...(storage.endpoint ? { endpoint: storage.endpoint } : {}),
+    forcePathStyle: storage.forcePathStyle,
+  }),
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    await client.send(new HeadBucketCommand({ Bucket: storage.bucket }), {
+      abortSignal: AbortSignal.timeout(5000),
+    });
+    const versioning = await client.send(
+      new GetBucketVersioningCommand({ Bucket: storage.bucket }),
+      { abortSignal: AbortSignal.timeout(5000) },
+    );
+    if (versioning.Status !== "Enabled")
+      return {
+        ok: false,
+        error: `artifact bucket versioning is not enabled (status: ${versioning.Status ?? "never enabled"}); artifact verification requires S3 object versioning`,
+      };
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "unknown error" };
+  } finally {
+    client.destroy();
+  }
 }
 function conflict(message: string): Error {
   return Object.assign(new Error(message), { statusCode: 409 });

@@ -43,7 +43,12 @@ retention limitation. Its statistical decisions and analysis bundle remain.
 - Infrastructure failures do not become model failures. An unavailable or
   interrupted evaluator leaves acceptance unknown; a valid evaluator's
   nonexpected exit is a measured failed check. A nonzero autonomous exit with
-  valid terminal evidence can still be a completed trial with `pass: false`.
+  valid terminal evidence can still be a completed trial with `pass: false`,
+  except a run that ended `blocked` with no passed agent or map envelope, which
+  is `launch-failed` and not a measured outcome. The rule is exactly that, so
+  bad auth, model or provider, but also invalid model output, node timeouts or
+  sandbox violations in the first agent node, count as attrition and widen the
+  pass-rate bounds instead of lowering the observed pass rate.
   Collection failures preserve usage already observed.
 - Before deleting a completed workspace, retain and verify private raw run
   evidence, committed source blobs, a tracked binary patch, nonignored new

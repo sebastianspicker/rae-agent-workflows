@@ -23,7 +23,8 @@ database. `doctor` and `serve` also require migrated tables, so run `migrate`
 first. The development stack below shows the complete order.
 
 An intentionally local-only insecure configuration is useful for unit and
-manual experiments. Hosted use must supply the `oidc` section instead.
+manual experiments. Hosted use must supply the `oidc` section instead; see the
+commented `dev/platform.hosted.example.toml`.
 
 ```toml
 [server]
@@ -54,7 +55,15 @@ forcePathStyle = true
 
 For hosted use, remove `allowInsecureAuth`, bind the service behind HTTPS, and
 configure an exact issuer, audience, JWKS URL, and allowed asymmetric JWS
-algorithms. Tokens must carry an unexpired `exp`, a numeric `iat` (or, without
+algorithms. The JWT `typ` header is not constrained unless `oidc.tokenType` is
+set (for example `tokenType = "at+jwt"` for RFC 9068 access tokens); leave it
+unset for issuers such as Keycloak, Auth0 and Azure AD that send `typ: JWT`.
+`oidc.audience` must be a dedicated API identifier (resource indicator), not an
+application `client_id`: ID tokens are issued to the client_id and would
+otherwise be accepted. When `tokenType` is unset, tokens carrying `nonce` or
+`at_hash` claims (ID-token markers) are rejected; set `tokenType` when your
+issuer marks access tokens with a distinct `typ`.
+Issuer, audience, algorithms and expiry are always enforced. Tokens must carry an unexpired `exp`, a numeric `iat` (or, without
 `iat`, an `nbf`) that is at most 60 seconds in the future, a subject, scopes,
 and a `projects` or `project_ids` claim. `exp - iat` must not exceed
 `auth.maxTokenLifetimeSeconds` (default 86400, maximum 604800). A present
@@ -62,10 +71,23 @@ and a `projects` or `project_ids` claim. `exp - iat` must not exceed
 consulted only when `projects` is absent. The `Bearer` scheme is matched
 case-insensitively. When the JWKS endpoint times out, is unreachable, or does
 not answer `200`, requests fail with `503` rather than `401`.
+A rejected token logs one `bearer token rejected` line with the jose error
+`code` (and the failing claim name where there is one), never the token; the
+`401` body stays `invalid bearer token`.
 With OIDC, `database.url` must use `sslmode=verify-full` unless
 `database.allowInsecure = true` is set explicitly.
 The worker identifier must equal the OIDC token subject. Artifact reservations
 and final verification are bound to that worker's active node and lease fence.
+
+The `[storage]` bucket must have S3 object versioning `Enabled`. Verification
+pins the object version it read and quarantines a mismatched upload by copying
+that exact version; an upload without a version ID is rejected with `409` and
+nothing is quarantined. `rae-platform doctor` runs `HeadBucket` and
+`GetBucketVersioning` and fails with `artifact bucket versioning is not enabled`
+unless the status is `Enabled`. Only the development `minio-init` service
+enables versioning for you; enable it yourself on any other bucket (for
+example `aws s3api put-bucket-versioning --bucket <name>
+--versioning-configuration Status=Enabled`).
 
 Every route except `/healthz` and `/readyz` is checked against the Host
 allowlist (`server.host` and the host of `server.publicBaseUrl`). With
@@ -87,6 +109,71 @@ or the control process refuses to start.
 - `RAE_REPOSITORY_DIGEST` and `RAE_WORKTREE_DIGEST`: exactly 64 hex characters
   (a sha256), not a 40-character git SHA.
 - `RAE_PROJECT_MAP_FILE`: see below.
+- `RAE_PLATFORM_UPLOAD_ARTIFACTS=true`: upload each successful attempt's
+  published artifacts (`output.json`, `events.jsonl`, at most 20 MiB each) to
+  the control plane's object storage. Off by default, which keeps the worker
+  from calling the artifact routes at all; enable it only when the control
+  plane has `[storage]` configured.
+
+With `RAE_PLATFORM_UPLOAD_ARTIFACTS=true`, after a successful execution and
+before its report the worker, for each published artifact, computes its SHA-256
+and size, calls `POST /api/v2/artifacts/reserve` (idempotency key
+`artifact:<attemptId>:<fence>:<name>`) through its pinned control-plane client,
+PUTs exactly those bytes with `Content-Length` and `Content-Type` and no
+credentials to the returned presigned URL, then calls
+`POST /api/v2/artifacts/verify`. The presigned URL must be HTTPS (loopback HTTP
+only with `RAE_PLATFORM_ALLOW_INSECURE_DEVELOPMENT=true`); redirects are
+refused, each PUT and verify times out after 120 seconds, transient reserve and
+verify failures are retried at most four times, and the claim's lease signal
+aborts all of it while heartbeats keep running. The success report gains
+`artifactUploads`: one entry per artifact with `name`, `sha256`, `sizeBytes`
+and either `id` with `state: "verified"` or a bounded, redacted `error` (for
+example `verification rejected (409): ...` or `control plane has no artifact
+storage configured (404)`, after which that attempt's remaining artifacts are
+skipped). Upload failures never turn a successful execution into a failure, and
+neither the presigned URL nor its signature is logged or reported. If the lease
+is lost during uploads, the claim is abandoned without a report.
+
+#### Worker control-plane endpoint rules
+
+The worker sends its bearer token only to a control plane it can trust, so it
+checks `RAE_PLATFORM_URL` at start-up and again before every request:
+
+- Accepted: an `https://` origin with no user name, password, path, query or
+  fragment whose host is a public DNS name (not `localhost`, `*.localhost`,
+  `*.local` or `*.internal`) or a public IP literal, and whose DNS answers are
+  all public (globally routable) addresses. The connection is pinned to the
+  first checked address, TLS verifies the host name, and redirects are refused.
+- Accepted for development only: `http://` or `https://` to `localhost`,
+  `127.0.0.1` or `::1` with `RAE_PLATFORM_ALLOW_INSECURE_DEVELOPMENT=true`;
+  every resolved address must then be loopback.
+- Refused: any other plain `http` URL, credentials in the URL, and any host
+  that is or resolves to a private, LAN, VPC, CGNAT (`100.64.0.0/10`),
+  link-local or cloud-metadata (`169.254.169.254`), loopback (outside the
+  development mode), unique-local IPv6, documentation or multicast address.
+  This includes Docker Compose service names and Kubernetes `*.svc` names,
+  which resolve to private addresses.
+
+The rule applies to the control-plane origin: a worker configuration or DNS
+answer that points at an internal service must not receive the worker token or
+act as a probe of the private network. It is not configurable. Artifact upload
+URLs come from the authenticated control plane and may point at private object
+storage (for example self-hosted MinIO); the worker resolves the upload host
+once and pins the connection to that address. Upload failures are reported to
+the control plane only as `upload failed` or `upload aborted`; the detail
+(storage status, connect error) is logged locally. Supported topologies are a control plane behind a public HTTPS
+ingress or reverse proxy with a public DNS name (workers may run anywhere that
+reaches it), and the loopback development setup with the worker on the same
+host as the control process. A worker inside the same Compose network or
+Kubernetes cluster must still use the public HTTPS name.
+
+`rae-platform-worker doctor` reports one problem per failed check and exits
+non-zero: unset variables, digests that are not 64 lowercase hex characters, a
+token that is empty or contains whitespace (never printed), and a control plane
+that is untrusted under the worker's endpoint rules or does not answer `200`
+to an unauthenticated `GET /healthz` within 5 seconds. A failed worker
+registration includes the control plane's status, error code and a bounded,
+redacted message.
 
 `platform.leaseSeconds` sets the lease duration and
 `platform.heartbeatSeconds` the heartbeat interval handed to workers in each
@@ -109,7 +196,13 @@ never a result report. The deadline starts when the claim request is sent. A
 `200` reply that is not valid JSON or fails schema validation is treated as a
 transient failure; only a valid claim response resets claim retry backoff.
 A result the control plane rejects with `400` or `413`
-is replaced by a minimal failure report with code `result_rejected`. Heartbeat
+is replaced by a minimal failure report with code `result_rejected`. When the
+executor throws, the worker logs the error and stack locally and reports only
+the first line of the message, at most 500 characters, with tokens, absolute
+paths (including `file://` URLs and UNC paths), `key=value` secrets and long
+secret-like strings scrubbed (`worker execution failed` if nothing usable
+remains). Failure messages are visible to everyone who can read the run, so
+executors should not put sensitive data in error messages. Heartbeat
 requests time out after `heartbeatSeconds`. `rae-platform-worker run` aborts
 its poll, heartbeat and execution on `SIGTERM` or `SIGINT`.
 
@@ -151,6 +244,24 @@ the value in milliseconds. A failed `ROLLBACK` discards the
 client. The management metrics include the pool's total, idle and waiting
 client counts and the number of active event streams.
 
+A node gets at most 3 claim attempts (`MAX_NODE_ATTEMPTS`). When a lease
+expires on a node that has used them all, reclaim fails the node with the
+result `{message: "attempts exhausted", code: "attempts_exhausted"}`, appends
+`node.failed`, and settles the run like any failed node instead of requeueing
+it; earlier expiries requeue the node. Reclaim locks the run with `SKIP
+LOCKED`, so a run busy with a report is reclaimed on the next probe.
+
+`projectId` and node `key`s must match `[A-Za-z0-9._-]{1,128}`, the pattern
+workers enforce on claims (`400` at submission otherwise). How to compute the
+revision `digest` and a node's `profileDigest` is described in
+[the hosted API guide](../../docs/how-to/hosted-api.md#identifiers-and-digests).
+Node `key`s must be unique within a run (`400` otherwise, in both stores and
+the MCP submit tool); a PostgreSQL unique violation from a racing submission
+answers `409`. Nodes are independent, unordered work items: no dependencies, all queued at
+once, and a failed node does not cancel its siblings. Claims are deterministic:
+older runs first, then node `key` byte-wise, in both stores. This is not an
+execution-order guarantee.
+
 Node reports lock the owning run and commit the fenced attempt, node state,
 immutable event, and outbox record together. The run becomes terminal only
 after every node is terminal. Any failed node makes the run failed; otherwise
@@ -184,7 +295,9 @@ with `{runId, workerId}`, in both stores. Event streams are capped at 256 global
 and 8 per token subject (`503` above the cap) and send a `: ping` comment after
 15 idle seconds. `/mcp` is a
 allowlisted JSON-RPC MCP compatibility endpoint exposing run data and immutable
-events. It is implemented with the MCP SDK's stateless Streamable HTTP
+events. MCP tool and resource (`rae-run`, `rae-events`) failures follow REST:
+client errors (status below 500, validation) keep their message, and any other
+failure returns `internal error` while the real error is logged server-side. It is implemented with the MCP SDK's stateless Streamable HTTP
 transport and publishes OAuth protected-resource metadata at
 `/.well-known/oauth-protected-resource`. The operator's separate remote mode
 can relay a compatible hosted operator service without exposing its upstream

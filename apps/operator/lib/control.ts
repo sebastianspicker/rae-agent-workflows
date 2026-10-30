@@ -74,6 +74,8 @@ const EARLY_EXIT_WAIT_MS = 2_000;
 const OWNERSHIP_POLL_MS = 250;
 const EXIT_GRACE_MS = 250;
 const CLEANUP_TIMEOUT_MS = 60_000;
+const START_PROVIDERS = new Set(["codex", "opencode"]);
+const MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@+/-]{0,127}$/;
 const CHECKPOINT_POLICIES = new Set(["none", "before-mutation", "before-mutation-and-ship"]);
 
 /** Logs the sanitized child output server-side and returns only a scrubbed copy for the browser. */
@@ -91,7 +93,13 @@ function httpError(status: number, message: string): HttpError {
 }
 
 function assertAllowedStartFields(body: JsonRecord): void {
-  const allowed = new Set(["task", "checkpoint_policy", "execution_profile_id"]);
+  const allowed = new Set([
+    "task",
+    "checkpoint_policy",
+    "execution_profile_id",
+    "provider",
+    "model",
+  ]);
   for (const key of Object.keys(body)) {
     if (!allowed.has(key)) throw httpError(400, `unsupported start field: ${key}`);
   }
@@ -114,18 +122,48 @@ function startCheckpointPolicy(value: unknown): string {
   return policy;
 }
 
+/** Allowlisted provider (default codex) and engine-compatible model: OpenCode needs `provider/model`. */
+function startProviderModel(body: JsonRecord): { provider: string; model?: string } {
+  const provider = body.provider ?? "codex";
+  if (typeof provider !== "string" || !START_PROVIDERS.has(provider)) {
+    throw httpError(400, "provider must be codex or opencode");
+  }
+  const model = body.model;
+  if (model === undefined) {
+    if (provider === "opencode") throw httpError(400, "opencode requires model <provider/model>");
+    return { provider };
+  }
+  if (typeof model !== "string" || !MODEL_PATTERN.test(model)) {
+    throw httpError(400, "model must be 1-128 characters of letters, digits and . _ : @ + / -");
+  }
+  if (provider === "opencode" && !model.includes("/")) {
+    throw httpError(400, "opencode requires model <provider/model>");
+  }
+  return { provider, model };
+}
+
 export function validateStartInput(
   body: JsonRecord,
   executionProfile: LoadedExecutionProfile | null = null,
-): { task: string; checkpointPolicy: string; executionProfile?: LoadedExecutionProfile } {
+): {
+  task: string;
+  checkpointPolicy: string;
+  provider?: string;
+  model?: string;
+  executionProfile?: LoadedExecutionProfile;
+} {
   assertAllowedStartFields(body);
   if (body.execution_profile_id !== undefined && !executionProfile?.source) {
     throw httpError(400, "execution_profile_id must name a preloaded execution profile");
   }
+  // The profile routes providers and models itself; the engine rejects either alongside it.
+  if (executionProfile && (body.provider !== undefined || body.model !== undefined)) {
+    throw httpError(400, "an execution profile is mutually exclusive with provider and model");
+  }
   return {
     task: normalizedStartTask(body.task),
     checkpointPolicy: startCheckpointPolicy(body.checkpoint_policy),
-    ...(executionProfile ? { executionProfile } : {}),
+    ...(executionProfile ? { executionProfile } : startProviderModel(body)),
   };
 }
 
@@ -135,7 +173,8 @@ export function requireTypedConfirmation(body: JsonRecord, runId: string): void 
   }
 }
 
-function validateResumeRequest(run: InternalRun): string {
+/** Returns the provider to resume with, or null for profile runs, which the engine restores itself. */
+function validateResumeRequest(run: InternalRun): string | null {
   ensureRuntimeStateReadable(run.workspaceRoot, { expectedRunId: run.id });
   const request = JSON.parse(
     readFileSync(resolve(run.workspaceRoot, ".pipeline", "runs", run.id, "request.json"), "utf8"),
@@ -151,6 +190,7 @@ function validateResumeRequest(run: InternalRun): string {
   ) {
     throw httpError(409, "command-provider runs cannot be resumed from the operator console");
   }
+  if (request.execution_profile || request.provider === "auto") return null;
   const provider = request.provider ?? agent.provider ?? "codex";
   if (provider !== "codex" && provider !== "opencode") {
     throw httpError(400, "run provider is not supported for resume from the operator console");
@@ -445,7 +485,7 @@ export class RunController {
     body: JsonRecord,
     executionProfile: LoadedExecutionProfile | null = null,
   ): Promise<JsonRecord> {
-    const { task, checkpointPolicy } = validateStartInput(body, executionProfile);
+    const { task, checkpointPolicy, provider, model } = validateStartInput(body, executionProfile);
     this.#assertNoProjectCleanup(project);
     const baselineIds = new Set(
       this.discoverRunsFn(project, { view: "summary" }).map((run) => run.id),
@@ -458,11 +498,11 @@ export class RunController {
         project.root,
         "--task",
         task,
-        "--provider",
-        "codex",
+        ...(executionProfile
+          ? ["--execution-profile", executionProfile.source]
+          : ["--provider", provider ?? "codex", ...(model ? ["--model", model] : [])]),
         "--checkpoint-policy",
         checkpointPolicy,
-        ...(executionProfile ? ["--execution-profile", executionProfile.source] : []),
         "--json",
       ],
       baselineIds,
@@ -528,8 +568,7 @@ export class RunController {
         run.workspaceRoot,
         "--run-id",
         run.id,
-        "--provider",
-        provider,
+        ...(provider ? ["--provider", provider] : []),
         "--json",
       ],
       new Set(),

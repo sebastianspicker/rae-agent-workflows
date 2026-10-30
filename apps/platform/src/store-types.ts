@@ -1,6 +1,8 @@
 /** Explicit hosted store records keep unconstrained wire JSON outside typed control state. */
 /** Error code returned with a claim 409 when the worker must register again. */
 export const WORKER_UNREGISTERED = "worker_unregistered";
+/** Identifier pattern a worker accepts in a claim; submission enforces it on project IDs and node keys. */
+export const CLAIM_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
 export type RunState = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 export type NodeState = "queued" | "leased" | "succeeded" | "failed" | "cancelled";
 export type Access = "read" | "write";

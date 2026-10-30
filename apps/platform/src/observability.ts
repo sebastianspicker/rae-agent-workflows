@@ -8,14 +8,24 @@ export function traceparent(value: unknown) {
   return `00-${crypto.randomBytes(16).toString("hex")}-${crypto.randomBytes(8).toString("hex")}-01`;
 }
 
+/** Masks bearer tokens, key=value secrets, credentials in URLs, JWTs, file URLs and UNC paths inside free text. */
+export function redactText(value: string) {
+  return value
+    .replace(/(bearer\s+|token=|authorization:|x-amz-signature=)[^\s,&]+/gi, "$1[redacted]")
+    .replace(
+      /\b((?:password|passwd|secret|api[_-]?key|credential)s?\s*=\s*|x-api-key:\s*)[^\s,&;]+/gi,
+      "$1[redacted]",
+    )
+    .replace(/\bfile:\/\/[^\s"'`),;]+/gi, "[path]")
+    .replace(/\\\\[^\s\\"'`),;]+(?:\\[^\s\\"'`),;]+)*/g, "[path]")
+    .replace(/([a-z][a-z0-9+.-]*:\/\/)[^@\s/]+@/gi, "$1[redacted]@")
+    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "[redacted-jwt]");
+}
+
 export function createLogger(base: Record<string, unknown> = {}) {
   const redact = (value: unknown, key = ""): unknown => {
     if (/token|authorization|secret|password|cookie|credential/i.test(key)) return "[redacted]";
-    if (typeof value === "string")
-      return value
-        .replace(/(bearer\s+|token=|authorization:|x-amz-signature=)[^\s,&]+/gi, "$1[redacted]")
-        .replace(/([a-z][a-z0-9+.-]*:\/\/)[^@\s/]+@/gi, "$1[redacted]@")
-        .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "[redacted-jwt]");
+    if (typeof value === "string") return redactText(value);
     if (Array.isArray(value)) return value.map((item) => redact(item));
     if (value && typeof value === "object")
       return Object.fromEntries(

@@ -4,6 +4,7 @@ import { api, eventStream, setConnection, showError, showToast } from "./api.js"
 import { elements, state } from "./state.js";
 import { renderEvents, renderRun, renderRuns } from "./render.js";
 import { focusSelectedTask, showRunCatalogue } from "./navigation.js";
+import { runBootstrapSteps } from "./bootstrap.js";
 import { loadWorkflows, refreshWorkflowLocks } from "./workflows.js";
 import type { OperatorEvent, OperatorRun } from "./types.js";
 
@@ -18,6 +19,7 @@ interface EventsPage {
 }
 interface ProjectsPayload {
   projects: Array<{ id: string; label: string }>;
+  provider_health?: { provider: string; ok: boolean; detail?: string } | null;
 }
 interface ProfilesPayload {
   profiles?: Array<{ id: string; readiness: string; models?: Record<string, string> }>;
@@ -65,6 +67,18 @@ function setStreamStatus(text: string, live = false): void {
   status.replaceChildren(spinner, document.createTextNode(` ${text}`));
 }
 
+/** Replaces the run catalogue with an unavailable notice and reports the error. */
+export function showRunsUnavailable(error: unknown): void {
+  setConnection("error", "Unavailable", "Local session");
+  elements["runs-loading"].hidden = true;
+  elements["workspace-empty"].hidden = true;
+  elements["runs-empty"].hidden = false;
+  elements["runs-empty"].querySelector("strong")!.textContent = "Runs unavailable";
+  elements["runs-empty"].querySelector("span")!.textContent =
+    "Reopen the URL printed by the operator server.";
+  showError(error);
+}
+
 export async function loadProjects(): Promise<void> {
   const data = await api<ProjectsPayload>("/projects");
   state.projects = data.projects;
@@ -77,10 +91,24 @@ export async function loadProjects(): Promise<void> {
   connection.label = demo ? "Mock-only demo" : "Local session";
   connection.detail = demo ? "No repository access or publish controls" : "No publish controls";
   renderConnection();
+  const health = data.provider_health;
+  const warning = elements["start-provider-warning"];
+  warning.hidden = !health || health.ok;
+  if (health && !health.ok) {
+    warning.textContent = `Provider ${health.provider} is not ready: ${health.detail ?? "doctor failed"}`;
+  }
   if (state.projectId) {
-    await loadExecutionProfiles();
-    await loadRuns();
-    await loadWorkflows();
+    await runBootstrapSteps([
+      { run: loadExecutionProfiles, onError: showError },
+      { run: () => loadRuns(), onError: showRunsUnavailable },
+      {
+        run: loadWorkflows,
+        onError: (error) => {
+          elements["workflow-status"].textContent = "Workflow registry unavailable.";
+          showError(error);
+        },
+      },
+    ]);
   } else {
     elements["runs-loading"].hidden = true;
     renderRuns();

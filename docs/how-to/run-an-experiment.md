@@ -127,7 +127,17 @@ Each trial prints one line: `trial <id> <status> pass=<true|false|null>
 <wall_clock_ms>ms`. The command exits 2 if it encounters any retained or newly executed failed
 trial or stops for interruption/budget limits, and 0 otherwise; contract or
 input-drift errors exit 1. A measured task failure with valid evidence is a
-completed trial with `pass: false`. Missing or interrupted evaluators produce
+completed trial with `pass: false`. The exception is a run that ended `blocked`
+with no passed agent or map node envelope, which is what bad authentication, a
+wrong model or a missing provider produce. It is an infrastructure failure,
+recorded as `launch-failed` with `run.status` `blocked (exit <code>)` and the
+run's error text. The rule is exactly that classification, so invalid model
+output, a node timeout or a sandbox violation in the first agent node also
+lands in `launch-failed`. The report counts every `launch-failed` trial as a
+missing outcome (attrition), never as `pass: false`; such model-caused
+failures therefore widen the pass-rate bounds instead of lowering the observed
+pass rate. Later failures, after some node envelope passed, stay measured.
+Missing or interrupted evaluators produce
 `collect-failed` with unknown acceptance, preserving any measured usage.
 
 Things to know:
@@ -137,10 +147,31 @@ Things to know:
   Resume executes only missing trials. To study retries, preregister another
   repetition or a new experiment revision/output; never replace the first
   outcome. Only one runner may own an output directory at a time.
+- **Retry after failures.** Failed records are permanent by design, so a
+  recorded `launch-failed` or `collect-failed` trial is never rerun. To fix the
+  cause (for example replace the placeholder model and bump the experiment
+  `revision`), plan and run into a fresh directory with `--output <dir>`. The
+  default directory then fails with `input drift` or `lock mismatch`, which is
+  expected: its lock pins the old inputs. The old directory stays reportable.
 - **`--max-trials <n>`** limits how many trials this invocation executes.
   Completed and failed retained records do not consume this invocation limit.
   The design's `budgets.max_trials` truncates the plan itself; a truncated full
   factorial design cannot receive a confirmatory verdict.
+- **Provider doctor.** Before the output directory is locked, `run` performs
+  the same check as `agent doctor` for every distinct arm provider, model and
+  execution profile that has a pending trial within `--max-trials`, using the
+  suite repository of that combination's first pending trial as workspace
+  (the current directory for a cloned Git repository). Arms with the `command`
+  provider are skipped. A failing check exits 1 with the arm and the failing
+  check; no lock, marker or trial record is written. `--dry-run` skips it.
+- **Circuit breaker.** After 3 consecutive trials of one invocation that end
+  as `launch-failed` (infrastructure failures), `run` stops launching, prints
+  the reason and exits 2. Written records stay and are never re-run: fix the
+  cause, then use a fresh `--output` directory, or the same directory to
+  continue with the remaining slots.
+- **No budget.** An experiment without `budgets`, run without `--max-trials`,
+  prints a warning with the number of trials about to launch; nothing else
+  changes.
 - **`--dry-run`** prints each trial with its `agent run` arguments and creates
   nothing.
 - **`--cleanup-work`** deletes `work/<trial_id>` after a completed trial. The

@@ -31,6 +31,11 @@ interface ReportData {
   status: string;
   agentEventLogs: string[];
   graphNative: boolean;
+  writerFindings: WriterFinding[];
+}
+interface WriterFinding {
+  node: string;
+  summary: string;
 }
 export interface RunReportResult {
   status: string;
@@ -89,6 +94,7 @@ function reportData(context: AutonomousLifecycleContext, outcome: RunOutcome): R
       ? graphEventLogs(context.workspaceRoot, runDir)
       : eventLogs(context.workspaceRoot, runDir),
     graphNative,
+    writerFindings: graphNative ? writerBlockingFindings(context, runDir) : [],
   };
 }
 
@@ -120,6 +126,55 @@ function readGraphPlan(
         documentation?: { required: boolean; paths: string[]; rationale: string } | null;
       })
     : null;
+}
+
+/** Report caps: provider text is untrusted and may be long or numerous. */
+const WRITER_FINDING_LIMIT = 50;
+const WRITER_FINDING_SUMMARY_CHARS = 500;
+
+/**
+ * Blocking findings in each writer instance's latest envelope, by (loop_iteration, attempt): the
+ * writer's own and those the engine attached (for example ignored-path changes). Diagnosis may
+ * judge them resolved; the report still lists them for the human release review.
+ */
+function writerBlockingFindings(
+  context: AutonomousLifecycleContext,
+  runDir: string,
+): WriterFinding[] {
+  const writers = new Set(
+    (context.workflow?.nodes ?? []).filter((node) => node.access === "write").map(({ id }) => id),
+  );
+  const latest = new Map<string, Record<string, unknown>>();
+  const order = (envelope: Record<string, unknown>): [number, number] => [
+    Number(envelope.loop_iteration ?? 1),
+    Number(envelope.attempt ?? 0),
+  ];
+  for (const pathValue of workflowEnvelopeFiles(runDir)) {
+    const envelope = readJsonStrict(pathValue);
+    const nodeId = String(envelope.node_id);
+    if (!writers.has(nodeId)) continue;
+    const instanceId = String(envelope.instance_id ?? nodeId);
+    const prior = latest.get(instanceId);
+    const [iteration, attempt] = order(envelope);
+    const [priorIteration, priorAttempt] = prior ? order(prior) : [0, -1];
+    if (iteration > priorIteration || (iteration === priorIteration && attempt >= priorAttempt)) {
+      latest.set(instanceId, envelope);
+    }
+  }
+  return [...latest.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .flatMap(([node, envelope]) =>
+      (Array.isArray(envelope.findings) ? envelope.findings : [])
+        .map(recordValue)
+        .filter((finding) => finding.blocking === true || finding.severity === "blocking")
+        .map((finding) => ({
+          node,
+          // One bounded line per finding, whatever the provider put in the summary.
+          summary: String(finding.summary ?? "(no summary)")
+            .replaceAll(/\s+/g, " ")
+            .slice(0, WRITER_FINDING_SUMMARY_CHARS),
+        })),
+    );
 }
 
 /** Latest envelope per node instance, ordered by (loop_iteration, attempt); exported for tests. */
@@ -231,6 +286,7 @@ function markdownLines(data: ReportData): string[] {
     ...reportHeader(data),
     ...taskSection(data.context.task),
     ...gateSection(data.gates),
+    ...writerFindingsSection(data.writerFindings),
     ...evidenceSection(data.agentEventLogs),
     ...changesSection(data.changes),
     ...documentationSection(data.docs),
@@ -289,6 +345,22 @@ function gateSection(gates: GateRow[]): string[] {
     "| Phase | Status | Artifact |",
     "| --- | --- | --- |",
     ...gates.map((gate) => `| ${gate.phase} | ${gate.status} | ${gate.artifact_ref || "None"} |`),
+    "",
+  ];
+}
+function writerFindingsSection(findings: WriterFinding[]): string[] {
+  if (!findings.length) return [];
+  return [
+    "## Writer-reported blocking findings",
+    "",
+    "Blocking findings in each writer's latest envelope, including those the engine attached.",
+    "",
+    ...findings
+      .slice(0, WRITER_FINDING_LIMIT)
+      .map(({ node, summary }) => `- \`${node}\`: ${summary}`),
+    ...(findings.length > WRITER_FINDING_LIMIT
+      ? [`- ${findings.length - WRITER_FINDING_LIMIT} more not shown; see the writer envelopes.`]
+      : []),
     "",
   ];
 }

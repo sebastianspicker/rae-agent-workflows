@@ -66,7 +66,13 @@ export function loadPrd(paths: RuntimePaths): Prd {
     [paths.schemaFile, "PRD schema"],
     [paths.policyFile, "policy"],
   ] as const) {
-    if (!existsSync(path)) throw new RalphError(`Missing ${label} file: ${path}`, EXIT.prd);
+    if (!existsSync(path)) {
+      const hint =
+        path === paths.prdFile
+          ? `; create it from the example: cp ${resolve(dirname(path), "prd.json.example")} ${path}`
+          : "";
+      throw new RalphError(`Missing ${label} file: ${path}${hint}`, EXIT.prd);
+    }
   }
   const value = parsePrd(readRuntimeFile(paths, paths.prdFile));
   let schema: object;
@@ -247,18 +253,19 @@ export function pathMatchesScope(story: Story, path: string): boolean {
   return matched;
 }
 
+/** Resolves run defaults; an unset model stays undefined so the provider uses its own default. */
 export function applyDefaults(
   prd: Prd,
   requested: { mode?: Mode; model?: string; reasoningEffort?: "low" | "medium" | "high" },
 ): {
   mode: Mode;
-  model: string;
+  model: string | undefined;
   reasoningEffort: "low" | "medium" | "high";
   maxStories: number | "all_open";
 } {
   return {
     mode: requested.mode ?? prd.defaults.mode_default ?? "audit",
-    model: requested.model ?? prd.defaults.model_default ?? "gpt-5.3",
+    model: requested.model ?? prd.defaults.model_default,
     reasoningEffort: requested.reasoningEffort ?? prd.defaults.reasoning_effort_default ?? "high",
     maxStories: prd.defaults.max_stories_default ?? "all_open",
   };

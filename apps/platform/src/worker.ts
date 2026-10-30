@@ -4,7 +4,7 @@ import { lookup } from "node:dns/promises";
 import http from "node:http";
 import https from "node:https";
 import net from "node:net";
-import { createLogger } from "./observability.js";
+import { createLogger, redactText } from "./observability.js";
 
 async function readResponseBytes(response: WorkerResponse, limit = 1024 * 1024): Promise<Buffer> {
   const declared = Number(response.headers.get("content-length"));
@@ -208,6 +208,8 @@ async function assertTrustedEndpoint(
   return assertTrustedAddresses(host, addresses, localDevelopment);
 }
 
+const defaultResolveHostname = (host: string) => lookup(host, { all: true, verbatim: true });
+
 function pinnedLookup({ address, family }: Connection): LookupFunction {
   return (_hostname, options, callback) => {
     if (options.all) callback(null, [{ address, family }]);
@@ -267,7 +269,7 @@ export async function createWorkerRequest({
   baseUrl,
   token,
   allowInsecureDevelopment = false,
-  resolveHostname = (host) => lookup(host, { all: true, verbatim: true }),
+  resolveHostname = defaultResolveHostname,
   fetchImpl = null,
 }: WorkerRequestOptions) {
   const endpoint = new URL(baseUrl);
@@ -319,8 +321,74 @@ export async function createWorkerRequest({
   };
 }
 
+/** Digest format the worker sends: a lowercase sha256 in hex (the server only checks the length of 64). */
+export const WORKER_DIGEST_PATTERN = /^[a-f0-9]{64}$/;
+const DOCTOR_PROBE_TIMEOUT_MS = 5_000;
+
+/** Validates worker environment variables and probes `/healthz` through the worker's endpoint-trust checks; the token is never sent or printed. */
+export async function doctorWorkerEnvironment(
+  env: Record<string, string | undefined>,
+  {
+    resolveHostname = (host: string) => lookup(host, { all: true, verbatim: true }),
+    fetchImpl = null,
+    timeoutMs = DOCTOR_PROBE_TIMEOUT_MS,
+  }: Pick<WorkerRequestOptions, "resolveHostname" | "fetchImpl"> & { timeoutMs?: number } = {},
+) {
+  const required = [
+    "RAE_PLATFORM_URL",
+    "RAE_PLATFORM_TOKEN",
+    "RAE_WORKER_ID",
+    "RAE_REPOSITORY_DIGEST",
+    "RAE_WORKTREE_DIGEST",
+    "RAE_PROJECT_MAP_FILE",
+  ];
+  const missing = required.filter((name) => !env[name]);
+  const problems = missing.map((name) => `${name} is not set`);
+  for (const name of ["RAE_REPOSITORY_DIGEST", "RAE_WORKTREE_DIGEST"]) {
+    const value = env[name];
+    if (value && !WORKER_DIGEST_PATTERN.test(value))
+      problems.push(`${name} must be exactly 64 lowercase hex characters (a sha256)`);
+  }
+  const token = env.RAE_PLATFORM_TOKEN;
+  if (token && /\s/.test(token)) problems.push("RAE_PLATFORM_TOKEN must not contain whitespace");
+  const baseUrl = env.RAE_PLATFORM_URL;
+  if (baseUrl) {
+    try {
+      const endpoint = new URL(baseUrl);
+      const allowInsecureDevelopment = env.RAE_PLATFORM_ALLOW_INSECURE_DEVELOPMENT === "true";
+      const connection = await assertTrustedEndpoint(endpoint, {
+        allowInsecureDevelopment,
+        resolveHostname,
+      });
+      const target = endpointRelativeUrl(endpoint, "/healthz");
+      const options: RequestOptions = {
+        method: "GET",
+        headers: {},
+        redirect: "error",
+        body: "",
+        signal: AbortSignal.timeout(timeoutMs),
+      };
+      const response = fetchImpl
+        ? await fetchImpl(target, options)
+        : await pinnedRequest(target, options, connection);
+      await readResponseBytes(response);
+      if (!response.ok)
+        problems.push(`control plane /healthz answered ${response.status}, expected 200`);
+    } catch (error) {
+      problems.push(
+        `control plane is not usable: ${redactText(causeMessage(error)).slice(0, 500)}`,
+      );
+    }
+  }
+  return { missing, problems };
+}
+
 const REPORT_PATH = "/api/v2/workers/report";
 const FAILURE_PATH = "/api/v2/workers/failure";
+const RESERVE_PATH = "/api/v2/artifacts/reserve";
+const VERIFY_PATH = "/api/v2/artifacts/verify";
+const ARTIFACT_TIMEOUT_MS = 120_000;
+const ARTIFACT_RETRIES = 4;
 const REQUEST_TIMEOUT_MS = 30_000;
 const RETRY_BASE_MS = 1000;
 const RETRY_CAP_MS = 30_000;
@@ -436,10 +504,100 @@ function rejectionSummary(status: number | null, body: unknown) {
   return `result rejected by the control plane (${status})${reason}`.slice(0, 500);
 }
 
+const FAILURE_MESSAGE_LIMIT = 500;
+
+/** The first line of an executor error with tokens, absolute paths and long secrets scrubbed, bounded for the report. */
+function executionFailureMessage(error: unknown) {
+  const line = error instanceof Error ? (error.message.split(/\r?\n/, 1)[0] ?? "") : "";
+  const scrubbed = redactText(line)
+    .replace(/(?<![\w.:/-])(?:[A-Za-z]:\\|~\/|\/)[^\s"'`),;]+/g, "[path]")
+    .replace(/\b[A-Za-z0-9_-]{32,}\b/g, "[redacted]")
+    .trim();
+  return scrubbed.slice(0, FAILURE_MESSAGE_LIMIT) || "worker execution failed";
+}
+
+/** A bounded, redacted `code: error` reason taken from a control-plane error body. */
+function responseReason(body: unknown) {
+  if (!body || typeof body !== "object") return "";
+  const { code, error } = body as { code?: unknown; error?: unknown };
+  const parts = [code, error].filter((part): part is string => typeof part === "string" && !!part);
+  return redactText(parts.join(": ")).replace(/\s+/g, " ").slice(0, 500);
+}
+
+function withReason(prefix: string, body: unknown) {
+  const reason = responseReason(body);
+  return reason ? `${prefix}: ${reason}` : prefix;
+}
+
 function responseCode(body: unknown) {
   return body && typeof body === "object" && "code" in body && typeof body.code === "string"
     ? body.code
     : undefined;
+}
+
+/** A bounded, redacted reason recorded in the attempt report for a failed artifact upload. */
+function artifactFailure(text: string) {
+  return redactText(text).replace(/\s+/g, " ").trim().slice(0, FAILURE_MESSAGE_LIMIT);
+}
+
+/**
+ * PUTs bytes to a presigned storage URL without credentials or redirects. Only HTTPS is accepted,
+ * plus loopback HTTP in development; errors never include the URL, whose query carries the signature.
+ * The host is resolved once and the connection pinned to that address; private storage is allowed.
+ */
+async function putPresigned(
+  uploadUrl: string,
+  { bytes, contentType }: ClaimArtifact,
+  allowInsecureDevelopment: boolean,
+  signal: AbortSignal,
+  resolveHostname: EndpointPolicy["resolveHostname"],
+): Promise<void> {
+  let target: URL;
+  try {
+    target = new URL(uploadUrl);
+  } catch {
+    throw new Error("artifact upload URL is invalid");
+  }
+  const developmentHttp =
+    allowInsecureDevelopment &&
+    target.protocol === "http:" &&
+    localDevelopmentHost(normalizedHost(target));
+  if ((target.protocol !== "https:" && !developmentHttp) || target.username || target.password)
+    throw new Error(
+      "artifact upload URL must be a credential-free HTTPS URL (loopback HTTP in development)",
+    );
+  const host = normalizedHost(target).replace(/\.$/, "");
+  const addresses = net.isIP(host) ? [{ address: host }] : await resolveHostname(host);
+  if (!Array.isArray(addresses) || addresses.length === 0)
+    throw new Error("artifact upload host did not resolve");
+  const connection = firstConnection(addresses);
+  const transport = target.protocol === "https:" ? https : http;
+  return new Promise((resolve, reject) => {
+    const request = transport.request(
+      target,
+      {
+        method: "PUT",
+        lookup: pinnedLookup(connection),
+        ...(target.protocol === "https:" && !net.isIP(host) ? { servername: host } : {}),
+        // The presigned URL signs Content-Length; the checksum travels in its query.
+        headers: { "content-length": String(bytes.length), "content-type": contentType },
+        signal: AbortSignal.any([signal, AbortSignal.timeout(ARTIFACT_TIMEOUT_MS)]),
+      },
+      (response) => {
+        const status = response.statusCode ?? 0;
+        response.resume();
+        if (status >= 300 && status < 400) {
+          response.destroy();
+          reject(new Error("storage redirects are forbidden"));
+        } else if (status < 200 || status >= 300) reject(new Error(`storage answered ${status}`));
+        else response.once("end", () => resolve()).once("error", reject);
+      },
+    );
+    request.once("error", (error) =>
+      reject(new Error(error.name === "AbortError" ? "upload aborted" : error.message)),
+    );
+    request.end(bytes);
+  });
 }
 
 /**
@@ -463,6 +621,7 @@ export async function runWorker({
   fetchImpl = null,
   now = () => Date.now(),
   random = Math.random,
+  uploadArtifacts = false,
 }: RunWorkerOptions) {
   const request = await createWorkerRequest({
     baseUrl,
@@ -514,7 +673,7 @@ export async function runWorker({
     // One key per registration: retries replay it, a later re-registration writes again.
     const key = `register:${workerId}:${crypto.randomUUID()}`;
     while (!signal?.aborted) {
-      const { status } = await call(
+      const { status, body } = await call(
         "/api/v2/workers/register",
         { workerId, repositoryDigest, worktreeDigest },
         key,
@@ -525,7 +684,10 @@ export async function runWorker({
         transientFailures = 0;
         return;
       }
-      if (action !== "retry") throw new Error(`worker registration failed: ${status}`);
+      if (action !== "retry") {
+        const reason = responseReason(body);
+        throw new Error(`worker registration failed: ${status}${reason ? ` (${reason})` : ""}`);
+      }
       await retryLater("register", status);
     }
   };
@@ -588,17 +750,104 @@ export async function runWorker({
         }
       }
     })();
-    try {
-      let outcome: { result: unknown } | { failed: true };
+    const artifacts: ClaimArtifact[] = [];
+    const context: ClaimContext = {
+      publishArtifact: (artifact) => {
+        if (uploadArtifacts) artifacts.push(artifact);
+      },
+    };
+    /** Retries transient reserve/verify failures a few times while the lease holds. */
+    const artifactCall = async (path: string, body: unknown, key: string) => {
+      for (let attempt = 0; ; attempt += 1) {
+        const sent = await call(path, body, key, {
+          timeoutMs: ARTIFACT_TIMEOUT_MS,
+          signal: abort.signal,
+        });
+        const retry =
+          statusClass(sent.status) === "transient" &&
+          attempt < ARTIFACT_RETRIES &&
+          !abort.signal.aborted &&
+          now() < leaseDeadline;
+        if (!retry) return sent;
+        await pause(retryDelayMs(attempt, random), abort.signal);
+      }
+    };
+    const owner = { workerId, nodeId: claim.nodeId, fence: claim.fence };
+    let storageMissing = false;
+    /** Reserves, uploads and verifies one artifact; failures become a bounded report entry. */
+    const uploadArtifact = async (artifact: ClaimArtifact) => {
+      const sha256 = crypto.createHash("sha256").update(artifact.bytes).digest("hex");
+      const entry = { name: artifact.name, sha256, sizeBytes: artifact.bytes.length };
+      /** Logs the detail locally; `reported` is the only text the control plane receives. */
+      const failed = (error: string, reported = error) => {
+        logger("warn", "artifact upload failed", { ...fields, name: artifact.name, error });
+        return { ...entry, error: artifactFailure(reported) };
+      };
+      if (storageMissing) return failed("control plane has no artifact storage configured (404)");
+      const reserved = await artifactCall(
+        RESERVE_PATH,
+        { ...owner, sha256, sizeBytes: entry.sizeBytes, contentType: artifact.contentType },
+        `artifact:${claim.attemptId}:${claim.fence}:${artifact.name}`,
+      );
+      if (reserved.status === 404) {
+        storageMissing = true;
+        return failed("control plane has no artifact storage configured (404)");
+      }
+      const reservation = artifactReservation.safeParse(reserved.body);
+      if (workerAction("report", reserved.status) !== "continue" || !reservation.success)
+        return failed(withReason(`reservation failed (${reserved.status})`, reserved.body));
       try {
-        outcome = { result: await execute(claim, abort.signal) };
-      } catch {
-        outcome = { failed: true };
+        await putPresigned(
+          reservation.data.uploadUrl,
+          artifact,
+          allowInsecureDevelopment,
+          abort.signal,
+          resolveHostname ?? defaultResolveHostname,
+        );
+      } catch (error) {
+        // Storage statuses and connect errors stay local: they would let a hostile control plane probe the network.
+        const detail = causeMessage(error);
+        return failed(
+          `upload failed: ${detail}`,
+          detail === "upload aborted" ? detail : "upload failed",
+        );
+      }
+      const verified = await artifactCall(
+        VERIFY_PATH,
+        { id: reservation.data.id, ...owner, sha256, sizeBytes: entry.sizeBytes },
+        `artifact-verify:${claim.attemptId}:${claim.fence}:${artifact.name}`,
+      );
+      if (workerAction("report", verified.status) !== "continue")
+        return failed(withReason(`verification rejected (${verified.status})`, verified.body));
+      return { ...entry, id: reservation.data.id, state: "verified" };
+    };
+    try {
+      let outcome: { result: unknown } | { failed: string };
+      try {
+        outcome = { result: await execute(claim, abort.signal, context) };
+      } catch (error) {
+        // The full error stays in the worker log; only a scrubbed summary reaches the control plane.
+        logger("error", "claim execution failed", {
+          ...fields,
+          error: causeMessage(error),
+          stack: error instanceof Error ? error.stack : undefined,
+        });
+        outcome = { failed: executionFailureMessage(error) };
       }
       // A finished result is still reported while the local lease deadline holds.
       if (abort.signal.aborted && ("failed" in outcome || leaseLost || now() >= leaseDeadline)) {
         logger("warn", "lease lost or run cancelled; abandoning claim", fields);
         return fatal;
+      }
+      // Upload failures are recorded in the successful report; they never turn it into a failure.
+      if ("result" in outcome && artifacts.length && isRecord(outcome.result)) {
+        const artifactUploads: Record<string, unknown>[] = [];
+        for (const artifact of artifacts) artifactUploads.push(await uploadArtifact(artifact));
+        outcome = { result: { ...outcome.result, artifactUploads } };
+        if (leaseLost || now() >= leaseDeadline) {
+          logger("warn", "lease lost while uploading artifacts; abandoning claim", fields);
+          return fatal;
+        }
       }
       // Success and failure keep separate idempotency keys, but a failed report never turns a successful execution into a failure.
       const failureKey = `failure:${claim.attemptId}:${claim.fence}`;
@@ -620,7 +869,7 @@ export async function runWorker({
       let path = "failed" in outcome ? FAILURE_PATH : REPORT_PATH;
       let sent =
         "failed" in outcome
-          ? await deliver(path, { message: "worker execution failed" }, failureKey)
+          ? await deliver(path, { message: outcome.failed }, failureKey)
           : await deliver(path, outcome.result, `report:${claim.attemptId}:${claim.fence}`);
       if (path === REPORT_PATH && (sent.status === 400 || sent.status === 413)) {
         logger("warn", "control plane rejected the result; reporting a failure instead", {
@@ -748,11 +997,23 @@ interface RequestCallOptions {
   timeoutMs?: number;
   signal?: AbortSignal;
 }
+/** An attempt output the worker uploads through the control plane's artifact reservations. */
+export interface ClaimArtifact {
+  name: string;
+  bytes: Buffer;
+  contentType: string;
+}
+/** Passed to the executor; published artifacts are uploaded only when `uploadArtifacts` is set. */
+export interface ClaimContext {
+  publishArtifact(artifact: ClaimArtifact): void;
+}
 interface RunWorkerOptions extends WorkerRequestOptions {
   workerId: string;
   repositoryDigest: string;
   worktreeDigest: string;
-  execute: (claim: Claim, signal: AbortSignal) => Promise<unknown>;
+  execute: (claim: Claim, signal: AbortSignal, context: ClaimContext) => Promise<unknown>;
+  /** Reserve, upload and verify published artifacts after a successful execution. */
+  uploadArtifacts?: boolean;
   signal?: AbortSignal | null;
   /** Waits ms; implementations should resolve early when the optional signal aborts. */
   sleep?: (ms: number, signal?: AbortSignal) => Promise<unknown>;
@@ -776,6 +1037,12 @@ const claimResponse = z.object({
     })
     .nullable(),
 });
+
+const artifactReservation = z.object({ id: z.string().uuid(), uploadUrl: z.string() });
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
 
 async function readJsonBounded(response: WorkerResponse): Promise<unknown> {
   const bytes = await readResponseBytes(response);

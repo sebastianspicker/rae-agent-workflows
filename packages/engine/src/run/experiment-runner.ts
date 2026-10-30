@@ -12,6 +12,7 @@ import {
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import {
+  type ExperimentsExperimentV1DefsArm,
   type ExperimentsTrialRecordV1,
   type ExperimentsTrialExecutionV1,
   parseContract,
@@ -55,12 +56,15 @@ import {
   retainTrialEvidence,
   verifyTrialEvidence,
 } from "./experiment-evidence.js";
+import { failingDoctorChecks, type ProviderDoctorReport } from "./provider-doctor.js";
 import { readJsonStrict, writeJson } from "./state.js";
 
 export const EXPERIMENT_MARKER = ".rae-experiment";
 export const TRIAL_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,191}$/;
 const ERROR_EXCERPT_CHARS = 2000;
 const BASELINE_DATE = "2026-01-01T00:00:00Z";
+/** Consecutive infrastructure failures (`launch-failed`) after which an invocation stops launching. */
+export const MAX_CONSECUTIVE_INFRASTRUCTURE_FAILURES = 3;
 
 export interface RunnerIo {
   spawn: (request: BoundedProcessRequest) => Promise<BoundedProcessResult>;
@@ -76,6 +80,8 @@ export interface RunTrialsOptions {
   acknowledgeInterrupted?: boolean;
   signal?: AbortSignal;
   io?: Partial<RunnerIo>;
+  /** Provider doctor, run once per distinct arm run configuration before the first new trial. */
+  doctor?: (arm: ExperimentsExperimentV1DefsArm, workspaceRoot?: string) => ProviderDoctorReport;
   log?: (line: string) => void;
 }
 
@@ -138,14 +144,18 @@ export function readExperimentLock(outputDir: string): ExperimentLock | null {
   return readJsonStrict(path) as unknown as ExperimentLock;
 }
 
-/** Throws when an existing lock was written for a different experiment or suite revision. */
+/** Throws when an existing lock was written for a different experiment or suite revision; `freshOutputHint` adds the `run` recovery advice. */
 export function assertExperimentLock(
   outputDir: string,
   loaded: LoadedExperiment,
   verifyInputs = true,
+  freshOutputHint = true,
 ): void {
   const lock = readExperimentLock(outputDir);
   if (!lock) return;
+  const hint = freshOutputHint
+    ? " (failed records are permanent; start a fresh output directory with --output <dir>, the old one stays reportable)"
+    : "";
   if (!["1.0.0", "2.0.0", "3.0.0"].includes(lock.schema_version))
     throw new Error("unsupported experiment lock version");
   if (lock.schema_version === "3.0.0" && (!lock.inputs || lock.execution_journal !== "1.0.0"))
@@ -160,12 +170,12 @@ export function assertExperimentLock(
     const current = fingerprintExperimentInputs(loaded);
     if (canonicalJson(current) !== canonicalJson(lock.inputs))
       throw new Error(
-        "experiment input drift: repository, workflow, profile or policy changed since planning; use a new experiment revision and output directory",
+        `experiment input drift: repository, workflow, profile or policy changed since planning; use a new experiment revision and output directory${hint}`,
       );
   }
   if (lock.experiment_digest !== loaded.digest || lock.suite_digest !== loaded.suite.digest)
     throw new Error(
-      `experiment lock mismatch in ${resolve(outputDir)}: locked experiment ${lock.experiment_digest} and suite ${lock.suite_digest}, current experiment ${loaded.digest} and suite ${loaded.suite.digest}; preregistration is immutable, use a new output directory or experiment revision`,
+      `experiment lock mismatch in ${resolve(outputDir)}: locked experiment ${lock.experiment_digest} and suite ${lock.suite_digest}, current experiment ${loaded.digest} and suite ${loaded.suite.digest}; preregistration is immutable, use a new output directory or experiment revision${hint}`,
     );
 }
 
@@ -310,6 +320,7 @@ export function parseFinalRunJson(stdout: string): RunResultSummary | null {
     workspace_root: value.workspace_root,
     ...(typeof value.status === "string" ? { status: value.status } : {}),
     ...(typeof value.report === "string" ? { report: value.report } : {}),
+    ...(typeof value.error === "string" ? { error: value.error } : {}),
   };
 }
 
@@ -448,6 +459,21 @@ async function executeTrial(
       processResult.backgroundCleanup?.containmentUncertain
     )
       throw new Error("autonomous process did not finish cleanly; outcome is not evaluable");
+    // A blocked run with no passed provider envelope never produced a measurement (bad auth,
+    // model or provider): an infrastructure failure, not a measured `pass: false`.
+    if (result.status === "blocked" && evidence.passedProviderAttempts === 0)
+      return buildTrialRecord({
+        ...base,
+        ...timing,
+        status: "launch-failed",
+        result: { ...result, status: `blocked (exit ${processResult.status ?? "unknown"})` },
+        evidence,
+        evidenceRefs,
+        error: excerpt(
+          processResult,
+          `run blocked without a passed provider envelope (exit code ${processResult.status ?? "unknown"}): ${result.error ?? "no error reported"}`,
+        ),
+      });
     const checkIo = {
       spawn: async (request: BoundedProcessRequest) => {
         const remaining = context.deadline - io.now().getTime();
@@ -553,6 +579,49 @@ function logDryRun(
       ...trialRunArguments(loaded, arm, task, repositoryDir),
     ];
     log(`${trial.trial_id}\t${trial.arm_id}\t${trial.task_id}\t${JSON.stringify(argv)}`);
+  }
+}
+
+/** Source directory the runner materializes for a trial; undefined for a cloned Git repository. */
+function trialSourceRepository(loaded: LoadedExperiment, trial: PlannedTrial): string | undefined {
+  const { task } = trialSubjects(loaded, trial);
+  const repositories = loaded.suite.suite.repositories as Record<string, SuiteRepository>;
+  const repository = Object.hasOwn(repositories, task.repository)
+    ? repositories[task.repository]
+    : undefined;
+  return repository?.kind === "directory" ? resolve(loaded.suite.root, repository.path) : undefined;
+}
+
+/**
+ * Throws naming the arm and failing check when any distinct provider configuration of the pending
+ * trials fails. The first pending trial of a configuration supplies the doctor's workspace root.
+ * Command-provider arms are skipped: their unsafe opt-in is validated by the contract.
+ */
+export function assertProvidersReady(
+  loaded: LoadedExperiment,
+  pending: readonly PlannedTrial[],
+  doctor: (arm: ExperimentsExperimentV1DefsArm, workspaceRoot?: string) => ProviderDoctorReport,
+): void {
+  const checked = new Set<string>();
+  for (const trial of pending) {
+    const { arm } = trialSubjects(loaded, trial);
+    const { provider, model, variant, execution_profile, agent_command } = arm.run;
+    if (provider === "command") continue;
+    const key = canonicalJson({
+      provider,
+      model,
+      variant,
+      execution_profile,
+      agent_command,
+      unsafe: arm.run.allow_unsafe_command_provider === true,
+    });
+    if (checked.has(key)) continue;
+    checked.add(key);
+    const report = doctor(arm, trialSourceRepository(loaded, trial));
+    if (!report.success)
+      throw new Error(
+        `provider doctor failed for arm ${arm.arm_id}: ${failingDoctorChecks(report)}; no trial was launched`,
+      );
   }
 }
 
@@ -683,6 +752,8 @@ export async function runExperiment(
       budgets.max_wall_clock_seconds === undefined
         ? Infinity
         : started + Math.max(0, budgets.max_wall_clock_seconds * 1000 - elapsed);
+    let doctored = false;
+    let infrastructureFailures = 0;
     for (const trial of trials) {
       const recordPath = join(outputDir, "trials", `${trial.trial_id}.json`);
       const existing = retained.get(trial.trial_id);
@@ -715,6 +786,16 @@ export async function runExperiment(
         summary.stop_reason = unknownCost ? "unknown-cost-usage" : "max-estimated-cost";
         log(`budget: ${summary.stop_reason}; stopping`);
         break;
+      }
+      if (!doctored && options.doctor) {
+        doctored = true;
+        assertProvidersReady(
+          loaded,
+          trials
+            .filter((candidate) => !retained.get(candidate.trial_id))
+            .slice(0, options.maxTrials),
+          options.doctor,
+        );
       }
       const start = startTrialExecution(outputDir, loaded, trial, inputDigest, io.now());
       const context: TrialContext = {
@@ -791,6 +872,14 @@ export async function runExperiment(
       }
       if (context.stopReason) {
         summary.stop_reason = context.stopReason;
+        break;
+      }
+      infrastructureFailures = record.status === "launch-failed" ? infrastructureFailures + 1 : 0;
+      if (infrastructureFailures >= MAX_CONSECUTIVE_INFRASTRUCTURE_FAILURES) {
+        summary.stop_reason = "consecutive-infrastructure-failures";
+        log(
+          `${infrastructureFailures} consecutive infrastructure failures (launch-failed); stopping. Retained launch-failed records are never re-run. Fix the provider, model or authentication, then re-run into a fresh --output directory, or the same directory to continue with the remaining slots. Written records are kept.`,
+        );
         break;
       }
       if (options.signal?.aborted) {

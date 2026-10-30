@@ -1,6 +1,6 @@
 /** Shares envelope persistence, draining, stop-driven abort, edge conditions, loop restarts and run budgets across schedulers. */
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 import { writeExclusiveFileAtomic } from "../primitives/atomic-file.js";
 import { canonicalJson } from "./workflow-contract.js";
@@ -63,6 +63,24 @@ export function readEnvelopeFile(pathValue: string): unknown {
   }
 }
 
+/** Reads the highest-attempt envelope a v2.0 run persisted for `nodeId` in `iteration`, if any. */
+export function latestPersistedEnvelope(
+  runDir: string,
+  nodeId: string,
+  iteration: number,
+): WorkflowNodeEnvelope | null {
+  const directory = resolve(runDir, "workflow", "attempts", nodeId);
+  if (!existsSync(directory)) return null;
+  let best: { attempt: number; name: string } | null = null;
+  for (const name of readdirSync(directory)) {
+    const match = /^(\d+)\.(\d+)\.json$/.exec(name);
+    if (!match || Number(match[1]) !== iteration) continue;
+    const attempt = Number(match[2]);
+    if (!best || attempt > best.attempt) best = { attempt, name };
+  }
+  return best ? validateNodeEnvelope(readEnvelopeFile(resolve(directory, best.name))) : null;
+}
+
 function findingBlocks(finding: Record<string, unknown>): boolean {
   return finding.blocking === true || finding.severity === "blocking";
 }
@@ -99,6 +117,65 @@ export function conditionMatches(
     return payloadFailed || (envelope.findings ?? []).some(findingBlocks);
   }
   return false;
+}
+
+interface OwnershipNode {
+  id: string;
+  kind: string;
+  access?: string;
+  ownership_plan?: boolean;
+  loop?: { members?: readonly string[] };
+}
+
+/**
+ * Writers are held to the ownership plan's `file_ownership`, so every writer, and every provider
+ * node in a loop that contains a writer (its critics and diagnosis), receives the latest passed
+ * plan envelope as an input even when the workflow has no edge from the planner. Gates, joins and
+ * checkpoints never do: they would count the plan's findings as their own. Any existing input from
+ * the planner, including a `context` edge, already carries the plan, so none is synthesized.
+ */
+export function ownershipPlanInput<Edge, Envelope extends { status: string }>(
+  nodes: readonly OwnershipNode[],
+  nodeId: string,
+  inputs: ReadonlyArray<{ edge: { from: string } }>,
+  planEnvelope: (planNodeId: string) => Envelope | undefined,
+): { edge: Edge; envelope: Envelope } | null {
+  const planNode = nodes.find((node) => node.ownership_plan === true);
+  const node = nodes.find((candidate) => candidate.id === nodeId);
+  if (!planNode || !node || planNode.id === nodeId || !isProviderKind(node.kind)) return null;
+  if (inputs.some(({ edge }) => edge.from === planNode.id)) return null;
+  const writes = (id: string): boolean =>
+    nodes.some((node) => node.id === id && node.access === "write");
+  const target =
+    writes(nodeId) ||
+    nodes.some((loop) => loop.loop?.members?.includes(nodeId) && loop.loop.members.some(writes));
+  const envelope = target ? planEnvelope(planNode.id) : undefined;
+  if (envelope?.status !== "passed") return null;
+  const edge = { from: planNode.id, to: nodeId, type: "artifact", artifact: "ownership-plan" };
+  return { edge: edge as Edge, envelope };
+}
+
+/** True for an edge that only carries data and never enables, orders or counts toward a join. */
+export function isContextEdge(edge: { type: string }): boolean {
+  return edge.type === "context";
+}
+
+/**
+ * Inputs a node receives through its `context` edges when it executes: each source's latest
+ * passed envelope, with the edge as declared. A source that has not passed contributes nothing.
+ */
+export function contextInputs<Edge extends { from: string; to: string; type: string }, Envelope>(
+  edges: readonly Edge[],
+  nodeId: string,
+  latestPassed: (sourceId: string) => Envelope | undefined,
+): Array<{ edge: Edge; envelope: Envelope }> {
+  return edges
+    .filter((edge) => edge.to === nodeId && isContextEdge(edge))
+    .sort((left, right) => left.from.localeCompare(right.from))
+    .flatMap((edge) => {
+      const envelope = latestPassed(edge.from);
+      return envelope ? [{ edge, envelope }] : [];
+    });
 }
 
 /** Names the nodes whose failure disabled the remaining path, so a blocked run says why. */

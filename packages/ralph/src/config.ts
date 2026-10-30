@@ -1,5 +1,5 @@
 /** Parses Ralph CLI policy and resolves package and repository locations. */
-import { existsSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
@@ -458,4 +458,21 @@ export function validateRuntimeState(
 export function assertNodeVersion(): void {
   const major = Number(process.versions.node.split(".")[0]);
   if (major < 24) throw new RalphError(`Node.js >=24 is required (found ${process.versions.node})`);
+}
+
+/** Refuses to run an embedded install on a platform or architecture other than the one it was built on. */
+export function assertInstallPlatform(): void {
+  let receipt: { kind?: unknown; platform?: unknown; arch?: unknown };
+  try {
+    receipt = JSON.parse(
+      readFileSync(join(packageRootFromModule(), ".ralph-install.json"), "utf8"),
+    );
+  } catch {
+    return;
+  }
+  if (receipt.kind !== "ralph-audit-embedded") return;
+  if (receipt.platform !== process.platform || receipt.arch !== process.arch)
+    throw new RalphError(
+      `This Ralph install was built for ${String(receipt.platform)}/${String(receipt.arch)} but is running on ${process.platform}/${process.arch}; re-run bootstrap on this platform`,
+    );
 }

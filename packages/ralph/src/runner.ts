@@ -66,7 +66,8 @@ const ALLOWLIST = [
   "GIT_SSL_CAINFO",
 ];
 
-function codexExecutable(repoRoot: string): string {
+/** Resolves the Codex executable on PATH, rejecting links and anything inside the target repository. */
+export function codexExecutable(repoRoot: string): string {
   let candidate: string | undefined;
   for (const directory of (process.env.PATH ?? "").split(delimiter)) {
     if (!directory) continue;

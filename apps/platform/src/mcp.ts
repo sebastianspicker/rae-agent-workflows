@@ -1,5 +1,9 @@
 /** Purpose: stateless, scope-protected Streamable HTTP MCP run controls. */
-import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
+import {
+  McpServer,
+  ResourceTemplate,
+  type ToolCallback,
+} from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { projectVisible, requireProject, requireScope } from "./auth.js";
@@ -31,24 +35,66 @@ export async function handleStreamableMcp({
   body,
   store,
   principal,
+  errorStatus,
+  logger = () => {},
 }: {
   request: IncomingMessage;
   response: ServerResponse;
   body: unknown;
   store: MemoryStore | PostgresStore;
   principal: Principal;
+  /** The HTTP status a failure maps to; below 500 the failure is a client error shown verbatim. */
+  errorStatus: (error: unknown) => number;
+  logger?: (level: string, message: string, fields?: Record<string, unknown>) => unknown;
 }) {
   const server = new McpServer({
     name: "rae-experimental-platform",
     version: "0.1.0-experimental",
   });
+  /** Registers a tool whose client errors keep their message and whose other failures are masked and logged. */
+  const registerTool = <Args extends z.ZodRawShape>(
+    name: string,
+    config: { description: string; inputSchema: Args },
+    handler: ToolCallback<Args>,
+  ) =>
+    server.registerTool(name, config, (async (...args: Parameters<ToolCallback<Args>>) => {
+      try {
+        return await (handler as (...a: unknown[]) => Promise<unknown>)(...args);
+      } catch (error) {
+        const status = errorStatus(error);
+        logger(status >= 500 ? "error" : "warn", "platform mcp tool failed", {
+          tool: name,
+          status,
+          error: error instanceof Error ? error.message : "Unknown platform failure",
+        });
+        if (status < 500) throw error;
+        return { isError: true, content: [{ type: "text", text: "internal error" }] };
+      }
+    }) as ToolCallback<Args>);
+  /** Wraps a resource read like registerTool: client errors keep their message, others are masked and logged. */
+  const guardResource =
+    <Args extends unknown[], Result>(name: string, handler: (...args: Args) => Promise<Result>) =>
+    async (...args: Args) => {
+      try {
+        return await handler(...args);
+      } catch (error) {
+        const status = errorStatus(error);
+        logger(status >= 500 ? "error" : "warn", "platform mcp resource failed", {
+          resource: name,
+          status,
+          error: error instanceof Error ? error.message : "Unknown platform failure",
+        });
+        if (status < 500) throw error;
+        throw new Error("internal error");
+      }
+    };
   const run = async (runId: string) => {
     const value = await store.getRun(runId);
     if (!value || !projectVisible(principal, value.projectId))
       throw Object.assign(new Error("run not found"), { statusCode: 404 });
     return value;
   };
-  server.registerTool(
+  registerTool(
     "rae_submit_run",
     {
       description: "Submit a project-authorized run",
@@ -77,7 +123,7 @@ export async function handleStreamableMcp({
       };
     },
   );
-  server.registerTool(
+  registerTool(
     "rae_get_run",
     { description: "Read a permitted RAE run", inputSchema: runInput },
     async ({ run_id }) => {
@@ -85,7 +131,7 @@ export async function handleStreamableMcp({
       return { content: [{ type: "text", text: JSON.stringify(await run(uuidVariable(run_id))) }] };
     },
   );
-  server.registerTool(
+  registerTool(
     "rae_list_events",
     {
       description: "Read a bounded page of immutable events",
@@ -116,7 +162,7 @@ export async function handleStreamableMcp({
       };
     },
   );
-  server.registerTool(
+  registerTool(
     "rae_signal_run",
     {
       description: "Append an operator signal",
@@ -147,7 +193,7 @@ export async function handleStreamableMcp({
       };
     },
   );
-  server.registerTool(
+  registerTool(
     "rae_cancel_run",
     {
       description: "Cancel a permitted run",
@@ -172,7 +218,7 @@ export async function handleStreamableMcp({
     "rae-run",
     new ResourceTemplate("rae://runs/{run_id}", { list: undefined }),
     { mimeType: "application/json" },
-    async (uri, { run_id }) => {
+    guardResource("rae-run", async (uri, { run_id }) => {
       requireScope(principal, "rae.run.read");
       return {
         contents: [
@@ -183,13 +229,13 @@ export async function handleStreamableMcp({
           },
         ],
       };
-    },
+    }),
   );
   server.registerResource(
     "rae-events",
     new ResourceTemplate("rae://runs/{run_id}/events{?cursor,limit}", { list: undefined }),
     { mimeType: "application/json" },
-    async (uri, { run_id, cursor, limit }) => {
+    guardResource("rae-events", async (uri, { run_id, cursor, limit }) => {
       requireScope(principal, "rae.run.read");
       await run(uuidVariable(run_id));
       return {
@@ -211,7 +257,7 @@ export async function handleStreamableMcp({
           },
         ],
       };
-    },
+    }),
   );
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined,

@@ -291,7 +291,9 @@ function uniqueEdge(
 
 function topologyLayers(vertices: GraphVertex[], edges: WorkflowEdge[]): Layers {
   const depth = new Map(vertices.map(({ id }) => [id, 0]));
-  const acyclic = edges.filter((edge) => edge.type !== "loop-back");
+  // Context edges only carry data from an upstream node, so they never change a valid rank;
+  // leaving them out also keeps an unsaved draft with a backward context edge laid out.
+  const acyclic = edges.filter((edge) => edge.type !== "loop-back" && edge.type !== "context");
   const incoming = new Map(vertices.map(({ id }) => [id, 0]));
   for (const edge of acyclic) incoming.set(edge.to, (incoming.get(edge.to) ?? 0) + 1);
   const queue = [...vertices.filter(({ id }) => incoming.get(id) === 0).map(({ id }) => id)].sort();

@@ -1650,7 +1650,7 @@ export type WorkflowsWorkflowV21DefsNode = {
 export type WorkflowsWorkflowV21DefsEdge = {
   from: WorkflowsWorkflowV21DefsNodeId;
   to: WorkflowsWorkflowV21DefsNodeId;
-  type: "sequence" | "artifact" | "stream" | "condition" | "loop-back";
+  type: "sequence" | "artifact" | "stream" | "condition" | "loop-back" | "context";
   artifact?: string;
   condition?: "success" | "failure" | "blocking-findings" | "budget-available";
 };
@@ -1707,7 +1707,7 @@ export type WorkflowsWorkflowV22DefsNode = {
 export type WorkflowsWorkflowV22DefsEdge = {
   from: WorkflowsWorkflowV22DefsNodeId;
   to: WorkflowsWorkflowV22DefsNodeId;
-  type: "sequence" | "artifact" | "condition";
+  type: "sequence" | "artifact" | "condition" | "context";
   artifact?: string;
   condition?: "success" | "failure" | "blocking-findings" | "budget-available";
 };
@@ -1750,7 +1750,7 @@ export type WorkflowsWorkflowV2DefsNode = {
 export type WorkflowsWorkflowV2DefsEdge = {
   from: WorkflowsWorkflowV2DefsNodeId;
   to: WorkflowsWorkflowV2DefsNodeId;
-  type: "sequence" | "artifact" | "condition" | "loop-back";
+  type: "sequence" | "artifact" | "condition" | "loop-back" | "context";
   artifact?: string;
   condition?: "success" | "failure" | "blocking-findings" | "budget-available";
 };
@@ -1892,9 +1892,9 @@ export const schemaDigests = {
   "workflows/node-envelope-v2.schema.json":
     "97bb56a3ec5ab98e2fe2208cf2df8ed2342ca83942d3b97b5f96fd85b64a7315",
   "workflows/workflow-v2.1.schema.json":
-    "82ecd3d1dfd00a034bd9aa2039a4f99591f0089dbc33fef5cfffb8d3946035cf",
+    "1c345eacd5603413de8fb9bdacb99e88a784040ef13d1fc75bc665edf7de971d",
   "workflows/workflow-v2.2.schema.json":
-    "8923e5350ed75117a0db86b024c4dfd4400dfd1ddf8b70f9e5abf052cd2dc643",
+    "fc55e8f1a98561fed10ce09aacd56aa3cc1a624ce413524e267071ddb62f60ed",
   "workflows/workflow-v2.schema.json":
-    "df55459b61b4ebdae3a6240a3a990268f541ccdfe7a04b0eb32be764aba9b725",
+    "0c25661cd8241cec36ace59e6a952308223d07492e8e0e2aae3a362431db2d67",
 } as const;

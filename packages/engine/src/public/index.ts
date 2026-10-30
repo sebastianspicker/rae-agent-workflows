@@ -22,6 +22,11 @@ export {
   type ProviderRuntimeIdentity,
 } from "../agents/agent-executor.js";
 export {
+  doctorProviderTarget,
+  failingDoctorChecks,
+  type ProviderDoctorReport,
+} from "../run/provider-doctor.js";
+export {
   ensureRuntimeStateReadable,
   inspectRuntimeStateGuard,
 } from "../run/runtime-state-guard.js";

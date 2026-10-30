@@ -12,7 +12,11 @@ import {
 } from "@rae/contracts";
 import { repositoryRoot } from "../primitives/installation-paths.js";
 import { assertSupportedNodeRuntime } from "../primitives/node-runtime.js";
-import { type LoadedExperiment, loadExperiment } from "../run/experiment-contract.js";
+import {
+  experimentDefaults,
+  type LoadedExperiment,
+  loadExperiment,
+} from "../run/experiment-contract.js";
 import { analyzeExperimentBundle } from "../run/experiment-bundle.js";
 import { exportTaskResults, exportTrials, renderDatasheet } from "../run/experiment-export.js";
 import { readTrialExecution, trialOutcomeDigest } from "../run/experiment-journal.js";
@@ -21,12 +25,14 @@ import { planTrials } from "../run/experiment-plan.js";
 import { aggregateExperiment, renderBenchmarkCard } from "../run/experiment-report.js";
 import {
   assertExperimentLock,
+  assertProvidersReady,
   experimentOutputDirectory,
   runExperiment,
   readExperimentLock,
   TRIAL_ID_PATTERN,
   writeExperimentLock,
 } from "../run/experiment-runner.js";
+import { doctorProviderTarget } from "../run/provider-doctor.js";
 import { readJsonStrict, writeJson } from "../run/state.js";
 
 assertSupportedNodeRuntime();
@@ -131,7 +137,7 @@ function existingOutputDirectory(options: CliOptions, loaded: LoadedExperiment):
   const outputDir = outputDirectory(options, loaded);
   if (!existsSync(outputDir) || !readExperimentLock(outputDir))
     throw new Error(`planned experiment output directory not found: ${outputDir}`);
-  assertExperimentLock(outputDir, loaded, false);
+  assertExperimentLock(outputDir, loaded, false, false);
   return outputDir;
 }
 
@@ -185,6 +191,23 @@ function parseMaxTrials(options: CliOptions): number | undefined {
   return parsed;
 }
 
+/** Warning for a run with no budgets and no `--max-trials`; null when a limit applies. */
+export function unbudgetedRunWarning(
+  loaded: LoadedExperiment,
+  outputDir: string,
+  maxTrials: number | undefined,
+): string | null {
+  const budgets = loaded.experiment.budgets ?? {};
+  if (maxTrials !== undefined || Object.values(budgets).some((value) => value !== undefined))
+    return null;
+  const pending = planTrials(loaded).filter(
+    (trial) => !existsSync(join(outputDir, "trials", `${trial.trial_id}.json`)),
+  ).length;
+  if (pending === 0) return null;
+  const seconds = experimentDefaults(loaded.experiment).max_trial_wall_clock_seconds;
+  return `warning: experiment has no budgets and --max-trials is not set; launching ${pending} ${pending === 1 ? "trial" : "trials"} (up to ${seconds}s each, paid provider calls). Press Ctrl-C to stop, or use --max-trials.`;
+}
+
 async function runCommand(options: CliOptions): Promise<void> {
   const loaded = loadFromOptions(options);
   const outputDir = outputDirectory(options, loaded);
@@ -192,7 +215,30 @@ async function runCommand(options: CliOptions): Promise<void> {
   const maxTrials = parseMaxTrials(options);
   const json = options.json === true;
   if (dryRun) assertExperimentLock(outputDir, loaded);
-  else writeExperimentLock(outputDir, loaded, planTrials(loaded));
+  else {
+    assertExperimentLock(outputDir, loaded);
+    assertProvidersReady(
+      loaded,
+      planTrials(loaded)
+        .filter((trial) => !existsSync(join(outputDir, "trials", `${trial.trial_id}.json`)))
+        .slice(0, maxTrials),
+      (arm, workspaceRoot) =>
+        doctorProviderTarget({
+          provider: arm.run.provider,
+          model: arm.run.model,
+          variant: arm.run.variant,
+          agentCommand: arm.run.agent_command,
+          allowUnsafeCommand: arm.run.allow_unsafe_command_provider === true,
+          executionProfile: arm.run.execution_profile
+            ? resolve(loaded.root, arm.run.execution_profile)
+            : undefined,
+          workspaceRoot: workspaceRoot ?? process.cwd(),
+        }),
+    );
+    writeExperimentLock(outputDir, loaded, planTrials(loaded));
+  }
+  const warning = dryRun ? null : unbudgetedRunWarning(loaded, outputDir, maxTrials);
+  if (warning) process.stderr.write(`${warning}\n`);
   const controller = new AbortController();
   const abort = () => controller.abort();
   process.once("SIGINT", abort);

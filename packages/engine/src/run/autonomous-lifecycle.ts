@@ -827,6 +827,14 @@ function newRunContext(
   // at protected credential material.
   const resolvedPolicy = loadAutonomousPolicy(options.policy);
   const resolvedWorkflow = resolveNewWorkflow(projectRoot, options);
+  // An unknown stop node must not leave a worktree, branch or running run behind.
+  if (
+    resolvedWorkflow &&
+    typeof options.through === "string" &&
+    !resolvedWorkflow.workflow.nodes.some(({ id }) => id === options.through)
+  ) {
+    throw new Error(`--through names unknown workflow node: ${options.through}`);
+  }
   const resolvedContextPolicy = resolveNewContextPolicy(
     options,
     resolvedWorkflow?.workflow ?? null,

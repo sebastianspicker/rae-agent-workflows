@@ -10,10 +10,11 @@ import { z } from "zod";
 import { loadProjectMap } from "./project-map.js";
 import { prepareHostedAttempt } from "./attempt-runtime.js";
 import { createHostedStaging } from "./hosted-staging.js";
-import type { Claim } from "./store-types.js";
+import { CLAIM_ID_PATTERN, type Claim } from "./store-types.js";
+import type { ClaimContext } from "./worker.js";
 
 export { prepareHostedAttempt } from "./attempt-runtime.js";
-const safeId = z.string().regex(/^[A-Za-z0-9._-]{1,128}$/);
+const safeId = z.string().regex(CLAIM_ID_PATTERN);
 const claimContract = z.object({
   runId: safeId,
   attemptId: safeId,
@@ -81,10 +82,10 @@ function prepareRequest(
 export function createLocalClaimExecutor(
   { projectMapFile }: ExecutorOptions,
   dependencies: ExecutorDependencies = defaults,
-): (claim: Claim, signal: AbortSignal) => Promise<Record<string, unknown>> {
+): (claim: Claim, signal: AbortSignal, context?: ClaimContext) => Promise<Record<string, unknown>> {
   const projects = dependencies.loadProjects(projectMapFile);
   const projectRoots = [...projects.values()].map((project) => project.root);
-  return async (claimValue, signal) => {
+  return async (claimValue, signal, context) => {
     signal.throwIfAborted();
     const { claim, project, capabilities, execution, runtime } = prepareRequest(
       claimValue,
@@ -122,6 +123,16 @@ export function createLocalClaimExecutor(
       const events = staging.read("events.jsonl");
       runtime.publishArtifact("output.json", output);
       runtime.publishArtifact("events.jsonl", events);
+      context?.publishArtifact({
+        name: "output.json",
+        bytes: output,
+        contentType: "application/json",
+      });
+      context?.publishArtifact({
+        name: "events.jsonl",
+        bytes: events,
+        contentType: "application/x-ndjson",
+      });
       return {
         artifact: result.artifact,
         durationMs: result.durationMs,

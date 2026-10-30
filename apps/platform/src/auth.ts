@@ -39,8 +39,12 @@ function unauthorized(message: string) {
   return Object.assign(new Error(message), { statusCode: 401 });
 }
 
+/** Receives one server-side line per rejected bearer token; it never sees the token itself. */
+type AuthLogger = (level: string, message: string, fields?: Record<string, unknown>) => unknown;
+
 export function createAuthenticator(
   config: PlatformConfig,
+  logger: AuthLogger = () => {},
 ): (authorization?: string) => Promise<Principal> {
   const oidc = config.oidc;
   if (!oidc) {
@@ -60,9 +64,15 @@ export function createAuthenticator(
         issuer: oidc.issuer,
         audience: oidc.audience,
         algorithms: oidc.algorithms,
-        typ: oidc.tokenType,
+        // The typ header is constrained only when oidc.tokenType is set; many issuers emit "JWT".
+        ...(oidc.tokenType ? { typ: oidc.tokenType } : {}),
         clockTolerance: ISSUED_AT_SKEW_SECONDS,
       });
+      // Without a typ constraint, an ID token for the same client_id audience would otherwise pass.
+      if (!oidc.tokenType && (payload.nonce !== undefined || payload.at_hash !== undefined)) {
+        logger("warn", "bearer token rejected", { code: "id_token_rejected" });
+        throw unauthorized("invalid bearer token");
+      }
       const now = Math.floor(Date.now() / 1000);
       if (typeof payload.sub !== "string" || typeof payload.exp !== "number" || payload.exp <= now)
         throw unauthorized("token subject and unexpired exp claims are required");
@@ -88,6 +98,12 @@ export function createAuthenticator(
         throw Object.assign(new Error("token signing keys are temporarily unavailable"), {
           statusCode: 503,
         });
+      const failure = error as { code?: unknown; claim?: unknown; reason?: unknown };
+      logger("warn", "bearer token rejected", {
+        code: typeof failure.code === "string" ? failure.code : "unknown",
+        ...(typeof failure.claim === "string" ? { claim: failure.claim } : {}),
+        ...(typeof failure.reason === "string" ? { reason: failure.reason } : {}),
+      });
       throw unauthorized("invalid bearer token");
     }
   };

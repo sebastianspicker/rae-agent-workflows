@@ -42,6 +42,7 @@ const require = createRequire(import.meta.url);
 /** Receipt written by bootstrap; --force only replaces a directory that carries it. */
 const INSTALL_MARKER = ".ralph-install.json";
 const INSTALL_KIND = "ralph-audit-embedded";
+const BRIDGE_ADDON = "rae_fs_bridge.node";
 
 /** True when the directory is a Ralph embedded install: its receipt, or a pre-receipt manifest. */
 function isRalphInstall(destination: string): boolean {
@@ -129,7 +130,7 @@ export function bootstrap(target: string, force = false): string {
     atomicWriteRelative(
       destination,
       INSTALL_MARKER,
-      `${JSON.stringify({ kind: INSTALL_KIND, version, state, installed_at: isoUtc() })}\n`,
+      `${JSON.stringify({ kind: INSTALL_KIND, version, state, installed_at: isoUtc(), platform: process.platform, arch: process.arch })}\n`,
     );
   writeReceipt("installing");
   for (const relativePath of EMBEDDED_FILES) {
@@ -143,10 +144,12 @@ export function bootstrap(target: string, force = false): string {
     throw new RalphError("compiled Ralph runtime is missing; run npm run build first");
   cpSync(compiled, join(destination, "dist", "src"), { recursive: true });
   const bridgeRoot = resolve(sourceRoot, "../fs-bridge");
-  for (const item of ["package.json", "dist", "build"])
-    cpSync(join(bridgeRoot, item), join(destination, "node_modules", "@rae", "fs-bridge", item), {
-      recursive: true,
-    });
+  // The loader needs only the compiled addon at build/Release; CMake state embeds local paths.
+  for (const item of ["package.json", "dist", join("build", "Release", BRIDGE_ADDON)]) {
+    const output = join(destination, "node_modules", "@rae", "fs-bridge", item);
+    mkdirSync(dirname(output), { recursive: true, mode: 0o700 });
+    cpSync(join(bridgeRoot, item), output, { recursive: true });
+  }
   for (const dependency of EMBEDDED_DEPENDENCIES) {
     const dependencyRoot = dirname(require.resolve(`${dependency}/package.json`));
     cpSync(dependencyRoot, join(destination, "node_modules", dependency), {

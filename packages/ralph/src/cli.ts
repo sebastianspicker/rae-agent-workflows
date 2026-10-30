@@ -1,10 +1,17 @@
 #!/usr/bin/env node
 /** Implements Ralph's command-line lifecycle and stable exit-code contract. */
-import { accessSync, existsSync, readFileSync, constants } from "node:fs";
+import { closeSync, existsSync, readFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { syncBranch } from "./branch.js";
 import { EXIT, RalphError, errorMessage } from "./errors.js";
-import { assertNodeVersion, parseArgs, resolvePaths, USAGE, VERSION } from "./config.js";
+import {
+  assertInstallPlatform,
+  assertNodeVersion,
+  parseArgs,
+  resolvePaths,
+  USAGE,
+  VERSION,
+} from "./config.js";
 import { Logger } from "./logger.js";
 import { archiveState } from "./helper.js";
 import { RunLock, lockState } from "./lock.js";
@@ -21,7 +28,8 @@ import {
   skipStory,
   writeProgress,
 } from "./state.js";
-import { modelPreflight, processStory } from "./runner.js";
+import { codexExecutable, modelPreflight, processStory } from "./runner.js";
+import { openRoot } from "@rae/fs-bridge";
 import { CONTAINMENT_EXIT } from "./supervisor.js";
 import { securityPreflight } from "./preflight.js";
 import {
@@ -79,31 +87,88 @@ function listStories(prd: Prd, mode: Mode, options: CliOptions): void {
       );
 }
 
-function codexStatus(): "found" | "missing" {
-  for (const directory of (process.env.PATH ?? "").split(":")) {
-    if (!directory) continue;
-    try {
-      accessSync(join(directory, "codex"), constants.X_OK);
-      return "found";
-    } catch {
-      /* keep searching */
-    }
+function codexStatus(repoRoot: string): "found" | "missing" {
+  try {
+    codexExecutable(repoRoot);
+    return "found";
+  } catch {
+    return "missing";
   }
-  return "missing";
 }
 
-function validateConfig(paths: RuntimePaths, prd: Prd, mode: Mode, options: CliOptions): void {
-  const tool = codexStatus();
+interface ConfigCheck {
+  ok: boolean;
+  detail: string;
+}
+
+/** Probes one prerequisite with the same code the runner uses; the detail names the failure. */
+function probe(run: () => string): ConfigCheck {
+  try {
+    return { ok: true, detail: run() };
+  } catch (error) {
+    return { ok: false, detail: errorMessage(error) };
+  }
+}
+
+function fsBridgeStatus(paths: RuntimePaths): ConfigCheck {
+  return probe(() => {
+    closeSync(openRoot(paths.repoRoot));
+    return "ok";
+  });
+}
+
+/** Reports PRD (already parsed by now), Node, fs bridge and Codex; failures exit non-zero, Codex only when `requireCodex`. */
+function validateConfig(
+  paths: RuntimePaths,
+  prd: Prd,
+  mode: Mode,
+  options: CliOptions,
+  requireCodex: boolean,
+): void {
+  void prd;
   const lock = lockState(paths);
+  const checks = {
+    node: probe(() => {
+      assertNodeVersion();
+      return process.versions.node;
+    }),
+    fs_bridge: fsBridgeStatus(paths),
+    tool: probe(() => {
+      codexExecutable(paths.repoRoot);
+      return "found";
+    }),
+  };
+  const failures = Object.entries(checks).filter(
+    ([name, check]) => !check.ok && (requireCodex || name !== "tool"),
+  );
+  const ok = failures.length === 0;
+  const label = (check: ConfigCheck): string => (check.ok ? "ok" : `FAILED (${check.detail})`);
   if (options.outputFormat === "json")
     process.stdout.write(
-      `${JSON.stringify({ command: "validate-config", ok: true, mode, checks: { prd: "ok", node: "ok", fs_bridge: "ok", tool, lock: lock.held ? "held" : "not_held" } })}\n`,
+      `${JSON.stringify({
+        command: "validate-config",
+        ok,
+        mode,
+        checks: {
+          prd: "ok",
+          node: label(checks.node),
+          fs_bridge: label(checks.fs_bridge),
+          tool: checks.tool.ok ? "found" : "missing",
+          lock: lock.held ? "held" : "not_held",
+        },
+        failures: failures.map(([name, check]) => ({ check: name, detail: check.detail })),
+      })}\n`,
     );
   else
     process.stderr.write(
-      `[ralph] Checklist: PRD ok, Node ok, fs bridge ok, codex ${tool}, lock ${lock.held ? "held" : "not held"}\n`,
+      `[ralph] Checklist: PRD ok, Node ${label(checks.node)}, fs bridge ${label(checks.fs_bridge)}, codex ${checks.tool.ok ? "found" : `missing (${checks.tool.detail})`}, lock ${lock.held ? "held" : "not held"}\n`,
     );
-  void prd;
+  const [first] = failures;
+  if (first)
+    throw new RalphError(
+      `Check failed: ${first[0] === "tool" ? "codex" : first[0]}: ${first[1].detail}`,
+      first[0] === "tool" ? EXIT.tool : EXIT.general,
+    );
 }
 
 function pendingSummary(paths: RuntimePaths): ReturnType<typeof transactionStatus> | string {
@@ -116,6 +181,7 @@ function pendingSummary(paths: RuntimePaths): ReturnType<typeof transactionStatu
 
 function doctor(paths: RuntimePaths, prd: Prd, mode: Mode, options: CliOptions): void {
   const lock = lockState(paths);
+  const bridge = fsBridgeStatus(paths);
   const transaction = pendingSummary(paths);
   const reportDir = prd.defaults.report_dir;
   const ready =
@@ -131,12 +197,12 @@ function doctor(paths: RuntimePaths, prd: Prd, mode: Mode, options: CliOptions):
       state_dir: paths.stateDir,
     },
     dependencies: {
-      tool: codexStatus(),
+      tool: codexStatus(paths.repoRoot),
       python: "not-required",
       jq: "not-required",
       mktemp: "not-required",
       node: process.versions.node,
-      fs_bridge: "found",
+      fs_bridge: bridge.ok ? "found" : "missing",
     },
     lock,
     transaction,
@@ -150,7 +216,7 @@ function doctor(paths: RuntimePaths, prd: Prd, mode: Mode, options: CliOptions):
   if (options.outputFormat === "json") process.stdout.write(`${JSON.stringify(result)}\n`);
   else
     process.stdout.write(
-      `Doctor Report\nMode: ${mode}\nRepo root: ${paths.repoRoot}\nPackage root: ${paths.packageRoot}\nPRD file: ${paths.prdFile}\nState dir: ${paths.stateDir}\nDependencies: codex=${result.dependencies.tool} node=${process.versions.node} fs_bridge=found\nLock: ${lock.status}\nPending transaction: ${typeof transaction === "string" ? transaction : transaction ? `${transaction.id ?? "?"} (state=${transaction.state}, journal=${transaction.journal})` : "none"}\nStrict report dir: ${options.strictReportDir ? (ready ? `enabled (ready, defaults.report_dir=${reportDir})` : "enabled (not ready)") : "disabled"}\n`,
+      `Doctor Report\nMode: ${mode}\nRepo root: ${paths.repoRoot}\nPackage root: ${paths.packageRoot}\nPRD file: ${paths.prdFile}\nState dir: ${paths.stateDir}\nDependencies: codex=${result.dependencies.tool} node=${process.versions.node} fs_bridge=${result.dependencies.fs_bridge}\nLock: ${lock.status}\nPending transaction: ${typeof transaction === "string" ? transaction : transaction ? `${transaction.id ?? "?"} (state=${transaction.state}, journal=${transaction.journal})` : "none"}\nStrict report dir: ${options.strictReportDir ? (ready ? `enabled (ready, defaults.report_dir=${reportDir})` : "enabled (not ready)") : "disabled"}\n`,
     );
 }
 
@@ -233,10 +299,10 @@ function queryCommand({ options, paths, logger, prd, mode }: CommandContext): bo
       listStories(prd, mode, options);
       break;
     case "validate-config":
-      validateConfig(paths, prd, mode, options);
+      validateConfig(paths, prd, mode, options, false);
       break;
     case "check":
-      validateConfig(paths, prd, mode, options);
+      validateConfig(paths, prd, mode, options, true);
       status(paths, prd, mode, options);
       break;
     case "doctor":
@@ -485,6 +551,7 @@ async function runLocked(context: CommandContext): Promise<number> {
 }
 async function runMain(argv: string[]): Promise<number> {
   assertNodeVersion();
+  assertInstallPlatform();
   if (argv.includes("--help") || argv.includes("-h")) {
     process.stdout.write(USAGE);
     return 0;

@@ -135,12 +135,15 @@ before completion, or `--through plan` to stop before a writer node. New
 isolated runs use a `pipeline/<run-id>` branch and place the worktree under the
 target repository's Git metadata at `.git/rae-worktrees/<run-id>`.
 
-Run a preregistered experiment from `experiments/` (this calls the provider and
-takes minutes per trial; add `--dry-run` to list the trials first):
+Run a preregistered experiment from `experiments/`. A full run launches every
+planned trial (up to 24, each allowed up to 5400 s of paid provider time) and
+the experiment sets no budget, so list the trials with `--dry-run` first and
+start with `--max-trials 1`:
 
 ```bash
 npm run rae -- experiment validate --experiment experiments/clm-007-context-mode.experiment.json
-npm run rae -- experiment run --experiment experiments/clm-007-context-mode.experiment.json
+npm run rae -- experiment run --experiment experiments/clm-007-context-mode.experiment.json --dry-run
+npm run rae -- experiment run --experiment experiments/clm-007-context-mode.experiment.json --max-trials 1
 npm run rae -- experiment report --experiment experiments/clm-007-context-mode.experiment.json
 ```
 
@@ -154,9 +157,10 @@ Serve the local operator for explicitly allowed repositories:
 npm run rae -- operator serve --project /canonical/path/to/repository
 ```
 
-Run Ralph after creating its package-local `prd.json`:
+Run Ralph after creating its package-local `prd.json` from the example:
 
 ```bash
+cp packages/ralph/prd.json.example packages/ralph/prd.json
 npm run rae -- ralph --check
 npm run rae -- ralph --mode audit 10
 ```

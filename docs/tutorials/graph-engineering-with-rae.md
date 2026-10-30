@@ -31,10 +31,12 @@ graph can therefore increase cost even when its critical path is shorter.
 
 Topology layer: an artifact edge carries one completed envelope. A stream edge
 opens the matching mapped successor as soon as one item succeeds. A condition
-edge selects a route. A loop-back edge stays inside a bounded loop.
+edge selects a route. A loop-back edge stays inside a bounded loop. A context
+edge hands an upstream node's passed envelope to a later node without enabling
+it.
 
 Contract layer: `edges[].type` is one of `sequence`, `artifact`, `stream`,
-`condition`, or `loop-back`. Conditions are fixed vocabulary. Workflow JSON
+`condition`, `loop-back`, or `context`. Conditions are fixed vocabulary. Workflow JSON
 cannot contain an expression evaluator.
 
 ## 2. Contract-bound nodes

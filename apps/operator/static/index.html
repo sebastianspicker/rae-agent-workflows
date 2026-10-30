@@ -329,7 +329,7 @@
                       <div class="graph-scroll">
                         <svg id="workflow-graph" viewBox="0 0 640 250" role="img" aria-labelledby="workflow-graph-title workflow-graph-desc">
                           <title id="workflow-graph-title">Workflow stage map</title>
-                          <desc id="workflow-graph-desc">A topologically layered workflow map. Color and line style distinguish data, stream, condition, sequence, and loop-back edges. The tables after the map provide the complete equivalent structure and live instance state.</desc>
+                          <desc id="workflow-graph-desc">A topologically layered workflow map. Color and line style distinguish data, context, stream, condition, sequence, and loop-back edges. The tables after the map provide the complete equivalent structure and live instance state.</desc>
                           <defs><marker id="workflow-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z"></path></marker></defs>
                           <g id="workflow-graph-content"></g>
                         </svg>
@@ -340,6 +340,7 @@
                         <span class="graph-legend__item graph-legend__item--stream">stream</span>
                         <span class="graph-legend__item graph-legend__item--condition">condition</span>
                         <span class="graph-legend__item graph-legend__item--loop-back">loop-back</span>
+                        <span class="graph-legend__item graph-legend__item--context">context</span>
                       </p>
                     </section>
                     <section id="workflow-analysis" class="workflow-view" role="tabpanel" aria-labelledby="workflow-view-analyze" hidden>
@@ -514,6 +515,20 @@
               <select id="start-execution-profile"><option value="">Runtime default</option></select>
             </div>
           </div>
+          <div class="field-pair">
+            <div class="field">
+              <label for="start-provider">Provider</label>
+              <select id="start-provider">
+                <option value="codex" selected>Codex</option>
+                <option value="opencode">OpenCode</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="start-model">Model</label>
+              <input id="start-model" type="text" maxlength="128" autocomplete="off" spellcheck="false" placeholder="Optional; OpenCode needs provider/model" />
+            </div>
+          </div>
+          <p id="start-provider-warning" class="note dialog-note" role="status" hidden></p>
           <p class="note dialog-note">
             The run works in a dedicated Git worktree and pauses at the checkpoints its workflow defines.
             This console cannot commit, push, publish, deploy or force cleanup.

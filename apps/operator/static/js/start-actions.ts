@@ -46,7 +46,12 @@ export async function submitStart(event: Event): Promise<void> {
           checkpoint_policy: elements["start-checkpoint-policy"].value,
           ...(elements["start-execution-profile"].value
             ? { execution_profile_id: elements["start-execution-profile"].value }
-            : {}),
+            : {
+                provider: elements["start-provider"].value,
+                ...(elements["start-model"].value.trim()
+                  ? { model: elements["start-model"].value.trim() }
+                  : {}),
+              }),
         }),
       },
     );

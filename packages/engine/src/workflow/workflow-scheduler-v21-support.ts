@@ -1,7 +1,10 @@
 /** Supplies bounded, side-effect-narrow helpers for the v2.1 workflow scheduler. */
 import { createHash } from "node:crypto";
 import { canonicalJson } from "./workflow-contract.js";
-import { conditionMatches as edgeConditionMatches } from "./workflow-scheduler-common.js";
+import {
+  conditionMatches as edgeConditionMatches,
+  isContextEdge,
+} from "./workflow-scheduler-common.js";
 import type {
   WorkflowsNodeEnvelopeV21,
   WorkflowsWorkflowV21,
@@ -22,11 +25,14 @@ export function conditionMatches(
   return edgeConditionMatches("2.1.0", edge, envelope);
 }
 
+/** Edges that enable the node; loop-back and `context` edges never do. */
 export function predecessors(
   workflow: WorkflowsWorkflowV21,
   nodeId: string,
 ): WorkflowsWorkflowV21DefsEdge[] {
-  return workflow.edges.filter((edge) => edge.to === nodeId && edge.type !== "loop-back");
+  return workflow.edges.filter(
+    (edge) => edge.to === nodeId && edge.type !== "loop-back" && !isContextEdge(edge),
+  );
 }
 
 export function instanceId(nodeId: string, itemKey: string | null): string {

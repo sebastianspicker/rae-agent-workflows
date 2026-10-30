@@ -208,6 +208,11 @@
   stroke-linecap: round;
 }
 
+.workflow-edge--context {
+  stroke: var(--mute);
+  stroke-dasharray: 4 4;
+}
+
 .graph-legend {
   display: flex;
   flex-wrap: wrap;
@@ -239,6 +244,10 @@
 
 .graph-legend__item--loop-back::before {
   border-top: 2px dotted var(--trace);
+}
+
+.graph-legend__item--context::before {
+  border-top: 1.5px dashed var(--mute);
 }
 
 .output {

@@ -117,6 +117,12 @@ Preload one or more server-owned execution profiles with repeatable
 the server. The browser receives only sanitized IDs, routes, models, and
 readiness.
 
+Ctrl+C (SIGINT) or SIGTERM stops accepting connections, closes the server and
+exits 0. Runs the console started are detached by design and keep running,
+unaffected by the console's exit; their pipes are not needed. Stop one with
+`npm run rae -- agent stop --project-root <workspace> --run-id <id>`, or use
+**Stop** in the console after restarting it.
+
 The server prints one URL. Its 256-bit session token appears only in the URL
 fragment. The app removes the fragment from browser history and keeps the token
 in memory for bearer-authenticated API and event-stream requests.
@@ -181,8 +187,18 @@ All `/api/v1` requests require the session bearer token and an exact loopback
 - `POST /api/v1/projects/:projectId/workflows/:workflowId/revisions/:revision/validate`
 - `POST /api/v1/projects/:projectId/workflows/:workflowId/revisions/:revision/activate`
 
-Start accepts `task`, `checkpoint_policy`, and an optional preloaded
-`execution_profile_id`. It never accepts a profile path. Interrupt and cleanup
+Start accepts `task`, `checkpoint_policy`, an optional preloaded
+`execution_profile_id`, an optional `provider` (`codex` by default, or
+`opencode`) and an optional `model` (up to 128 characters of letters, digits and
+`. _ : @ + / -`, not starting with a symbol; OpenCode requires `provider/model`).
+Anything else is rejected with `400`. It never accepts a profile path.
+
+At startup the server runs the engine's provider doctor once for the default
+provider (`codex`), after printing the URL, as a child process (30 s timeout) so
+requests and signals are not blocked while it runs. A failure logs one warning line to
+stderr and appears as `provider_health` (`{ provider, ok, detail? }`, `null`
+until probed) in the `GET /api/v1/projects` payload; the new-run dialog shows
+it. Startup never fails because of it. Interrupt and cleanup
 require `confirm_run_id` to exactly match the selected run. A checkpoint
 decision requires its opaque `checkpoint_id`, one of `approve`, `reject`, or `escalate`, and a
 non-empty `rationale`. An opaque `decision_id` is optional; the server

@@ -1,0 +1,57 @@
+# Example hosted configuration: OIDC bearer tokens, HTTPS, verified PostgreSQL TLS.
+# Copy it, replace every example.com value, and point RAE_PLATFORM_CONFIG at the copy.
+# It never enables platform.development, allowInsecureAuth or allowInsecureHttp.
+
+[server]
+# Bind address of the control process. Keep it on loopback behind a reverse proxy on the
+# same host, or use the pod or container interface behind an ingress.
+host = "127.0.0.1"
+port = 8080
+# Public HTTPS origin that clients and workers use. Required to be https:// here; its
+# host name joins server.host in the Host header allowlist and names the MCP resource.
+publicBaseUrl = "https://rae.example.com"
+
+[database]
+# With [oidc] the URL must use sslmode=verify-full (database.allowInsecure = true would
+# waive that; do not set it in hosted use). Supply the password through your secret store.
+url = "postgres://rae@db.example.com:5432/rae_platform?sslmode=verify-full"
+# Milliseconds for the connection's statement_timeout; 0 omits it (PgBouncer, RDS Proxy).
+# statementTimeoutMs = 30000
+
+[oidc]
+# Exact issuer (the token's iss), audience (aud) and JWKS URL; issuer and JWKS URL must be
+# credential-free public HTTPS URLs.
+issuer = "https://auth.example.com/realms/rae"
+# The audience must be a dedicated API identifier, not an application client_id.
+audience = "rae-platform"
+jwksUrl = "https://auth.example.com/realms/rae/protocol/openid-connect/certs"
+# Allowed asymmetric JWS algorithms (RS256, RS384, RS512, ES256, ES384, ES512).
+algorithms = ["RS256"]
+# Enforce a JWT typ header only if the issuer sends it, e.g. "at+jwt" (RFC 9068). When unset,
+# tokens with nonce or at_hash claims (ID tokens) are rejected.
+# tokenType = "at+jwt"
+
+[auth]
+# Upper bound on exp - iat in seconds (default 86400, maximum 604800); 3600 limits a leaked
+# token's replay window but needs issuers whose worker tokens are refreshed within the hour.
+maxTokenLifetimeSeconds = 3600
+
+[platform]
+# Lease duration and worker heartbeat interval in seconds (defaults shown).
+# heartbeatSeconds must be less than half of leaseSeconds.
+leaseSeconds = 60
+heartbeatSeconds = 20
+
+[management]
+# Metrics and readiness listener; loopback only (127.0.0.1 or ::1).
+host = "127.0.0.1"
+port = 9090
+
+# Optional. Without [storage] the artifact routes answer 404.
+[storage]
+# The bucket must have object versioning Enabled; `rae-platform doctor` checks it.
+# Credentials come from the default AWS credential chain, never from this file.
+bucket = "rae-artifacts"
+region = "eu-central-1"
+# endpoint = "https://s3.example.com"
+# forcePathStyle = true

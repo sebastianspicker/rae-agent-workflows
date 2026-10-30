@@ -37,8 +37,11 @@ node dist/src/helper-cli.js bootstrap /path/to/target-repository
 ```
 
 The canonical embedded path is `.claude/ralph-audit/`. The bootstrap command
-copies a self-contained Node runtime and native bridge, refuses symlinked or
-invalid destination parents, and verifies the copied payload.
+copies a self-contained Node runtime and the compiled native bridge (no CMake
+build files), refuses symlinked or invalid destination parents, and verifies
+the copied payload. The install records the build platform and architecture in
+`.ralph-install.json`; the embedded CLI refuses to run on a different one, so
+re-run bootstrap there.
 
 ## Usage
 
@@ -64,6 +67,12 @@ node dist/src/cli.js --doctor
 node dist/src/cli.js --status
 node dist/src/cli.js --list-stories
 ```
+
+`--check` and `--validate-config` probe the PRD, the Node version and the
+native fs bridge; `--check` also resolves `codex` with the runner's resolver and
+exits non-zero, naming the failed check, when it is missing or unsafe
+(`--validate-config` only reports it). `--doctor` reports the real fs bridge
+status.
 
 `--dry-run [N]` previews up to N open stories (report paths only) without
 invoking Codex, archiving, switching branches, or recovering transactions. It
@@ -141,8 +150,10 @@ Execution:
   root; it must resolve inside the target repository. Default: the package
   `.runtime/` when the package is inside the target repository, otherwise
   `<repo>/.runtime/ralph`
-- `RALPH_MODEL`: model identifier; overrides `defaults.model_default`, which
-  falls back to `gpt-5.3` when omitted from `prd.json`
+- `RALPH_MODEL`: model identifier; overrides `defaults.model_default`. When
+  neither is set, Ralph passes no `-m` and Codex uses its own configured
+  default model; to choose one, set `RALPH_MODEL`, `--model`, or
+  `defaults.model_default` in `prd.json`
 - `RALPH_REASONING_EFFORT`: reasoning setting; overrides
   `defaults.reasoning_effort_default`, which falls back to `high` when omitted
 - `RALPH_TIMEOUT_SECONDS`: positive per-story deadline; default `900`

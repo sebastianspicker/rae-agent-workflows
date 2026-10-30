@@ -50,7 +50,7 @@ repositories or provider implementation. See [DR-002](../docs/reference/decision
 
 ## Placeholders
 
-The model name `gpt-5.6-terra` in the profiles is the placeholder used by the repository documentation. Replace it with the model under study before a real run, and bump the experiment `revision`. The prices in the `clm-016` arms are placeholders as well. Replace them with the published prices that apply on the day of the run.
+The model name `gpt-5.6-terra` in the profiles is the placeholder used by the repository documentation. Replace it with the model under study before a real run, and bump the experiment `revision`. Failed trial records are permanent, so the default output directory then reports `input drift` or `lock mismatch`: run the new revision with `--output <new dir>`; the old directory stays reportable. The prices in the `clm-016` arms are placeholders as well. Replace them with the published prices that apply on the day of the run.
 
 New output directories use v3 execution locks with durable start and finish
 receipts. Interrupted slots retain unknown outcomes and require

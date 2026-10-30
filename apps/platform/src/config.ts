@@ -35,9 +35,11 @@ const configSchema = z.object({
   oidc: z
     .object({
       issuer: z.url(),
+      // A dedicated API identifier, never an application client_id (ID tokens carry that audience).
       audience: z.string().min(1),
       jwksUrl: z.url(),
-      tokenType: z.string().min(1).default("at+jwt"),
+      // Required JWT `typ` header; unset leaves it unconstrained (Keycloak, Auth0 and Azure send "JWT").
+      tokenType: z.string().min(1).optional(),
       algorithms: z
         .array(z.enum(["RS256", "RS384", "RS512", "ES256", "ES384", "ES512"]))
         .min(1)

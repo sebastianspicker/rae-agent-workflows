@@ -17,13 +17,16 @@ import {
 } from "./workflow-scheduler-v21-support.js";
 import {
   abortOnStop,
+  contextInputs,
   decideBoundedRepeat,
   drainSettled,
   checkpointResumable,
   gateProgress,
+  isContextEdge,
   isProviderKind,
   MAX_LOOP_ITERATION,
   noProgressMessage,
+  ownershipPlanInput,
   persistEnvelope,
   runBudgetStop,
 } from "./workflow-scheduler-common.js";
@@ -551,7 +554,7 @@ export async function scheduleWorkflowV21({
   function thresholdToleratesFailure(node: WorkflowNode): boolean {
     if (node.access === "write") return false;
     return workflow.edges
-      .filter((edge) => edge.from === node.id && edge.type !== "loop-back")
+      .filter((edge) => edge.from === node.id && edge.type !== "loop-back" && !isContextEdge(edge))
       .some((edge) => {
         const join = nodes.get(edge.to)?.join;
         return join === "any" || join === "quorum";
@@ -635,6 +638,49 @@ export async function scheduleWorkflowV21({
     return "repeat";
   }
 
+  /** Latest envelope of `nodeId` in `iteration`, preferring the highest attempt. */
+  function iterationEnvelope(
+    nodeId: string,
+    iteration: number,
+  ): Readonly<WorkflowsNodeEnvelopeV21> | undefined {
+    return nodeEnvelopes(nodeId)
+      .filter((envelope) => (envelope.loop_iteration ?? 1) === iteration)
+      .sort((left, right) => left.attempt - right.attempt)
+      .at(-1);
+  }
+
+  /** The previous iteration's failing gate and the target's own output for a restarted bounded loop. */
+  function loopFeedback(spec: PendingSpec): WorkflowInput[] {
+    const iteration = spec.loop_iteration ?? 1;
+    if (iteration <= 1) return [];
+    const loopBack = workflow.edges.find(
+      (entry) =>
+        entry.type === "loop-back" &&
+        entry.to === spec.node.id &&
+        memberLoop.get(entry.from)?.loop?.mode !== "until-dry",
+    );
+    if (!loopBack) return [];
+    const gate = iterationEnvelope(loopBack.from, iteration - 1);
+    if (!gate || successful(gate)) return [];
+    const own = iterationEnvelope(spec.node.id, iteration - 1);
+    return [
+      { edge: loopBack, envelope: gate },
+      ...(own
+        ? [
+            {
+              edge: {
+                from: spec.node.id,
+                to: spec.node.id,
+                type: "loop-back",
+                artifact: "previous-output",
+              } as WorkflowEdge,
+              envelope: own,
+            },
+          ]
+        : []),
+    ];
+  }
+
   async function invoke(spec: PendingSpec): Promise<Readonly<WorkflowsNodeEnvelopeV21>> {
     const attempt = (attempts.get(spec.instance_id) ?? 0) + 1;
     attempts.set(spec.instance_id, attempt);
@@ -642,7 +688,27 @@ export async function scheduleWorkflowV21({
     if (isProviderKind(spec.node.kind)) budgetAttempts++;
     if (providerAttempts > dynamicLimit)
       throw new Error(`workflow exceeds ${dynamicLimit} provider attempts`);
-    const inputs = spec.inputs ?? baseInputs(spec.node.id);
+    const latestPassed = (id: string): WorkflowsNodeEnvelopeV21 | undefined =>
+      nodeEnvelopes(id)
+        .filter((envelope) => envelope.status === "passed")
+        .sort(
+          (left, right) =>
+            (left.loop_iteration ?? 1) - (right.loop_iteration ?? 1) ||
+            left.attempt - right.attempt,
+        )
+        .at(-1);
+    const edgeInputs = [
+      ...(spec.inputs ?? baseInputs(spec.node.id)),
+      ...contextInputs(workflow.edges, spec.node.id, latestPassed),
+    ];
+    const planInput = ownershipPlanInput<WorkflowEdge, WorkflowsNodeEnvelopeV21>(
+      workflow.nodes,
+      spec.node.id,
+      edgeInputs,
+      latestPassed,
+    );
+    const feedback = loopFeedback(spec);
+    const inputs = [...edgeInputs, ...(planInput ? [planInput] : []), ...feedback];
     const inputDigest = digest({
       inputs: inputs.map(({ envelope }) => envelope.output_digest),
       item: spec.item,

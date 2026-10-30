@@ -35,9 +35,38 @@ export const TERMINAL_NODE_STATES: readonly NodeState[] = Object.freeze([
 ]);
 const ACTIVE_RUN_STATES: readonly RunState[] = Object.freeze([RUN_STATE.QUEUED, RUN_STATE.RUNNING]);
 const MAX_LONG_POLL_SECONDS = 25;
+/** Claims a node may use before an expired lease fails it with "attempts exhausted". */
+export const MAX_NODE_ATTEMPTS = 3;
+const ATTEMPTS_EXHAUSTED = { message: "attempts exhausted", code: "attempts_exhausted" };
 /** Claim and report idempotency rows are pruned by the reconciler after this many hours. */
 export const IDEMPOTENCY_RETENTION_HOURS = 24;
 const PRUNED_IDEMPOTENCY_SCOPES = ["claim", "report"];
+/** Rejects a submission that repeats a node key, as the database's (run_id,node_key) key would. */
+function assertUniqueNodeKeys(nodes: readonly { key: string }[]) {
+  const seen = new Set<string>();
+  for (const { key } of nodes) {
+    if (seen.has(key))
+      throw Object.assign(new Error(`duplicate node key "${key}"`), { statusCode: 400 });
+    seen.add(key);
+  }
+}
+/** Rejects project IDs and node keys a worker would refuse to claim, so they fail at submission. */
+function assertClaimableIds(projectId: unknown, nodes: readonly { key: unknown }[]) {
+  const invalid = (value: unknown) => typeof value !== "string" || !CLAIM_ID_PATTERN.test(value);
+  const message = "must match [A-Za-z0-9._-]{1,128}";
+  if (invalid(projectId))
+    throw Object.assign(new Error(`projectId ${message}`), { statusCode: 400 });
+  if (nodes.some(({ key }) => invalid(key)))
+    throw Object.assign(new Error(`node keys ${message}`), { statusCode: 400 });
+}
+/** Maps a PostgreSQL unique violation (23505) from a racing submission to a 409 without driver text. */
+function submissionConflict(error: unknown): never {
+  if ((error as { code?: unknown } | null)?.code === "23505")
+    throw Object.assign(new Error("run submission conflicts with an existing record"), {
+      statusCode: 409,
+    });
+  throw error;
+}
 function storeClosedError() {
   return Object.assign(new Error("store is shutting down"), { statusCode: 503 });
 }
@@ -425,6 +454,8 @@ export class PostgresStore {
   }: CreateRunInput) {
     if (!Array.isArray(nodes) || nodes.length > MAX_RUN_NODES)
       throw Object.assign(new Error("run node count exceeds 1000"), { statusCode: 400 });
+    assertClaimableIds(projectId, nodes);
+    assertUniqueNodeKeys(nodes);
     if (!idempotencyKey)
       throw Object.assign(new Error("Idempotency-Key is required"), { statusCode: 400 });
     if (Buffer.byteLength(JSON.stringify({ revision, nodes, request })) > MAX_ENVELOPE_BYTES)
@@ -493,7 +524,7 @@ export class PostgresStore {
       await client.query("SELECT pg_notify('rae_platform_work','work')");
       await insertIdempotent(client, scope, "run", response, expected);
       return response;
-    });
+    }).catch(submissionConflict);
   }
   async uploadRevision({
     projectId,
@@ -588,17 +619,56 @@ export class PostgresStore {
       requestDigest({ projectId, kind, revisionId, expectedDigest }),
     );
   }
+  /** Marks the run terminal once every node is terminal; the caller holds the run's row lock. */
+  private async settleRun(client: PgClient, runId: string) {
+    const aggregate = await client.query(
+      "SELECT count(*) FILTER (WHERE state NOT IN ('succeeded','failed','cancelled'))::int AS active, bool_or(state='failed') AS failed FROM run_nodes WHERE run_id=$1",
+      [runId],
+    );
+    let runState: RunState = RUN_STATE.RUNNING;
+    if (aggregate.rows[0].active === 0) {
+      runState = aggregate.rows[0].failed ? RUN_STATE.FAILED : RUN_STATE.SUCCEEDED;
+      const terminal = await client.query(
+        "UPDATE runs SET state=$2,updated_at=now() WHERE id=$1 AND state IN ('queued','running') RETURNING updated_at AS \"completedAt\"",
+        [runId, runState],
+      );
+      if (terminal.rowCount !== 1)
+        throw Object.assign(new Error("run completion lost its active state"), {
+          statusCode: 409,
+        });
+      const terminalPayload = {
+        runId,
+        state: runState,
+        completedAt: terminal.rows[0].completedAt,
+      };
+      await client.query("INSERT INTO events (run_id,type,payload) VALUES ($1,$2,$3::jsonb)", [
+        runId,
+        `run.${runState}`,
+        json(terminalPayload),
+      ]);
+      await client.query("INSERT INTO outbox (topic,payload) VALUES ($1,$2::jsonb)", [
+        `run.${runState}`,
+        json(terminalPayload),
+      ]);
+    } else {
+      await client.query("UPDATE runs SET updated_at=now() WHERE id=$1", [runId]);
+    }
+    return runState;
+  }
   async notifyWork() {
     await this.query("SELECT pg_notify('rae_platform_work','work')");
   }
   async reclaimExpired(client: PgClient) {
+    // Runs are locked with SKIP LOCKED too, so reclaim never waits on (or deadlocks with) a report.
     const expired = await client.query(
       `WITH expired AS (
-         SELECT node_id
-         FROM leases
-         WHERE expires_at <= clock_timestamp()
-         ORDER BY expires_at,node_id
-         FOR UPDATE SKIP LOCKED
+         SELECT l.node_id
+         FROM leases l
+         JOIN run_nodes n ON n.id=l.node_id
+         JOIN runs r ON r.id=n.run_id
+         WHERE l.expires_at <= clock_timestamp()
+         ORDER BY l.expires_at,l.node_id
+         FOR UPDATE OF l, r SKIP LOCKED
          LIMIT 100
        )
        DELETE FROM leases l USING expired e
@@ -612,9 +682,32 @@ export class PostgresStore {
       [nodeIds],
     );
     await client.query(
-      "UPDATE run_nodes SET state='queued' WHERE state='leased' AND id = ANY($1::uuid[])",
-      [nodeIds],
+      "UPDATE run_nodes SET state='queued' WHERE state='leased' AND attempt_count < $2 AND id = ANY($1::uuid[])",
+      [nodeIds, MAX_NODE_ATTEMPTS],
     );
+    const exhausted = await client.query<{ id: string; run_id: string; attempt_count: number }>(
+      "UPDATE run_nodes SET state='failed' WHERE state='leased' AND attempt_count >= $2 AND id = ANY($1::uuid[]) RETURNING id,run_id,attempt_count",
+      [nodeIds, MAX_NODE_ATTEMPTS],
+    );
+    for (const node of exhausted.rows) {
+      const payload = json({
+        runId: node.run_id,
+        nodeId: node.id,
+        fence: node.attempt_count,
+        result: ATTEMPTS_EXHAUSTED,
+      });
+      await client.query("INSERT INTO events (run_id,type,payload) VALUES ($1,$2,$3::jsonb)", [
+        node.run_id,
+        "node.failed",
+        payload,
+      ]);
+      await client.query("INSERT INTO outbox (topic,payload) VALUES ($1,$2::jsonb)", [
+        "node.failed",
+        payload,
+      ]);
+    }
+    for (const runId of new Set(exhausted.rows.map((node) => node.run_id)))
+      await this.settleRun(client, runId);
     await client.query("SELECT pg_notify('rae_platform_work','reclaimed')");
     return nodeIds.length;
   }
@@ -953,7 +1046,7 @@ export class PostgresStore {
               (SELECT count(*) FROM leases readers JOIN run_nodes reader_node ON reader_node.id=readers.node_id WHERE reader_node.run_id=n.run_id AND reader_node.access='read' AND readers.expires_at > clock_timestamp()) >= 4
             )
           )
-        ORDER BY n.id FOR UPDATE OF r SKIP LOCKED LIMIT 1`,
+        ORDER BY r.created_at,r.id,n.node_key COLLATE "C" FOR UPDATE OF r SKIP LOCKED LIMIT 1`,
         [workerId, wildcard, permittedProjects, worker.repositoryDigest, worker.worktreeDigest],
       );
       if (!candidate.rowCount) return { found: false, response: null };
@@ -1129,38 +1222,7 @@ export class PostgresStore {
         `node.${state}`,
         json({ runId, nodeId, fence, result }),
       ]);
-      const aggregate = await client.query(
-        "SELECT count(*) FILTER (WHERE state NOT IN ('succeeded','failed','cancelled'))::int AS active, bool_or(state='failed') AS failed FROM run_nodes WHERE run_id=$1",
-        [runId],
-      );
-      let runState: RunState = RUN_STATE.RUNNING;
-      if (aggregate.rows[0].active === 0) {
-        runState = aggregate.rows[0].failed ? RUN_STATE.FAILED : RUN_STATE.SUCCEEDED;
-        const terminal = await client.query(
-          "UPDATE runs SET state=$2,updated_at=now() WHERE id=$1 AND state IN ('queued','running') RETURNING updated_at AS \"completedAt\"",
-          [runId, runState],
-        );
-        if (terminal.rowCount !== 1)
-          throw Object.assign(new Error("run completion lost its active state"), {
-            statusCode: 409,
-          });
-        const terminalPayload = {
-          runId,
-          state: runState,
-          completedAt: terminal.rows[0].completedAt,
-        };
-        await client.query("INSERT INTO events (run_id,type,payload) VALUES ($1,$2,$3::jsonb)", [
-          runId,
-          `run.${runState}`,
-          json(terminalPayload),
-        ]);
-        await client.query("INSERT INTO outbox (topic,payload) VALUES ($1,$2::jsonb)", [
-          `run.${runState}`,
-          json(terminalPayload),
-        ]);
-      } else {
-        await client.query("UPDATE runs SET updated_at=now() WHERE id=$1", [runId]);
-      }
+      const runState = await this.settleRun(client, runId);
       await client.query("SELECT pg_notify('rae_platform_work','reported')");
       const response = { state, runState };
       await insertIdempotent(client, scope, "report", response, expected);
@@ -1358,6 +1420,8 @@ export class MemoryStore {
   }: CreateRunInput) {
     if (!Array.isArray(nodes) || nodes.length > MAX_RUN_NODES)
       throw Object.assign(new Error("run node count exceeds 1000"), { statusCode: 400 });
+    assertClaimableIds(projectId, nodes);
+    assertUniqueNodeKeys(nodes);
     if (Buffer.byteLength(JSON.stringify({ revision, nodes, request })) > MAX_ENVELOPE_BYTES)
       throw Object.assign(new Error("run envelope exceeds 256 KiB"), { statusCode: 413 });
     if (digest(revision.definition) !== revision.digest)
@@ -1564,12 +1628,38 @@ export class MemoryStore {
       const node = this.nodes.get(nodeId);
       const run = node && this.runs.get(node.runId);
       if (node?.state === NODE_STATE.LEASED && run && !TERMINAL_RUN_STATES.includes(run.state)) {
-        node.state = NODE_STATE.QUEUED;
+        if (node.attempts < MAX_NODE_ATTEMPTS) node.state = NODE_STATE.QUEUED;
+        else this.failExhausted(nodeId, node, run);
         reclaimed += 1;
       }
     }
     if (reclaimed) this.notifyWork({ notified: true, expired: reclaimed });
     return reclaimed;
+  }
+  /** Fails a node that used all its attempts, then settles the run like a reported failure. */
+  private failExhausted(nodeId: string, node: MemoryNode, run: MemoryRun) {
+    node.state = NODE_STATE.FAILED;
+    const payload = { runId: run.id, nodeId, fence: node.attempts, result: ATTEMPTS_EXHAUSTED };
+    const completedAt = this.timestamp();
+    this.appendEvent(run.id, "node.failed", payload, null, completedAt);
+    this.appendOutbox("node.failed", payload, completedAt);
+    this.settleRun(run, completedAt);
+  }
+  /** Marks the run terminal once every node is terminal; otherwise it stays running. */
+  private settleRun(run: MemoryRun, completedAt: string) {
+    const runNodes = [...this.nodes.values()].filter((candidate) => candidate.runId === run.id);
+    if (runNodes.every((candidate) => TERMINAL_NODE_STATES.includes(candidate.state))) {
+      run.state = runNodes.some((candidate) => candidate.state === NODE_STATE.FAILED)
+        ? RUN_STATE.FAILED
+        : RUN_STATE.SUCCEEDED;
+      run.updatedAt = completedAt;
+      const terminalPayload = { runId: run.id, state: run.state, completedAt: run.updatedAt };
+      this.appendEvent(run.id, `run.${run.state}`, terminalPayload, null, completedAt);
+      this.appendOutbox(`run.${run.state}`, terminalPayload, completedAt);
+    } else {
+      run.state = RUN_STATE.RUNNING;
+      run.updatedAt = this.timestamp();
+    }
   }
   claimOnce({ workerId, projects }: { workerId: string; projects: string[] }): Claim | null {
     if (this.closed) throw storeClosedError();
@@ -1582,7 +1672,14 @@ export class MemoryStore {
       : worker.projects.includes("*")
         ? projects
         : projects.filter((project) => worker.projects.includes(project));
-    for (const [nodeId, node] of this.nodes) {
+    // Same order as PostgresStore: older runs first, then node keys byte-wise.
+    const runOrder = new Map([...this.runs.keys()].map((runId, index) => [runId, index]));
+    const queued = [...this.nodes].sort(
+      ([, a], [, b]) =>
+        (runOrder.get(a.runId) ?? 0) - (runOrder.get(b.runId) ?? 0) ||
+        (a.key < b.key ? -1 : a.key > b.key ? 1 : 0),
+    );
+    for (const [nodeId, node] of queued) {
       if (node.state !== NODE_STATE.QUEUED) continue;
       const run = this.runs.get(node.runId);
       if (
@@ -1718,28 +1815,7 @@ export class MemoryStore {
           const completedAt = this.timestamp();
           this.appendEvent(run.id, `node.${state}`, eventPayload, null, completedAt);
           this.appendOutbox(`node.${state}`, eventPayload, completedAt);
-          const runNodes = [...this.nodes.values()].filter(
-            (candidate) => candidate.runId === run.id,
-          );
-          const allTerminal = runNodes.every((candidate) =>
-            TERMINAL_NODE_STATES.includes(candidate.state),
-          );
-          if (allTerminal) {
-            run.state = runNodes.some((candidate) => candidate.state === NODE_STATE.FAILED)
-              ? RUN_STATE.FAILED
-              : RUN_STATE.SUCCEEDED;
-            run.updatedAt = completedAt;
-            const terminalPayload = {
-              runId: run.id,
-              state: run.state,
-              completedAt: run.updatedAt,
-            };
-            this.appendEvent(run.id, `run.${run.state}`, terminalPayload, null, completedAt);
-            this.appendOutbox(`run.${run.state}`, terminalPayload, completedAt);
-          } else {
-            run.state = RUN_STATE.RUNNING;
-            run.updatedAt = this.timestamp();
-          }
+          this.settleRun(run, completedAt);
           this.notifyWork();
           return { state, runState: run.state };
         });
@@ -1990,7 +2066,7 @@ export class MemoryStore {
   }
 }
 
-import { WORKER_UNREGISTERED } from "./store-types.js";
+import { CLAIM_ID_PATTERN, WORKER_UNREGISTERED } from "./store-types.js";
 import type {
   PgPool,
   PgClient,

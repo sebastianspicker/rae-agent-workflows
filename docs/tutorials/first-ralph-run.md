@@ -16,7 +16,10 @@ filesystem transaction.
 
 - you are inside the Git repository Ralph should inspect; `rae ralph` resolves
   its top level with `git rev-parse --show-toplevel`
-- the Ralph package has a `prd.json` (copy `packages/ralph/prd.json.example`)
+- the Ralph package has a `prd.json` (copy `packages/ralph/prd.json.example`);
+  to inspect a repository other than the RAE checkout, copy `prd.json` and
+  `INSTRUCTIONS.md` into the directory you run Ralph from (that directory is
+  then the target repository root), or bootstrap the embedded template (step 5)
 - Node.js 24+, the compiled RAE packages, and the Codex CLI are available
 - you only want to validate the loop surface first
 
@@ -46,8 +49,11 @@ npm run rae -- ralph --dry-run 3
 MODE=audit npm run rae -- ralph 1
 ```
 
-Runtime state and logs are kept under `<repository>/.runtime/ralph`; set
-`RALPH_STATE_DIR` to choose another location. Codex execution uses a positive
+Runtime state and logs are kept under `packages/ralph/.runtime` when you run
+inside the RAE checkout and under `<repository>/.runtime/ralph` for another
+repository, so Ralph writes `.runtime/ralph/` and temporary directories into
+the target repository; set `RALPH_STATE_DIR` to choose another location inside
+it. Codex execution uses a positive
 deadline, a 15-second graceful shutdown, and bounded output (16 MiB raw output
 and 2 MiB final report). Try `MODE=fixing` only after reviewing the selected
 story and transaction boundary. If a fixing run is interrupted, `--doctor`

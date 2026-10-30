@@ -13,6 +13,12 @@ placement, finding items, named artifact edges) live in the engine's
 `validateWorkflow` authoring mode, not in these schemas, so stored workflows
 remain valid against them.
 
+Workflow schemas 2.0.0, 2.1.0 and 2.2.0 also gained the edge type `context`, a
+data-only edge that never enables its target. The change is additive: stored
+workflows stay valid, and no new schema version was added. Engines built before
+the change reject workflows that use it. The authoring rules that a context edge
+carries no `condition` and comes from an upstream node live in `validateWorkflow`.
+
 The engine resolves these files through its contract catalog. Applications
 must not duplicate or patch them.
 

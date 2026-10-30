@@ -1,29 +1,23 @@
 #!/usr/bin/env node
 /** Purpose: experimental worker diagnostics and polling CLI. */
-import { runWorker } from "../src/worker.js";
+import { doctorWorkerEnvironment, runWorker } from "../src/worker.js";
 import { createLocalClaimExecutor, doctorLocalClaimExecutor } from "../src/local-executor.js";
 
 const command = process.argv[2];
 const projectMapFile = process.env.RAE_PROJECT_MAP_FILE;
 if (command === "doctor") {
-  const missing = [
-    "RAE_PLATFORM_URL",
-    "RAE_PLATFORM_TOKEN",
-    "RAE_WORKER_ID",
-    "RAE_REPOSITORY_DIGEST",
-    "RAE_WORKTREE_DIGEST",
-    "RAE_PROJECT_MAP_FILE",
-  ].filter((name) => !process.env[name]);
+  const { missing, problems } = await doctorWorkerEnvironment(process.env);
   console.log(
     JSON.stringify({
       experimental: true,
-      status: missing.length ? "blocked" : "ready",
+      status: problems.length ? "blocked" : "ready",
       missing,
+      problems,
       surfaces:
-        missing.length || !projectMapFile ? [] : doctorLocalClaimExecutor({ projectMapFile }),
+        problems.length || !projectMapFile ? [] : doctorLocalClaimExecutor({ projectMapFile }),
     }),
   );
-  process.exitCode = missing.length ? 1 : 0;
+  process.exitCode = problems.length ? 1 : 0;
 } else if (command === "run") {
   const baseUrl = process.env.RAE_PLATFORM_URL;
   const token = process.env.RAE_PLATFORM_TOKEN;
@@ -50,6 +44,7 @@ if (command === "doctor") {
     repositoryDigest: process.env.RAE_REPOSITORY_DIGEST,
     worktreeDigest: process.env.RAE_WORKTREE_DIGEST,
     allowInsecureDevelopment: process.env.RAE_PLATFORM_ALLOW_INSECURE_DEVELOPMENT === "true",
+    uploadArtifacts: process.env.RAE_PLATFORM_UPLOAD_ARTIFACTS === "true",
     execute: createLocalClaimExecutor({ projectMapFile: process.env.RAE_PROJECT_MAP_FILE }),
     signal: shutdown.signal,
   });

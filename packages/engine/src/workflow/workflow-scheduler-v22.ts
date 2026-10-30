@@ -7,7 +7,10 @@ import {
   abortOnStop,
   checkpointResumable,
   conditionMatches as edgeConditionMatches,
+  contextInputs,
+  isContextEdge,
   noProgressMessage,
+  ownershipPlanInput,
   persistEnvelope,
 } from "./workflow-scheduler-common.js";
 import type {
@@ -96,8 +99,8 @@ function inputsFor(
   nodeId: string,
   completed: Map<string, Readonly<WorkflowsNodeEnvelopeV22>>,
 ): WorkflowInput[] {
-  return workflow.edges
-    .filter((edge) => edge.to === nodeId && completed.has(edge.from))
+  return predecessors(workflow, nodeId)
+    .filter((edge) => completed.has(edge.from))
     .filter((edge) => {
       const envelope = completed.get(edge.from);
       return envelope ? conditionMatches(edge, envelope) : false;
@@ -106,8 +109,9 @@ function inputsFor(
     .map((edge) => ({ edge, envelope: completed.get(edge.from) as WorkflowsNodeEnvelopeV22 }));
 }
 
+/** Edges that enable the node; `context` edges never do. */
 function predecessors(workflow: WorkflowsWorkflowV22, nodeId: string): WorkflowEdge[] {
-  return workflow.edges.filter((edge) => edge.to === nodeId);
+  return workflow.edges.filter((edge) => edge.to === nodeId && !isContextEdge(edge));
 }
 
 const edgeActive = (
@@ -599,7 +603,20 @@ export async function scheduleWorkflowV22({
       // Every batch member settles before any outcome is acted on, so none is abandoned.
       const outcomes = await Promise.allSettled(
         batch.map(async (node) => {
-          const inputs = inputsFor(workflow, node.id, completed);
+          const edgeInputs = [
+            ...inputsFor(workflow, node.id, completed),
+            ...contextInputs(workflow.edges, node.id, (id) => {
+              const envelope = completed.get(id);
+              return envelope?.status === "passed" ? envelope : undefined;
+            }),
+          ];
+          const planInput = ownershipPlanInput<WorkflowEdge, WorkflowsNodeEnvelopeV22>(
+            workflow.nodes,
+            node.id,
+            edgeInputs,
+            (id) => completed.get(id) as WorkflowsNodeEnvelopeV22 | undefined,
+          );
+          const inputs = planInput ? [...edgeInputs, planInput] : edgeInputs;
           const context = contextFor(node, inputs);
           return {
             node,

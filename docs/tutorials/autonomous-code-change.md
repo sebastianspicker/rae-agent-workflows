@@ -114,6 +114,12 @@ durable interrupted state before resume. Its response also reports
 detached descendant stopped, so inspect provider activity and the worktree
 before resuming.
 
+In a terminal, the first Ctrl-C (SIGINT) or SIGTERM during a graph-native
+`agent run` or `agent resume` requests the same stop as `agent stop`: the
+scheduler aborts, the provider process group is killed, the run is recorded as
+stopped with a report, and the lock is released. A second signal exits
+immediately (130 or 143) and may leave a stale lock.
+
 ## Plan without changing code
 
 ```bash
@@ -135,10 +141,24 @@ npm run rae -- agent resume \
 ## Failure behavior
 
 The workflow stops when a schema, traceability check, plan ownership rule,
-test, documentation audit, security audit, or release condition fails. It keeps
+documentation audit, security audit, or release condition fails. It keeps
 the worktree and writes a blocked run report so the failure can be inspected or
 resumed. In particular, a builder changing a file absent from
 `plan.file_ownership` cannot pass the build gate.
+
+Verification is bound to the plan, not executed by the engine. The plan lists
+the commands to run in `verification_commands`. A Codex writer must show
+provider-reported, exit-0 evidence from the workspace root for every entry. The
+engine never runs these commands itself; the critics judge the remaining
+evidence. A writer that reports a blocking finding does not stop the run: the
+default workflow passes the build envelope to `diagnose` over a `context` edge,
+and its guidance tells diagnosis to treat those findings as blocking until the
+current round's critic evidence shows them resolved. Whether a repair follows
+depends on the diagnostician's output; the engine does not enforce it. In
+workflows where a writer feeds neither a gate nor a judge, its findings are not
+acted on. Either way, the run report lists every blocking finding in a writer's
+latest envelope under "Writer-reported blocking findings", the deterministic
+record the release review sees.
 
 Only one autonomous process may own a run at a time. A concurrent `resume`
 fails against `.pipeline/runs/<run-id>/autonomous.lock`. After a host crash,

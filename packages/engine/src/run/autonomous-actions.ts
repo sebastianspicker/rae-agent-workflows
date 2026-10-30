@@ -387,19 +387,10 @@ export function runControlCommand(command: string, options: AutonomousActionOpti
     return;
   }
   if (command === "stop") {
-    const previous = readOperatorControl(context.runId, context.workspaceRoot);
-    const control = requestStop(context.runId, context.workspaceRoot);
-    if (!["stop-requested", "stopped"].includes(previous.status)) {
-      appendTraceEvent(
-        context.runId,
-        {
-          event: "run_stop_requested",
-          phase: context.guardedPhase ?? nextRunPhase(context.state),
-          status: "ok",
-        },
-        context.workspaceRoot,
-      );
-    }
+    const control = requestRunStop(
+      context,
+      () => context.guardedPhase ?? nextRunPhase(context.state),
+    );
     const stopResult = { success: true, run_id: context.runId, operator_control: control };
     if (context.guardedPhase) emitControlResult(stopResult, options);
     else emitReadableControlResult(context, stopResult, options);
@@ -1002,6 +993,51 @@ function handleGraphFailure(
   process.exitCode = 1;
 }
 
+/** Records a stop request exactly as `agent stop` does; the running scheduler picks it up. */
+function requestRunStop(
+  context: { runId: string; workspaceRoot: string },
+  phase: () => string,
+): OperatorControl {
+  const previous = readOperatorControl(context.runId, context.workspaceRoot);
+  const control = requestStop(context.runId, context.workspaceRoot);
+  if (!["stop-requested", "stopped"].includes(previous.status)) {
+    appendTraceEvent(
+      context.runId,
+      {
+        event: "run_stop_requested",
+        phase: phase(),
+        status: "ok",
+      },
+      context.workspaceRoot,
+    );
+  }
+  return control;
+}
+
+/**
+ * The first SIGINT/SIGTERM requests a graceful stop (the scheduler aborts and kills the provider
+ * group); a second one exits at once. Returns the function that removes the handlers.
+ */
+function installStopSignalHandlers(context: AutonomousLifecycleContext): () => void {
+  let signalled = false;
+  const handlers = (["SIGINT", "SIGTERM"] as const).map((name) => {
+    const handler = () => {
+      if (signalled) process.exit(name === "SIGINT" ? 130 : 143);
+      signalled = true;
+      try {
+        requestRunStop(context, () => context.workflow?.entry_node ?? "workflow");
+      } catch {
+        process.exit(name === "SIGINT" ? 130 : 143);
+      }
+    };
+    process.on(name, handler);
+    return [name, handler] as const;
+  });
+  return () => {
+    for (const [name, handler] of handlers) process.removeListener(name, handler);
+  };
+}
+
 async function runGraphWorkflowCommand(
   command: string,
   context: AutonomousLifecycleContext,
@@ -1009,8 +1045,10 @@ async function runGraphWorkflowCommand(
 ): Promise<void> {
   const releaseLock = acquireWorkflowLock(context.workspaceRoot, context.runId);
   const provider = runOptions.provider || "auto";
+  let removeSignalHandlers = (): void => {};
   try {
     prepareGraphRun(command, context);
+    removeSignalHandlers = installStopSignalHandlers(context);
     completeGraphRun(
       context,
       (await runGraphWorkflow(
@@ -1023,6 +1061,7 @@ async function runGraphWorkflowCommand(
   } catch (error) {
     handleGraphFailure(context, provider, runOptions, error);
   } finally {
+    removeSignalHandlers();
     releaseLock();
   }
 }

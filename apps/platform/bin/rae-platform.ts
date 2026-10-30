@@ -5,12 +5,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig, platformAllowedHosts } from "../src/config.js";
 import { createAuthenticator } from "../src/auth.js";
-import { createArtifactService } from "../src/artifacts.js";
+import { createArtifactService, probeArtifactStorage } from "../src/artifacts.js";
 import { createPlatformServer } from "../src/http.js";
 import { createLogger, Metrics } from "../src/observability.js";
 import { PostgresStore } from "../src/store.js";
-import { HeadBucketCommand, S3Client } from "@aws-sdk/client-s3";
-import type { PlatformConfig } from "../src/config.js";
 
 const command = process.argv[2] ?? "";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -58,7 +56,7 @@ async function main() {
         );
       if (schema === "stale")
         throw new Error("database schema is stale; run explicit migrate first");
-      const storage = config.storage ? await probeStorage(config.storage) : null;
+      const storage = config.storage ? await probeArtifactStorage(config.storage) : null;
       console.log(
         JSON.stringify({
           experimental: true,
@@ -95,14 +93,15 @@ async function main() {
       ...config.management,
     });
     cleanup.push(() => management.close());
+    const logger = createLogger({ service: "rae-platform" });
     const server = createPlatformServer({
       ready: management.ready,
       store,
-      authenticate: createAuthenticator(config),
+      authenticate: createAuthenticator(config, logger),
       artifactService: config.storage
         ? createArtifactService({ store, storage: config.storage })
         : null,
-      logger: createLogger({ service: "rae-platform" }),
+      logger,
       metrics,
       oidc: config.oidc,
       resourceBaseUrl: publicBaseUrl,
@@ -148,23 +147,4 @@ async function listen(server: Server, port: number, host: string): Promise<void>
       resolve();
     });
   });
-}
-
-/** Probes the configured bucket with a short-timeout HeadBucket call. */
-async function probeStorage(storage: NonNullable<PlatformConfig["storage"]>) {
-  const client = new S3Client({
-    region: storage.region,
-    ...(storage.endpoint ? { endpoint: storage.endpoint } : {}),
-    forcePathStyle: storage.forcePathStyle,
-  });
-  try {
-    await client.send(new HeadBucketCommand({ Bucket: storage.bucket }), {
-      abortSignal: AbortSignal.timeout(5000),
-    });
-    return { ok: true as const };
-  } catch (error) {
-    return { ok: false as const, error: error instanceof Error ? error.message : "unknown error" };
-  } finally {
-    client.destroy();
-  }
 }

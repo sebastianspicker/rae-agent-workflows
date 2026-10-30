@@ -101,7 +101,12 @@ may appear.
 `ownership_plan: true` marks the node whose output is the plan of owned
 paths. Its `payload_contract` must require `file_ownership` (authoring). Every
 writer must be dominated by an ownership-plan node, and writer changes outside
-the plan fail.
+the plan fail. The plan may also carry `verification_commands` (the default
+workflow requires it): a Codex writer fails unless its provider-reported command
+evidence has an exit-0, workspace-root entry for each. The engine does not run
+them. A plan without the field enforces no extra commands. A writer's own
+blocking findings do not fail it; the default workflow routes them to `diagnose`
+over a `context` edge, and the run report lists them.
 
 ### `mutation_checkpoint`
 
@@ -132,7 +137,19 @@ restarts its loop like any gate but does not satisfy terminal dominance.
 | `artifact` | Passes the source envelope to the target; `artifact` names it, and authoring requires the name. |
 | `stream` | 2.1. Passes items to a pipelined consumer; a chain of stream edges is at most `budgets.max_pipeline_depth` stages (default and maximum 4). |
 | `condition` | Passes only when `condition` matches the source result. |
-| `loop-back` | Restarts a loop after its gate fails. Not counted as a predecessor for readiness. |
+| `loop-back` | Restarts a loop after its gate fails. Not counted as a predecessor for readiness. The restarted target also receives the failing gate's envelope and its own previous output as inputs. |
+| `context` | Data only. When the target runs, it receives the source's latest passed envelope, if any; `artifact` may name it. Never enables the target and never counts for readiness, joins, loops or dominance. Authoring rejects a `condition`, a source that is not upstream of the target, and a target that is not an `agent` or `map` node. |
+
+Writers are held to the ownership plan (the node with `ownership_plan: true`),
+so every `access: write` node, and every agent or map node in a loop that
+contains one, also receives the plan's latest passed envelope. Without an edge
+from the planner, the runtime adds it as an `artifact` input named
+`ownership-plan`; with a `context` edge, it arrives on that edge. Gates, joins
+and checkpoints do not receive it. The runtime still injects this input when the
+node runs, and it never makes a node ready. To draw the dependency, use a
+`context` edge from the planner to the writer, as the default workflow does: it
+carries the same envelope without enabling the writer, so the writer cannot run
+after the gate that should have stopped it. Any other edge type would enable it.
 
 `condition` values are evaluated against the source node's envelope, with the
 semantics of the workflow's own schema version

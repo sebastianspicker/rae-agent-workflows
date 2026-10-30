@@ -6,7 +6,6 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertSupportedNodeRuntime } from "../primitives/node-runtime.js";
 import type { AutonomousActionOptions } from "../run/autonomous-actions.js";
-import type { DoctorResult } from "../agents/agent-executor.js";
 export { enforceCommandEvidence } from "../run/autonomous-evidence.js";
 export { validateConcurrentOperatorChanges } from "../run/autonomous-git.js";
 
@@ -163,61 +162,30 @@ function isHelpCommand(command: string, options: CliOptions): boolean {
   return command === "help" || command === "--help" || command === "-h" || options.help === true;
 }
 async function runDoctor(options: CliOptions): Promise<void> {
-  const [{ agentDoctor }, { loadExecutionProfile }] = await Promise.all([
-    import("../agents/agent-executor.js"),
-    import("../workflow/execution-profile.js"),
-  ]);
-  const baseOptions = {
-    provider: options.provider ?? "auto",
-    ...(options["agent-command"] ? { command: options["agent-command"] } : {}),
+  const { doctorProviderTarget } = await import("../run/provider-doctor.js");
+  const result = doctorProviderTarget({
+    provider: options.provider,
+    agentCommand: options["agent-command"],
     allowUnsafeCommand: options["allow-unsafe-command-provider"] === true,
     workspaceRoot: resolve(options["project-root"] ?? process.cwd()),
-    ...(options.model ? { model: options.model } : {}),
-    ...(options.variant ? { variant: options.variant } : {}),
-  };
-  let result: DoctorResult | (Record<string, unknown> & { success: boolean });
-  if (options["execution-profile"]) {
-    const loaded = loadExecutionProfile(options["execution-profile"]);
-    if (loaded.profile.schema_version === "3.0.0") {
-      const routes = Object.entries(loaded.profile.routes).map(([routeId, route]) => ({
-        route_id: routeId,
-        result: agentDoctor({
-          ...baseOptions,
-          provider: route.executor,
-          model: route.model,
-          ...(route.executor === "opencode" && route.variant ? { variant: route.variant } : {}),
-        }),
-      }));
-      result = {
-        success: routes.length > 0 && routes.every((entry) => entry.result.success),
-        provider: "mixed",
-        execution_profile_digest: loaded.digest,
-        routes,
-      };
-    } else if (loaded.profile.schema_version === "2.0.0") {
-      const surfaces = Object.entries(loaded.profile.capability_sets ?? {}).map(
-        ([name, capabilities]) => ({
-          name,
-          result: agentDoctor({ ...baseOptions, capabilities }),
-        }),
-      );
-      result = {
-        success: surfaces.length > 0 && surfaces.every((entry) => entry.result.success),
-        provider: "codex",
-        execution_profile_digest: loaded.digest,
-        capability_sets: surfaces,
-      };
-    } else {
-      result = { ...agentDoctor(baseOptions), execution_profile_digest: loaded.digest };
-    }
-  } else {
-    result = agentDoctor(baseOptions);
-  }
+    model: options.model,
+    variant: options.variant,
+    executionProfile: options["execution-profile"],
+  });
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   if (!result.success) process.exitCode = 1;
 }
 
+/** A detached run outlives the pipes of the process that started it; its state on disk is authoritative. */
+function ignoreClosedPipe(stream: NodeJS.WriteStream): void {
+  stream.on("error", (error: NodeJS.ErrnoException) => {
+    if (error.code !== "EPIPE") throw error;
+  });
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  ignoreClosedPipe(process.stdout);
+  ignoreClosedPipe(process.stderr);
   try {
     await main();
   } catch (error) {

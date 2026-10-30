@@ -60,7 +60,7 @@
       "properties": {
         "from": { "$ref": "#/$defs/nodeId" },
         "to": { "$ref": "#/$defs/nodeId" },
-        "type": { "enum": ["sequence", "artifact", "condition"] },
+        "type": { "enum": ["sequence", "artifact", "condition", "context"] },
         "artifact": { "type": "string", "maxLength": 128 },
         "condition": { "enum": ["success", "failure", "blocking-findings", "budget-available"] }
       }

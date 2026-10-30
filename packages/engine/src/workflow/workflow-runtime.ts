@@ -37,6 +37,7 @@ import { writeJson } from "../run/state.js";
 import { createRuntimeStateGuard, reconcileRuntimeStateGuard } from "../run/runtime-state-guard.js";
 import { scheduleWorkflow } from "./workflow-scheduler.js";
 import { readEnvelopeFile, WRITER_REVERIFICATION_FINDING } from "./workflow-scheduler-common.js";
+import { normalizeEvidenceCommand } from "../primitives/command-evidence.js";
 import { writeExclusiveFileAtomic } from "../primitives/atomic-file.js";
 import { canonicalJson } from "./workflow-contract.js";
 import { applyWorkflowTransform } from "./workflow-transforms.js";
@@ -78,6 +79,7 @@ interface WorkflowInput {
 }
 interface OwnershipPayload extends Record<string, unknown> {
   file_ownership: string[];
+  verification_commands?: string[];
 }
 interface ProviderResult extends AgentExecutionResult {
   provider?: AgentProvider;
@@ -214,7 +216,27 @@ function ownershipPlan(context: RuntimeContext): OwnershipPayload {
   if (!plan || !Array.isArray(plan.file_ownership) || plan.file_ownership.length === 0)
     throw new Error(`ownership plan ${planNode.id} must declare file_ownership`);
   for (const pathValue of plan.file_ownership) assertSafeOwnershipPath(planNode, pathValue);
+  const commands = plan.verification_commands;
+  if (
+    commands !== undefined &&
+    !(Array.isArray(commands) && commands.every((c) => typeof c === "string"))
+  )
+    throw new Error(`ownership plan ${planNode.id} verification_commands must be strings`);
   return plan as OwnershipPayload;
+}
+
+/** Plan verification commands lacking an exit-0, workspace-root command event. */
+export function missingVerificationCommands(
+  commands: readonly string[],
+  events: ReadonlyArray<Record<string, unknown>>,
+): string[] {
+  return commands.filter((command) => {
+    const normalized = normalizeEvidenceCommand(command);
+    return !events.some(
+      (event) =>
+        event.command === normalized && event.exit_code === 0 && event.working_directory === ".",
+    );
+  });
 }
 
 function assertWriterEvidence(
@@ -243,7 +265,23 @@ function assertWriterEvidence(
   ) {
     throw new Error(`writer ${node.id} returned no successful command execution evidence`);
   }
+  if (result.provider === "codex") {
+    const missing = missingVerificationCommands(
+      plan.verification_commands ?? [],
+      result.commandEvents ?? [],
+    );
+    if (missing.length)
+      throw new Error(
+        `writer ${node.id} has no successful workspace-root evidence for plan verification command(s): ${missing.join(", ")}`,
+      );
+  }
+  // A writer's own blocking findings stay in its envelope: diagnosis routes them into repair and
+  // the run report lists them for the human release review.
 }
+
+/** Node-envelope schema caps on `command_evidence` and `changed_paths` (v2.0 to v2.2). */
+const ENVELOPE_COMMAND_EVIDENCE_LIMIT = 1024;
+const ENVELOPE_CHANGED_PATHS_LIMIT = 4096;
 
 /** Worker stderr kept for diagnostics; stdout keeps the bounded-process default cap. */
 const WORKER_STDERR_LIMIT_BYTES = 1024 * 1024;
@@ -800,7 +838,13 @@ function validateProviderArtifact(
   result: ProviderResult,
 ): void {
   const validate = payloadValidatorForWorkflow(context.workflow, node.payload_contract);
-  if (!validate(result.artifact)) throw new Error(`node ${node.id} returned an invalid payload`);
+  if (!validate(result.artifact)) {
+    const detail = (validate.errors ?? [])
+      .slice(0, 5)
+      .map((error) => `${error.instancePath || "/"} ${error.message}`)
+      .join("; ");
+    throw new Error(`node ${node.id} returned an invalid payload: ${detail}`.slice(0, 2000));
+  }
   assertGitStateInvariant(context.workspaceRoot, context.initialGitState, node.id);
 }
 
@@ -841,6 +885,36 @@ function assertReadOnlyNodeDidNotMutate(
   }
 }
 
+/**
+ * Fits writer evidence into the envelope schema caps: the most recent commands and the first
+ * paths in sorted order. Reports the original totals only when something was dropped.
+ */
+export function boundedEvidence(
+  changed: string[],
+  commands: Array<Record<string, unknown>>,
+): {
+  changed_paths: string[];
+  command_evidence: Array<Record<string, unknown>>;
+  truncation: Record<string, { total: number; kept: number }> | null;
+} {
+  const truncation: Record<string, { total: number; kept: number }> = {};
+  let changed_paths = changed;
+  let command_evidence = commands;
+  if (changed.length > ENVELOPE_CHANGED_PATHS_LIMIT) {
+    changed_paths = [...changed].sort().slice(0, ENVELOPE_CHANGED_PATHS_LIMIT);
+    truncation.changed_paths = { total: changed.length, kept: changed_paths.length };
+  }
+  if (commands.length > ENVELOPE_COMMAND_EVIDENCE_LIMIT) {
+    command_evidence = commands.slice(-ENVELOPE_COMMAND_EVIDENCE_LIMIT);
+    truncation.command_evidence = { total: commands.length, kept: command_evidence.length };
+  }
+  return {
+    changed_paths,
+    command_evidence,
+    truncation: Object.keys(truncation).length ? truncation : null,
+  };
+}
+
 function providerResult(
   node: WorkflowNode,
   result: ProviderResult,
@@ -849,19 +923,36 @@ function providerResult(
   attempt: number,
   contextEvidence: Record<string, unknown> | null = null,
 ): NodeExecutionResult {
+  const evidence = boundedEvidence(
+    node.access === "write" ? changed : [],
+    result.commandEvents ?? [],
+  );
+  const findings = Array.isArray(result.artifact.findings)
+    ? result.artifact.findings.filter(
+        (finding): finding is Record<string, unknown> =>
+          Boolean(finding) && typeof finding === "object" && !Array.isArray(finding),
+      )
+    : [];
+  if (evidence.truncation)
+    findings.push({
+      severity: "warning",
+      blocking: false,
+      source: node.id,
+      summary: `node ${node.id} evidence exceeded envelope caps and was truncated: ${Object.entries(
+        evidence.truncation,
+      )
+        .map(([name, { total, kept }]) => `${name} kept ${kept} of ${total}`)
+        .join(", ")}`,
+    });
   return {
     status: typeof result.artifact.status === "string" ? result.artifact.status : "passed",
     payload: result.artifact,
-    findings: Array.isArray(result.artifact.findings)
-      ? result.artifact.findings.filter(
-          (finding): finding is Record<string, unknown> =>
-            Boolean(finding) && typeof finding === "object" && !Array.isArray(finding),
-        )
-      : [],
-    changed_paths: node.access === "write" ? changed : [],
-    command_evidence: result.commandEvents ?? [],
+    findings,
+    changed_paths: evidence.changed_paths,
+    command_evidence: evidence.command_evidence,
     resource_usage: {
       ...(result.resourceUsage ?? {}),
+      ...(evidence.truncation ? { evidence_truncation: evidence.truncation } : {}),
       ...(contextEvidence ? { context_assembly: contextEvidence } : {}),
       capability_surface: result.capabilitySurface ?? null,
       credential_manifest: result.credentialManifest ?? [],

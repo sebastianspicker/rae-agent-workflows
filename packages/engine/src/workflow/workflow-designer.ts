@@ -592,7 +592,8 @@ function addTopologyEdges(value: AnalyzerWorkflow, graph: TopologyGraph): void {
       );
       continue;
     }
-    if (edge.type === "loop-back") continue;
+    // Context edges only carry data, so like loop-backs they never order or enable a node.
+    if (edge.type === "loop-back" || edge.type === "context") continue;
     outgoing.get(edge.from as string)?.push(edge.to as string);
     incoming.get(edge.to as string)?.push(edge.from as string);
   }

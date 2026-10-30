@@ -40,6 +40,8 @@ import { OperatorProfiles, loadOperatorProfiles } from "./lib/profiles.js";
 import { WorkflowProposalJobs } from "./lib/proposals.js";
 import { createRemoteOperatorProxy, MAX_REMOTE_RESPONSE_BYTES } from "./lib/remote.js";
 import type { RemoteForwardResult, RemoteProxy } from "./lib/remote.js";
+import { probeProviderHealth } from "./lib/provider-health.js";
+import type { ProviderHealth } from "./lib/provider-health.js";
 import { EventTailHub } from "./lib/tail.js";
 import type { TailDelivery, TailEvent, TailRun, TailSubscription } from "./lib/tail.js";
 import type { OperatorProject } from "./lib/security.js";
@@ -80,6 +82,11 @@ interface OperatorContext {
   /** Per-instance project and run workspace roots that error messages must not reveal. */
   knownRoots: Set<string>;
   workflowRegistry?: WorkflowRegistry;
+  /** Result of the startup probe of the default provider; null until probed or when skipped. */
+  providerHealth?: ProviderHealthHolder;
+}
+interface ProviderHealthHolder {
+  current: ProviderHealth | null;
 }
 interface OperatorServerOptions {
   projects?: OperatorProject[];
@@ -92,6 +99,7 @@ interface OperatorServerOptions {
   proposalJobs?: WorkflowProposalJobs;
   runCatalog?: RunCatalog;
   tailHub?: EventTailHub;
+  providerHealth?: ProviderHealthHolder;
 }
 interface CliOptions {
   projects: OperatorProject[];
@@ -199,15 +207,26 @@ function scrubEngineMessage(message: string, knownRoots: Iterable<string>): stri
 /** Gateway statuses are raised only by the remote relay with fixed, path-free messages. */
 const GATEWAY_STATUSES = new Set([502, 503, 504]);
 
+/** Logs the real cause of a masked 5xx: method, path without query, message and stack. */
+function logServerError(req: IncomingMessage | undefined, error: Error): void {
+  const path = (req?.url ?? "").split("?")[0] ?? "";
+  const detail = `${error.message} ${error.stack ?? ""}`;
+  console.error(
+    `operator server error: ${sanitizeLogText(`${req?.method ?? "-"} ${path} ${detail}`)}`,
+  );
+}
+
 function errorResponse(
   res: ServerResponse,
   error: unknown,
   knownRoots: Iterable<string> = [],
+  req?: IncomingMessage,
 ): void {
   const candidate = (error instanceof Error ? error : new Error(String(error))) as HttpError;
   const explicitStatus = candidate.status;
   const explicit = typeof explicitStatus === "number" && Number.isInteger(explicitStatus);
   const status = explicit ? explicitStatus : engineErrorStatus(candidate);
+  if (status >= 500 && !(explicit && GATEWAY_STATUSES.has(status))) logServerError(req, candidate);
   const message =
     status >= 500 && !(explicit && GATEWAY_STATUSES.has(status))
       ? "internal server error"
@@ -396,6 +415,7 @@ async function routeApi(
     sendJson(res, 200, {
       projects: projects.map(({ id, label }) => ({ id, label })),
       active_run_id: controller.refreshOwnership(),
+      provider_health: context.providerHealth?.current ?? null,
     });
     return;
   }
@@ -536,10 +556,11 @@ async function routeWorkflows(
   project: OperatorProject,
   tail: string[],
 ): Promise<void> {
-  const registry = context.workflowRegistry ?? (await workflowRegistryFor(project));
+  /** Opens the registry only for routes that use it, after method and route checks. */
+  const getRegistry = async () => context.workflowRegistry ?? (await workflowRegistryFor(project));
   if (tail.length === 0) {
     requireMethod(req, "GET");
-    sendJson(res, 200, { workflows: await assertRegistryMethod(registry, "list")() });
+    sendJson(res, 200, { workflows: await assertRegistryMethod(await getRegistry(), "list")() });
     return;
   }
   if (tail[0] === "templates" && tail.length === 1) {
@@ -573,7 +594,9 @@ async function routeWorkflows(
   }
   if (tail.length === 1) {
     requireMethod(req, "GET");
-    sendJson(res, 200, { workflow: await assertRegistryMethod(registry, "show")(workflowId) });
+    sendJson(res, 200, {
+      workflow: await assertRegistryMethod(await getRegistry(), "show")(workflowId),
+    });
     return;
   }
   if (tail[1] === "analysis" && tail.length === 2) {
@@ -626,14 +649,17 @@ async function routeWorkflows(
     requireMethod(req, "POST");
     workflowMutationAllowed(project, context.controller);
     sendJson(res, 201, {
-      revision: await assertRegistryMethod(registry, "draft")(workflowId, await readJsonBody(req)),
+      revision: await assertRegistryMethod(await getRegistry(), "draft")(
+        workflowId,
+        await readJsonBody(req),
+      ),
     });
     return;
   }
   if (tail[1] === "diff" && tail.length === 2) {
     requireMethod(req, "GET");
     sendJson(res, 200, {
-      diff: await assertRegistryMethod(registry, "diff")(
+      diff: await assertRegistryMethod(await getRegistry(), "diff")(
         workflowId,
         Object.fromEntries([...url.searchParams].filter(([, value]) => value !== "")),
       ),
@@ -643,7 +669,7 @@ async function routeWorkflows(
   if (tail[1] === "revisions" && tail[3] === "validate" && tail.length === 4) {
     requireMethod(req, "POST");
     sendJson(res, 200, {
-      validation: await assertRegistryMethod(registry, "validate")(
+      validation: await assertRegistryMethod(await getRegistry(), "validate")(
         workflowId,
         tail[2],
         await readJsonBody(req),
@@ -655,7 +681,7 @@ async function routeWorkflows(
     requireMethod(req, "POST");
     workflowMutationAllowed(project, context.controller);
     sendJson(res, 200, {
-      activation: await assertRegistryMethod(registry, "activate")(
+      activation: await assertRegistryMethod(await getRegistry(), "activate")(
         workflowId,
         tail[2],
         await readJsonBody(req),
@@ -684,7 +710,7 @@ export async function handleOperatorRequest(
       serveStatic(req, res, url.pathname);
     }
   } catch (error) {
-    if (!res.headersSent) errorResponse(res, error, context.knownRoots);
+    if (!res.headersSent) errorResponse(res, error, context.knownRoots, req);
     else res.end();
   }
 }
@@ -700,7 +726,13 @@ export function createOperatorServer({
   proposalJobs = new WorkflowProposalJobs(),
   runCatalog = new RunCatalog(),
   tailHub = new EventTailHub(),
-}: OperatorServerOptions): { server: Server; token: string; controller: RunController } {
+  providerHealth = { current: null },
+}: OperatorServerOptions): {
+  server: Server;
+  token: string;
+  controller: RunController;
+  providerHealth: ProviderHealthHolder;
+} {
   if (!Array.isArray(projects)) throw new Error("projects must be an array");
   if (remoteUrl && projects.length)
     throw new Error("--remote-url cannot be combined with --project");
@@ -732,10 +764,11 @@ export function createOperatorServer({
       host,
       origin: `http://${host}`,
       knownRoots,
+      providerHealth,
     });
   });
   server.once("close", () => runCatalog.close());
-  return { server, token, controller };
+  return { server, token, controller, providerHealth };
 }
 
 function parseCli(argv: string[]): CliOptions | null {
@@ -791,6 +824,25 @@ function parseCli(argv: string[]): CliOptions | null {
   };
 }
 
+/**
+ * Stops accepting connections, closes the server and exits 0 on SIGINT/SIGTERM. Runs the operator
+ * started are detached and are left running; stop them with `agent stop`.
+ */
+function exitOnSignals(server: Server): void {
+  let closing = false;
+  const stop = () => {
+    if (closing) return;
+    closing = true;
+    // Streams reconnect every 15 s anyway; do not let them hold the exit.
+    const fallback = setTimeout(() => process.exit(0), 5_000);
+    fallback.unref();
+    server.close(() => process.exit(0));
+    server.closeAllConnections();
+  };
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+}
+
 async function main(): Promise<void> {
   const options = parseCli(process.argv.slice(2));
   if (!options) return;
@@ -800,11 +852,23 @@ async function main(): Promise<void> {
     instance.server.once("error", reject);
     instance.server.listen(options.port, "127.0.0.1", () => resolveListen());
   });
+  exitOnSignals(instance.server);
   const address = instance.server.address();
   if (!address || typeof address === "string") throw new Error("server address unavailable");
   process.stdout.write(
     `RAE operator console: http://127.0.0.1:${address.port}/#token=${instance.token}\n`,
   );
+  const [first] = options.projects;
+  if (first) {
+    // The doctor runs in a child process; health stays null until it finishes.
+    void probeProviderHealth(
+      "codex",
+      first.root,
+      options.projects.map((project) => project.root),
+    ).then((health) => {
+      instance.providerHealth.current = health;
+    });
+  }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

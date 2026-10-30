@@ -231,40 +231,58 @@ function diffValues(left: unknown, right: unknown, path = ""): DiffRecord[] {
     .flatMap((key) => diffValues(leftRecord[key], rightRecord[key], `${path}/${key}`));
 }
 
+/**
+ * Opens the registry without touching disk: directories and the seeded default
+ * revision are created on the first write (draft or activate), so reads never
+ * write into the repository's git directory.
+ */
 export function createWorkflowRegistry(projectRoot: string) {
   const root = resolve(gitCommonDirectory(projectRoot), "rae-workflows", "v2");
-  ensureOwnerDirectory(root);
-  ensureOwnerDirectory(resolve(root, "workflows"));
   const defaultSnapshot = loadWorkflow(DEFAULT_WORKFLOW_PATH);
-  const defaultDirectory = workflowDirectory(root, defaultSnapshot.workflow.workflow_id);
-  const defaultRevisionDirectory = resolve(defaultDirectory, "revisions");
-  ensureOwnerDirectory(defaultDirectory);
-  ensureOwnerDirectory(defaultRevisionDirectory);
-  const defaultRevisionPath = resolve(
-    defaultRevisionDirectory,
-    revisionName(defaultSnapshot.workflow.revision),
-  );
-  if (!existsSync(defaultRevisionPath)) {
-    atomicJson(defaultRevisionPath, {
-      schema_version: defaultSnapshot.workflow.schema_version,
-      workflow_id: defaultSnapshot.workflow.workflow_id,
-      revision: defaultSnapshot.workflow.revision,
-      digest: defaultSnapshot.digest,
-      actor: "repository",
-      rationale: "Committed graph-native default workflow",
-      created_at: new Date(0).toISOString(),
-      workflow: defaultSnapshot.workflow,
-    });
+  const defaultWorkflowId = defaultSnapshot.workflow.workflow_id;
+  const defaultRecord: WorkflowRevisionRecord = {
+    schema_version: defaultSnapshot.workflow.schema_version,
+    workflow_id: defaultWorkflowId,
+    revision: defaultSnapshot.workflow.revision,
+    digest: defaultSnapshot.digest,
+    actor: "repository",
+    rationale: "Committed graph-native default workflow",
+    created_at: new Date(0).toISOString(),
+    workflow: defaultSnapshot.workflow,
+  };
+
+  /** Creates the registry directories and writes the default revision when missing. */
+  function ensureSeeded(): void {
+    ensureOwnerDirectory(root);
+    ensureOwnerDirectory(resolve(root, "workflows"));
+    const defaultDirectory = workflowDirectory(root, defaultWorkflowId);
+    const defaultRevisionDirectory = resolve(defaultDirectory, "revisions");
+    ensureOwnerDirectory(defaultDirectory);
+    ensureOwnerDirectory(defaultRevisionDirectory);
+    const defaultRevisionPath = resolve(
+      defaultRevisionDirectory,
+      revisionName(defaultSnapshot.workflow.revision),
+    );
+    if (!existsSync(defaultRevisionPath)) atomicJson(defaultRevisionPath, defaultRecord);
+  }
+
+  /** Stored revisions; the default workflow also reads as its committed revision until that file is written. */
+  function records(workflowId: string): WorkflowRevisionRecord[] {
+    const stored = revisionRecords(root, workflowId);
+    if (workflowId !== defaultWorkflowId) return stored;
+    if (stored.some((entry) => entry.revision === defaultRecord.revision)) return stored;
+    return [...stored, defaultRecord].sort((left, right) => left.revision - right.revision);
   }
 
   function list(): Array<Record<string, unknown>> {
     const ids = new Set([defaultSnapshot.workflow.workflow_id]);
-    for (const name of readdirSync(resolve(root, "workflows")))
+    const workflows = resolve(root, "workflows");
+    for (const name of existsSync(workflows) ? readdirSync(workflows) : [])
       if (SAFE_ID.test(name)) ids.add(name);
     const activations = activationRecords(root);
     const active = activations.at(-1) ?? null;
     return [...ids].sort().map((workflowId) => {
-      const revisions = revisionRecords(root, workflowId);
+      const revisions = records(workflowId);
       const latest = revisions.at(-1);
       return {
         workflow_id: workflowId,
@@ -286,7 +304,7 @@ export function createWorkflowRegistry(projectRoot: string) {
     digest: string;
     activation_history: ActivationRecord[];
   } {
-    const revisions = revisionRecords(root, workflowId);
+    const revisions = records(workflowId);
     const fallback = workflowId === defaultSnapshot.workflow.workflow_id ? defaultSnapshot : null;
     if (!fallback && revisions.length === 0) throw httpError("workflow not found", 404);
     const latest = revisions.at(-1);
@@ -310,15 +328,20 @@ export function createWorkflowRegistry(projectRoot: string) {
     if (workflow.workflow_id !== workflowId)
       throw httpError("workflow id does not match request path");
     assertNoActiveRun(projectRoot);
-    return withLock(root, () => {
-      const revisions = revisionRecords(root, workflowId);
-      const currentRevision = revisions.at(-1)?.revision ?? 0;
+    const checkDraft = (): void => {
+      const currentRevision = records(workflowId).at(-1)?.revision ?? 0;
       if (Number(body.expected_revision ?? currentRevision) !== currentRevision) {
         throw httpError("workflow revision conflict", 409);
       }
       if (workflow.revision !== currentRevision + 1) {
         throw httpError(`workflow revision must be ${currentRevision + 1}`, 409);
       }
+    };
+    // Validate before seeding so a rejected request writes nothing; repeat under the lock.
+    checkDraft();
+    ensureSeeded();
+    return withLock(root, () => {
+      checkDraft();
       const directory = workflowDirectory(root, workflowId);
       const revisionDir = resolve(directory, "revisions");
       ensureOwnerDirectory(directory);
@@ -339,9 +362,7 @@ export function createWorkflowRegistry(projectRoot: string) {
   }
 
   function validateRevision(workflowId: string, revision: unknown): Record<string, unknown> {
-    const record = revisionRecords(root, workflowId).find(
-      (entry) => entry.revision === Number(revision),
-    );
+    const record = records(workflowId).find((entry) => entry.revision === Number(revision));
     if (!record) throw httpError("workflow revision not found", 404);
     const workflow = validateWorkflow(record.workflow);
     const digest = workflowDigest(workflow);
@@ -359,12 +380,12 @@ export function createWorkflowRegistry(projectRoot: string) {
     workflowId: string,
     query: { from?: number; to?: number } = {},
   ): Record<string, unknown> {
-    const records = revisionRecords(root, workflowId);
-    const left = records.find(
-      (entry) => entry.revision === Number(query.from ?? records.at(-2)?.revision),
+    const revisions = records(workflowId);
+    const left = revisions.find(
+      (entry) => entry.revision === Number(query.from ?? revisions.at(-2)?.revision),
     );
-    const right = records.find(
-      (entry) => entry.revision === Number(query.to ?? records.at(-1)?.revision),
+    const right = revisions.find(
+      (entry) => entry.revision === Number(query.to ?? revisions.at(-1)?.revision),
     );
     if (!left || !right) throw httpError("both diff revisions must exist", 404);
     return {
@@ -377,10 +398,17 @@ export function createWorkflowRegistry(projectRoot: string) {
   function activate(workflowId: string, revision: unknown, body: ActivateBody): ActivationRecord {
     requireAttribution(body);
     assertNoActiveRun(projectRoot);
-    return withLock(root, () => {
+    const checked = (): Record<string, unknown> => {
       const validation = validateRevision(workflowId, revision);
       if (body.digest !== validation.digest)
         throw httpError("typed digest confirmation does not match", 409);
+      return validation;
+    };
+    // Validate before seeding so a rejected request writes nothing; repeat under the lock.
+    checked();
+    ensureSeeded();
+    return withLock(root, () => {
+      const validation = checked();
       const record: ActivationRecord = {
         schema_version: validation.workflow_schema_version,
         decision: "activated",
