@@ -1,14 +1,6 @@
 name: operator-demo-pages
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/operator-demo-pages.yml"
-      - "apps/operator/**"
-      - "docs/**"
-      - "scripts/src/copy-docs-site.ts"
   workflow_dispatch:
 
 concurrency:
@@ -26,6 +18,7 @@ defaults:
 
 jobs:
   build:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -34,13 +27,13 @@ jobs:
         with:
           persist-credentials: false
       - name: Set up Node
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "24"
       - name: Install and build packages
         run: '[ ["npm", "ci", "--ignore-scripts"], ["npm", "run", "build"] ]'
       - name: Configure Pages
-        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d
       - name: Build interactive mock demo
         run: '["node", "apps/operator/dist/scripts/build-demo.js", "--out", ".runtime/operator-demo"]'
       - name: Build documentation site
@@ -53,6 +46,7 @@ jobs:
           path: .runtime/operator-demo
 
   deploy:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10

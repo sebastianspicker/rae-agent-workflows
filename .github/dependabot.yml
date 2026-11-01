@@ -5,6 +5,10 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    groups:
+      codeql:
+        patterns:
+          - "github/codeql-action/*"
   - package-ecosystem: npm
     directory: /
     schedule:
@@ -13,6 +17,10 @@ updates:
     directory: /apps/platform
     schedule:
       interval: weekly
+    groups:
+      aws-sdk:
+        patterns:
+          - "@aws-sdk/*"
   - package-ecosystem: docker
     directory: /packages/dev-tools/multi-model-review/sandbox
     schedule:

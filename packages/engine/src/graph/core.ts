@@ -16,7 +16,6 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
-import type { BinaryLike } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { createRequire } from "node:module";
@@ -139,7 +138,7 @@ export function graphContractValidators(): GraphContractValidators {
   return contractValidators;
 }
 
-export function sha256(value: BinaryLike): string {
+export function sha256(value: string | NodeJS.ArrayBufferView): string {
   return createHash("sha256").update(value).digest("hex");
 }
 

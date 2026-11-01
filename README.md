@@ -15,9 +15,36 @@ RAE is a local-first toolkit for controlled repository changes. It combines
 versioned graph workflows, isolated Git worktrees, schema-validated artifacts,
 human checkpoints, verification gates, and durable local run evidence.
 
+<details>
+<summary>Status and limitations</summary>
+
+RAE is an independent experimental project for controlled repository automation and
+evidence-producing workflows. Developed independently alongside my main professional work. It is
+a source toolkit to inspect, adapt and test in isolated repositories, not a ready-to-use
+engineering service. APIs may change, and the hosted control plane remains experimental.
+
+**Disclaimer.** Model output and passing verification gates do not establish that a generated
+change is correct, secure or suitable for release. Review the changes and their evidence before
+integration. You remain responsible for provider permissions, spending limits, sensitive inputs
+and any decision to run or deploy resulting code.
+
+</details>
+
 The repository distributes source only: there is no published package,
 supported container, deployed service, or stable API. The hosted control-plane
 code and workflow 2.2 are experimental.
+
+A typical source-change run moves from a request to reviewable changes and recorded
+checks. The selected workflow and checkpoint policy determine the exact steps:
+
+```mermaid
+flowchart LR
+  A[Repository task] --> B[Plan]
+  B --> C[Human checkpoint]
+  C --> D[Isolated worktree]
+  D --> E[Checks and run evidence]
+  E --> F[Human review]
+```
 
 ## What RAE provides
 

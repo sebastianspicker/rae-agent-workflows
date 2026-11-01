@@ -49,11 +49,11 @@
     "typecheck:docs": "tsc -p docs/.vitepress/tsconfig.json"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.2",
+    "@biomejs/biome": "2.6.3",
+    "@types/node": "26.6.5",
+    "markdown-it-mathjax3": "4.3.2",
     "typescript": "5.9.3",
-    "@types/node": "25.5.0",
-    "vitepress": "1.6.4",
-    "markdown-it-mathjax3": "4.3.2"
+    "vitepress": "1.6.4"
   },
   "type": "module",
   "overrides": {

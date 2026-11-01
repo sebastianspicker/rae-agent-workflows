@@ -222,3 +222,6 @@ id_ed25519.*
 /.rae-profile-backups/
 /.rae-profile-recovery-*
 /docs/agent-operator-policy.md
+
+# Local audit history; public limitations remain in ALPHA_KNOWN_ISSUES.md.
+/ALPHA_AUDIT_REPORT.md

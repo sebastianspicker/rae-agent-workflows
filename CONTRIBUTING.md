@@ -91,6 +91,20 @@ npm run verify -- --release-candidate
 
 Report every skipped or environment-blocked check.
 
+## Automation policy
+
+General CI runs automatically only for pull requests authored by `dependabot[bot]`.
+Maintainers can run it for any branch through `workflow_dispatch`; ordinary pushes,
+tags and contributor pull requests do not start builds. Security-only CodeQL and
+Scorecard workflows retain their automatic analysis triggers and do not deploy.
+The Pages workflow is manual only and accepts the default branch. No pull request,
+including a Dependabot pull request, deploys the demo or documentation automatically.
+
+Related CodeQL action updates are grouped so initialization, analysis and SARIF
+upload use the same release. The root and experimental platform keep separate
+npm update entries and lockfiles; the three tool image directories have Docker
+update entries. There is no Python dependency manifest or pip update entry.
+
 ## Documentation
 
 - Put tutorials, how-to guides, reference material, explanations, research, and

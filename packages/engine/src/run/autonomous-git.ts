@@ -12,7 +12,6 @@ import type { BigIntStats, Dirent, Stats } from "node:fs";
 import { spawnSync } from "node:child_process";
 import type { SpawnSyncReturns } from "node:child_process";
 import { createHash } from "node:crypto";
-import type { BinaryLike } from "node:crypto";
 import { basename, relative, resolve } from "node:path";
 import { PHASE_ORDER } from "./constants.js";
 
@@ -115,7 +114,7 @@ export function gitOutput(root: string, args: readonly string[]): string {
   }).stdout;
 }
 
-export function sha256(value: BinaryLike): string {
+export function sha256(value: string | NodeJS.ArrayBufferView): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
