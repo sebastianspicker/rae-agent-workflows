@@ -1,5 +1,6 @@
 /** Purpose: structured logging, trace propagation, and Prometheus metrics. */
 import crypto from "node:crypto";
+import { redact } from "@rae/engine";
 
 const traceparentPattern = /^00-(?!0{32})[0-9a-f]{32}-(?!0{16})[0-9a-f]{16}-0[01]$/;
 
@@ -8,9 +9,12 @@ export function traceparent(value: unknown) {
   return `00-${crypto.randomBytes(16).toString("hex")}-${crypto.randomBytes(8).toString("hex")}-01`;
 }
 
-/** Masks bearer tokens, key=value secrets, credentials in URLs, JWTs, file URLs and UNC paths inside free text. */
+/**
+ * Applies the engine's secret redaction (JSON keys, provider keys, JWTs, URL credentials), then the
+ * platform's own rules for headers, signatures, file URLs and UNC paths.
+ */
 export function redactText(value: string) {
-  return value
+  return redact(value)
     .replace(/(bearer\s+|token=|authorization:|x-amz-signature=)[^\s,&]+/gi, "$1[redacted]")
     .replace(
       /\b((?:password|passwd|secret|api[_-]?key|credential)s?\s*=\s*|x-api-key:\s*)[^\s,&;]+/gi,
@@ -18,8 +22,7 @@ export function redactText(value: string) {
     )
     .replace(/\bfile:\/\/[^\s"'`),;]+/gi, "[path]")
     .replace(/\\\\[^\s\\"'`),;]+(?:\\[^\s\\"'`),;]+)*/g, "[path]")
-    .replace(/([a-z][a-z0-9+.-]*:\/\/)[^@\s/]+@/gi, "$1[redacted]@")
-    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "[redacted-jwt]");
+    .replace(/((?<![a-z0-9+.-])[a-z][a-z0-9+.-]{0,31}:\/\/)[^@\s/]+@/gi, "$1[redacted]@");
 }
 
 export function createLogger(base: Record<string, unknown> = {}) {
@@ -43,7 +46,6 @@ const SNAPSHOT_GAUGES = [
   "queueDepth",
   "activeWaits",
   "workerFreshnessSeconds",
-  "outboxPending",
   "activeEventStreams",
   "poolTotal",
   "poolIdle",
@@ -58,7 +60,6 @@ export class Metrics {
   leaseExpiries = 0;
   reconciliations = 0;
   artifactMismatches = 0;
-  outboxPending = 0;
   queueDepth = 0;
   activeWaits = 0;
   workerFreshnessSeconds = 0;
@@ -136,7 +137,6 @@ export class Metrics {
       `rae_platform_context_omitted_items_total ${this.contextOmittedItems}`,
       `rae_platform_model_input_tokens_total ${this.modelInputTokens}`,
       `rae_platform_model_output_tokens_total ${this.modelOutputTokens}`,
-      `rae_platform_outbox_pending ${this.outboxPending}`,
       `rae_platform_ready ${this.ready}`,
     );
     return `${lines.join("\n")}\n`;

@@ -1,5 +1,4 @@
-/** Incremental, bounded sanitized trace replay. Cached prefixes are content-verified on change. */
-import { createHash } from "node:crypto";
+/** Incremental, bounded sanitized trace replay. Cached prefixes are tail-verified on change. */
 import { closeSync, fstatSync, readSync } from "node:fs";
 import { openFileAt, openParent, openRoot } from "@rae/fs-bridge";
 import { relative } from "node:path";
@@ -17,7 +16,8 @@ interface TraceCacheEntry {
   revision: string;
   offset: number;
   lines: number;
-  digest: string;
+  /** The last bytes before `offset`; a changed tail means the file was rewritten, not appended. */
+  tail: Buffer;
   events: OperatorEvent[];
   bytes: number;
 }
@@ -30,7 +30,7 @@ const cache = new Map<string, TraceCacheEntry>();
 const MAX_CACHE_BYTES = 16 * 1024 * 1024;
 const MAX_ENTRY_BYTES = 4 * 1024 * 1024;
 const metrics: TraceMetrics = { bytes_read: 0, records_parsed: 0, cache_hits: 0 };
-const digest = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
+const TAIL_BYTES = 4096;
 const utf8 = new TextDecoder("utf-8", { fatal: true });
 const identity = (stat: BigIntStats): string => `${stat.dev}:${stat.ino}`;
 const revision = (stat: BigIntStats): string =>
@@ -92,21 +92,19 @@ function project(line: string, runId: string, seq: number): OperatorEvent {
   return event;
 }
 
+/** Parses `raw`, the file bytes from `base`; a `prior` entry is extended only when `reusable`. */
 function parseAppend(
   raw: Buffer,
+  base: number,
   prior: TraceCacheEntry | undefined,
+  reusable: boolean,
   runId: string,
   stat: BigIntStats,
 ): TraceCacheEntry {
-  // Growth alone is not proof of append-only writes: verify every committed byte.
-  const reusable =
-    prior &&
-    prior.identity === identity(stat) &&
-    raw.length >= prior.offset &&
-    digest(raw.subarray(0, prior.offset)) === prior.digest;
-  const events = reusable ? [...prior.events] : [];
-  let lineNumber = reusable ? prior.lines : 0;
-  let offset = reusable ? prior.offset : 0;
+  const events = reusable && prior ? [...prior.events] : [];
+  let bytes = reusable && prior ? prior.bytes : 0;
+  let lineNumber = reusable && prior ? prior.lines : 0;
+  let offset = reusable && prior ? prior.offset - base : 0;
   for (;;) {
     const end = raw.indexOf(10, offset);
     if (end < 0) break; // The writer has not committed the final JSONL record yet.
@@ -119,7 +117,9 @@ function parseAppend(
     offset = end + 1;
     lineNumber += 1;
     if (!line) continue;
-    events.push(project(line, runId, lineNumber));
+    const event = project(line, runId, lineNumber);
+    events.push(event);
+    bytes += Buffer.byteLength(JSON.stringify(event)) + 1;
     if (events.length > MAX_TRACE_EVENTS) {
       throw badTrace(`trace file exceeds MAX_TRACE_EVENTS (${MAX_TRACE_EVENTS})`);
     }
@@ -127,16 +127,48 @@ function parseAppend(
   return {
     identity: identity(stat),
     revision: revision(stat),
-    offset,
+    offset: base + offset,
     lines: lineNumber,
-    digest: digest(raw.subarray(0, offset)),
+    tail: Buffer.from(raw.subarray(Math.max(0, offset - TAIL_BYTES), offset)),
     events,
-    bytes: Buffer.byteLength(JSON.stringify(events)),
+    bytes,
   };
 }
 
 const MAX_TRACE_BYTES = 20 * 1024 * 1024;
+const SNAPSHOT_RETRIES = 3;
+/** A concurrent append can race one snapshot; retry before surfacing the change. */
 function readSnapshot(path: string, runId: string, root: string): TraceCacheEntry {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return readSnapshotOnce(path, runId, root);
+    } catch (error) {
+      if (
+        attempt >= SNAPSHOT_RETRIES ||
+        !(error instanceof Error && error.message.includes("trace changed while reading"))
+      )
+        throw error;
+    }
+  }
+}
+
+/** Reads the bytes from `base` to the end of the stat'ed size; throws when the file moved meanwhile. */
+function readFrom(fd: number, base: number, stat: BigIntStats): Buffer {
+  const raw = Buffer.alloc(Number(stat.size) - base + 1);
+  let bytes = 0;
+  while (bytes < raw.length) {
+    const count = readSync(fd, raw, bytes, raw.length - bytes, base + bytes);
+    if (!count) break;
+    bytes += count;
+  }
+  metrics.bytes_read += bytes;
+  const after = fstatSync(fd, { bigint: true });
+  if (revision(stat) !== revision(after) || bytes !== Number(stat.size) - base)
+    throw badTrace("trace changed while reading; retry replay");
+  return raw.subarray(0, bytes);
+}
+
+function readSnapshotOnce(path: string, runId: string, root: string): TraceCacheEntry {
   const rootFd = openRoot(root);
   let parentFd: number | undefined, fd: number | undefined;
   try {
@@ -157,18 +189,20 @@ function readSnapshot(path: string, runId: string, root: string): TraceCacheEntr
       return prior;
     }
     cache.delete(path);
-    const raw = Buffer.alloc(Number(stat.size) + 1);
-    let bytes = 0;
-    while (bytes < raw.length) {
-      const count = readSync(fd, raw, bytes, raw.length - bytes, null);
-      if (!count) break;
-      bytes += count;
+    // Growth alone is not proof of append-only writes: re-read the tail block before the old offset.
+    let base = 0;
+    let reusable = false;
+    if (prior && prior.identity === identity(stat) && stat.size >= BigInt(prior.offset)) {
+      base = prior.offset - prior.tail.length;
+      reusable = true;
     }
-    metrics.bytes_read += bytes;
-    const after = fstatSync(fd, { bigint: true });
-    if (revision(stat) !== revision(after) || bytes !== Number(stat.size))
-      throw badTrace("trace changed while reading; retry replay");
-    const entry = parseAppend(raw.subarray(0, bytes), prior, runId, stat);
+    let raw = readFrom(fd, base, stat);
+    if (reusable && prior && !raw.subarray(0, prior.tail.length).equals(prior.tail)) {
+      base = 0;
+      reusable = false;
+      raw = readFrom(fd, 0, stat);
+    }
+    const entry = parseAppend(raw, base, prior, reusable, runId, stat);
     retain(path, entry);
     return entry;
   } finally {

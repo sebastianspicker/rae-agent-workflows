@@ -1,4 +1,5 @@
 /** Initializes autonomous workspaces and restores immutable run requests. */
+import { randomUUID } from "node:crypto";
 import {
   constants as fsConstants,
   closeSync,
@@ -34,7 +35,7 @@ import {
   requireDirectory,
   runProcess,
 } from "./autonomous-git.js";
-import { reconcileRuntimeStateGuard } from "./runtime-state-guard.js";
+import { ensureRuntimeStateReadable } from "./runtime-state-guard.js";
 import { acquireExclusiveLock } from "../primitives/stale-lock.js";
 import { loadWorkflow, validateWorkflow, workflowDigest } from "../workflow/workflow-contract.js";
 import {
@@ -248,20 +249,34 @@ function initializeRun(
   initializationOutput: string;
 } {
   if (inPlace) assertCleanForInPlace(projectRoot);
-  const args = [PIPELINE_INIT, projectRoot];
+  // The caller names the run so a failed or timed-out init leaves a known worktree and branch to roll back.
+  const requestedRunId = randomUUID().toLowerCase();
+  const args = [PIPELINE_INIT, projectRoot, "--run-id", requestedRunId];
+  let worktreeRoot: string | null = null;
   if (!inPlace) {
     const gitCommonDir = gitOutput(projectRoot, [
       "rev-parse",
       "--path-format=absolute",
       "--git-common-dir",
     ]).trim();
-    args.push("--use-worktree", "--worktree-root", resolve(gitCommonDir, "rae-worktrees"));
+    worktreeRoot = resolve(gitCommonDir, "rae-worktrees");
+    args.push("--use-worktree", "--worktree-root", worktreeRoot);
   }
-  const proc = runProcess(process.execPath, args, {
-    cwd: engineRuntimeRoot,
-    timeout: 60_000,
-    label: "pipeline initialization",
-  });
+  let proc: ReturnType<typeof runProcess>;
+  try {
+    proc = runProcess(process.execPath, args, {
+      cwd: engineRuntimeRoot,
+      timeout: 300_000,
+      label: "pipeline initialization",
+    });
+  } catch (error) {
+    if (worktreeRoot) {
+      const workspaceRoot = resolve(worktreeRoot, requestedRunId);
+      const initializationOutput = `branch: pipeline/${requestedRunId}\n`;
+      rollbackNewWorktree(projectRoot, { workspaceRoot, initializationOutput }, false);
+    }
+    throw error;
+  }
   const runId = parseInitField(proc.stdout, "run_id");
   const workspaceRoot = requireDirectory(
     parseInitField(proc.stdout, "workspace_root"),
@@ -563,7 +578,8 @@ export function initializeOrResume(
       }
     }
     try {
-      reconcileRuntimeStateGuard(projectRoot, { recovery: true });
+      // Refuses a live owner instead of claiming its guard, then restores a stale one.
+      ensureRuntimeStateReadable(projectRoot);
     } catch (error) {
       const failure: Error & { pipelineStateUnsafe?: boolean } =
         error instanceof Error

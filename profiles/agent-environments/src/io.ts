@@ -1,7 +1,9 @@
 /** Anchored, no-follow profile I/O; receipts retain authorization and recovery policy. */
-import { closeSync, fstatSync, fsyncSync, readSync, writeSync } from "node:fs";
+import { closeSync, fchmodSync, fstatSync, fsyncSync, readSync, writeSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import {
+  duplicateDirectory,
+  mkdirAt,
   openDirectoryAt,
   openFileAt,
   openLinkedFileAt,
@@ -15,6 +17,8 @@ import {
 export interface FileState {
   exists: boolean;
   data: Buffer;
+  /** Permission bits of an existing file; ignored when comparing states. */
+  mode?: number;
 }
 export const absent = (): FileState => ({ exists: false, data: Buffer.alloc(0) });
 /** Managed profile files and backups are small configuration files. */
@@ -52,7 +56,7 @@ export function readNamed(parent: number, name: PathBytes, linked = true): FileS
       if (total > READ_LIMIT) throw new Error("Managed file exceeds the profile size limit");
       chunks.push(chunk.subarray(0, length));
     }
-    return { exists: true, data: Buffer.concat(chunks) };
+    return { exists: true, data: Buffer.concat(chunks), mode: metadata.mode & 0o777 };
   } finally {
     closeSync(fd);
   }
@@ -71,11 +75,35 @@ export function fileState(root: number, relative: string): FileState {
     closeSync(parent.fd);
   }
 }
+/** Mode for new profile files; the umask is applied on top. */
+export const defaultFileMode = (): number => 0o644 & ~process.umask();
+/** Creates missing ancestors of `relative` as 0755 (umask applied) instead of the bridge's 0700. */
+export function ensureParents(root: number, relative: string): void {
+  let fd = duplicateDirectory(root);
+  try {
+    for (const part of relative.split("/").slice(0, -1)) {
+      let next: number;
+      try {
+        next = openDirectoryAt(fd, part);
+      } catch (error) {
+        if (code(error) !== "ENOENT") throw error;
+        mkdirAt(fd, part, 0o755);
+        next = openDirectoryAt(fd, part);
+      }
+      closeSync(fd);
+      fd = next;
+    }
+  } finally {
+    closeSync(fd);
+  }
+}
+/** `mode`, when given, is set on the new file before it replaces or creates `name`. */
 export function writeNoClobber(
   parent: number,
   name: PathBytes,
   payload: Buffer,
   replace = false,
+  mode?: number,
 ): void {
   const temporary = `.profile-${randomUUID()}.new`;
   let present = false;
@@ -89,6 +117,7 @@ export function writeNoClobber(
         if (!written) throw new Error("Short profile write");
         offset += written;
       }
+      if (mode !== undefined) fchmodSync(fd, mode);
       fsyncSync(fd);
     } finally {
       closeSync(fd);

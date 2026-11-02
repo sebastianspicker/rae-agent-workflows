@@ -2,7 +2,7 @@
 import { Worker } from "node:worker_threads";
 import type { OperatorProject } from "./security.js";
 import type { OperatorRun } from "../static/js/types.js";
-import type { InternalRun } from "./runs.js";
+import type { InternalRun, RunView } from "./runs.js";
 import type { ReadMetrics } from "./catalog-read-metrics.js";
 export interface CatalogPageOptions {
   cursor?: string | null;
@@ -15,23 +15,24 @@ export interface CatalogPage {
 }
 export type CatalogRequest =
   | { id: number; action: "page"; project: OperatorProject; options: CatalogPageOptions }
+  | { id: number; action: "list"; project: OperatorProject }
   | {
       id: number;
       action: "locate";
       project: OperatorProject;
       runId: string;
-      view: "summary" | "detail";
+      view: RunView;
     };
 export type CatalogResponse = {
   id: number;
-  value?: CatalogPage | InternalRun;
+  value?: CatalogPage | InternalRun | InternalRun[];
   error?: string;
   status?: number;
   code?: string;
   metrics?: ReadMetrics;
 };
 interface Pending {
-  resolve(value: CatalogPage | InternalRun): void;
+  resolve(value: CatalogPage | InternalRun | InternalRun[]): void;
   reject(error: Error): void;
 }
 const MAX_PENDING = 32;
@@ -45,14 +46,20 @@ export class RunCatalog {
 
   async page(project: OperatorProject, options: CatalogPageOptions = {}): Promise<CatalogPage> {
     const result = await this.request({ id: ++this.sequence, action: "page", project, options });
-    if (!("runs" in result) || !Array.isArray(result.runs))
+    if (Array.isArray(result) || !("runs" in result) || !Array.isArray(result.runs))
       throw new Error("Invalid catalog page response");
     return result as CatalogPage;
+  }
+  /** Internal summaries of every run, so callers never walk the filesystem on the event loop. */
+  async list(project: OperatorProject): Promise<InternalRun[]> {
+    const result = await this.request({ id: ++this.sequence, action: "list", project });
+    if (!Array.isArray(result)) throw new Error("Invalid catalog list response");
+    return result;
   }
   async locate(
     project: OperatorProject,
     runId: string,
-    { view = "detail" }: { view?: "summary" | "detail" } = {},
+    { view = "detail" }: { view?: RunView } = {},
   ): Promise<InternalRun> {
     const result = await this.request({
       id: ++this.sequence,
@@ -61,7 +68,8 @@ export class RunCatalog {
       runId,
       view,
     });
-    if (!("workspaceRoot" in result)) throw new Error("Invalid catalog run response");
+    if (Array.isArray(result) || !("workspaceRoot" in result))
+      throw new Error("Invalid catalog run response");
     return result;
   }
   takeReadMetrics(): ReadMetrics {
@@ -69,7 +77,7 @@ export class RunCatalog {
     this.metrics = { bytesRead: 0, readCalls: 0, parseCalls: 0 };
     return result;
   }
-  private request(request: CatalogRequest): Promise<CatalogPage | InternalRun> {
+  private request(request: CatalogRequest): Promise<CatalogPage | InternalRun | InternalRun[]> {
     if (this.closed) return Promise.reject(new Error("run catalog is closed"));
     if (this.pending.size >= MAX_PENDING)
       return Promise.reject(Object.assign(new Error("run catalog is busy"), { status: 503 }));

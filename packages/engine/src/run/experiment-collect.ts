@@ -88,16 +88,19 @@ function record(value: unknown): Record<string, unknown> {
 }
 
 function envelopeFiles(runDir: string): string[] {
-  const root = resolve(runDir, "workflow", "attempts");
-  if (!existsSync(root)) return [];
-  return readdirSync(root, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
-    .flatMap((entry) =>
-      readdirSync(resolve(root, entry.name))
-        .filter((name) => name.endsWith(".json"))
-        .map((name) => resolve(root, entry.name, name)),
-    )
-    .sort();
+  // Failed v2.0 attempts live beside the resumable attempts so they still count as attempts.
+  return ["attempts", "failed-attempts"].flatMap((name) => {
+    const root = resolve(runDir, "workflow", name);
+    if (!existsSync(root)) return [];
+    return readdirSync(root, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .flatMap((entry) =>
+        readdirSync(resolve(root, entry.name))
+          .filter((file) => file.endsWith(".json"))
+          .map((file) => resolve(root, entry.name, file)),
+      )
+      .sort();
+  });
 }
 
 interface SnapshotNode {

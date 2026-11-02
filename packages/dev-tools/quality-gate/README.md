@@ -47,11 +47,19 @@ echo '{ ... }' | node dist/index.js
 | `coverage-min` | Coverage ratio of source IDs found in target paths meets threshold | number (0..1) |
 | `regex-match` | String at `path` matches regex | pattern string |
 
+`regex-match` refuses patterns that can take very long to match: groups,
+alternation, backreferences, lookaround, `.*`, `.+`, unbounded `{n,}`, doubled
+quantifiers, and two variable-length atoms (`*`, `+`, `?`, `{n,m}`) with no
+literal between them that the first cannot match (`a*a*b`, `\w+\w+\d`;
+`\d+\.\d+` is fine). Target strings are limited to 4096 characters.
+
 For `coverage-min`, supply:
 
 - `source_path` (array path),
 - optional `source_filter_path` and `source_filter_value`,
 - `target_paths` (one or more paths inspected for coverage IDs).
+
+Source entries without an ID count as uncovered.
 
 ## Output
 

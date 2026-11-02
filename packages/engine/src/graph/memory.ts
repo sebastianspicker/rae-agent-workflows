@@ -4,8 +4,11 @@ import {
   existsSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
@@ -22,6 +25,7 @@ import {
   safeRegularFile,
   sha256,
 } from "./core.js";
+import { registeredWorktreeRoots } from "../primitives/git-worktrees.js";
 import { loadGraph, readJsonl, sourceCurrent, tokens } from "./query.js";
 import type { GraphGraphNode } from "@rae/contracts";
 
@@ -172,9 +176,6 @@ export function recordRunMemory({
   projectRoot: string;
   runId: string;
 }): Record<string, unknown> {
-  const runDir = resolve(projectRoot, ".pipeline", "runs", runId);
-  validateCompletedMemoryRun(runDir);
-  const graph = loadGraph(projectRoot, runId);
   const paths = { ...memoryPaths(projectRoot), projectRoot };
   return withMemoryLock(paths, () => {
     const existing = deduplicatedByVersion(readJsonl<MemoryNode>(paths.facts));
@@ -182,20 +183,37 @@ export function recordRunMemory({
       readJsonl<MemoryNode>(paths.candidates).map((item) => [item.version_id, item]),
     );
     const decisions = readJsonl<MemoryDecision>(paths.decisions);
-    invalidateStaleFacts(paths, existing, decisions);
-    recordMemoryNodes(graph.nodes, projectRoot, paths, existing, candidates, decisions);
+    importRunMemory(paths, runId, existing, candidates, decisions);
     writeMemoryRecords(paths, existing, candidates, decisions);
     return memoryStatus(projectRoot);
   });
 }
 
-function validateCompletedMemoryRun(runDir: string): void {
+/** Folds one completed run into the in-memory records; nothing is written. */
+function importRunMemory(
+  paths: MemoryContextPaths,
+  runId: string,
+  existing: MemoryNode[],
+  candidates: Map<string, MemoryNode>,
+  decisions: MemoryDecision[],
+): void {
+  validateCompletedMemoryRun(resolve(paths.projectRoot, ".pipeline", "runs", runId));
+  const graph = loadGraph(paths.projectRoot, runId);
+  invalidateStaleFacts(paths, existing, decisions);
+  recordMemoryNodes(graph.nodes, paths.projectRoot, paths, existing, candidates, decisions);
+}
+
+function runCompleted(runDir: string): boolean {
   const controlPath = resolve(runDir, "operator-control.json");
   const tracePath = resolve(runDir, "trace.jsonl");
   const completedControl = existsSync(controlPath) && readJson(controlPath).status === "completed";
   const completedTrace =
     existsSync(tracePath) && readFileSync(tracePath, "utf8").includes('"event":"run_completed"');
-  if (!completedControl || !completedTrace)
+  return completedControl && completedTrace;
+}
+
+function validateCompletedMemoryRun(runDir: string): void {
+  if (!runCompleted(runDir))
     throw new Error("graph memory imports only completed runs with durable completion evidence");
 }
 
@@ -266,14 +284,11 @@ function recordMemoryFact(
   else existing[index] = storedNode;
 }
 
-function deduplicatedByVersion(records: readonly MemoryNode[]): MemoryNode[] {
-  const unique: MemoryNode[] = [];
-  for (const record of records) {
-    const index = unique.findIndex((item) => item.version_id === record.version_id);
-    if (index === -1) unique.push(record);
-    else unique[index] = record;
-  }
-  return unique;
+export function deduplicatedByVersion(records: readonly MemoryNode[]): MemoryNode[] {
+  // Map keeps first-insertion order while a later duplicate replaces the value.
+  const unique = new Map<string, MemoryNode>();
+  for (const record of records) unique.set(record.version_id, record);
+  return [...unique.values()];
 }
 
 function hasDecision(
@@ -445,18 +460,67 @@ export function decideMemory({
   });
 }
 
+/**
+ * Re-imports every completed run (oldest first) from the project root and every registered
+ * worktree, on top of ALL existing facts and candidates: a rebuild never deletes records, because
+ * runs execute in worktrees that may be gone while memory lives in the shared Git common dir.
+ * Decisions are kept. Nothing is written until the whole rebuild succeeded.
+ */
 export function rebuildMemory({
   projectRoot,
   runId,
 }: {
   projectRoot: string;
   runId?: string | null;
-}): { rebuilt: true; run_id: string | null } {
-  const paths = memoryPaths(projectRoot);
+}): { rebuilt: true; run_id: string | null; imported_runs: string[]; skipped_runs: string[] } {
+  const paths = { ...memoryPaths(projectRoot), projectRoot };
   return withMemoryLock(paths, () => {
-    atomicWrite(paths.facts, "");
-    atomicWrite(paths.candidates, "");
-    return { rebuilt: true, run_id: runId ?? null };
+    const decisions = readJsonl<MemoryDecision>(paths.decisions);
+    const existing = deduplicatedByVersion(readJsonl<MemoryNode>(paths.facts));
+    const candidates = new Map(
+      readJsonl<MemoryNode>(paths.candidates).map((item) => [item.version_id, item]),
+    );
+    const roots = new Set([
+      realpathSync(projectRoot),
+      ...(registeredWorktreeRoots(projectRoot) ?? []),
+    ]);
+    const runs = [...roots]
+      .flatMap((root) => {
+        const runsDir = resolve(root, ".pipeline", "runs");
+        if (!existsSync(runsDir)) return [];
+        return readdirSync(runsDir, { withFileTypes: true })
+          .filter((entry) => entry.isDirectory())
+          .map((entry) => ({
+            root,
+            id: entry.name,
+            dir: resolve(runsDir, entry.name),
+            mtime: statSync(resolve(runsDir, entry.name)).mtimeMs,
+          }));
+      })
+      .sort((a, b) => a.mtime - b.mtime || a.id.localeCompare(b.id));
+    const imported: string[] = [];
+    const skipped: string[] = [];
+    for (const run of runs) {
+      if (!runCompleted(run.dir)) {
+        skipped.push(run.id);
+        continue;
+      }
+      try {
+        importRunMemory(
+          { ...paths, projectRoot: run.root },
+          run.id,
+          existing,
+          candidates,
+          decisions,
+        );
+        imported.push(run.id);
+      } catch {
+        skipped.push(run.id); // a run without a projectable graph must not block the rebuild
+      }
+    }
+    if (runId) importRunMemory(paths, runId, existing, candidates, decisions);
+    writeMemoryRecords(paths, existing, candidates, decisions);
+    return { rebuilt: true, run_id: runId ?? null, imported_runs: imported, skipped_runs: skipped };
   });
 }
 

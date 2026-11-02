@@ -15,8 +15,8 @@ import {
   resolveCheckpointById,
   setRunStatus,
 } from "@rae/engine";
-import { discoverRuns, isResumableStatus, locateRun } from "./runs.js";
-import type { InternalRun } from "./runs.js";
+import { isResumableStatus, RunCatalog } from "./runs.js";
+import type { InternalRun, RunView } from "./runs.js";
 import type { LoadedExecutionProfile } from "./profiles.js";
 import { sanitizeLogText, scrubMessage } from "./security.js";
 import type { OperatorProject } from "./security.js";
@@ -43,11 +43,12 @@ type SpawnFunction = (
   args: readonly string[],
   options: Record<string, unknown>,
 ) => ChildProcessLike;
-type DiscoverRunsFunction = (
+type DiscoverRunsFunction = (project: OperatorProject) => InternalRun[] | Promise<InternalRun[]>;
+type LocateRunFunction = (
   project: OperatorProject,
-  options?: { view?: "summary" | "detail" },
-) => InternalRun[];
-type LocateRunFunction = (project: OperatorProject, runId: string) => InternalRun;
+  runId: string,
+  options?: { view?: RunView },
+) => InternalRun | Promise<InternalRun>;
 interface OwnedRun {
   child: ChildProcessLike;
   projectId: string;
@@ -112,6 +113,7 @@ function normalizedStartTask(task: unknown): string {
   if (Buffer.byteLength(task, "utf8") > TASK_MAX_BYTES) {
     throw httpError(413, `task exceeds ${TASK_MAX_BYTES} bytes`);
   }
+  if (task.includes("\0")) throw httpError(400, "task must not contain NUL bytes");
   if (task.trim().startsWith("--")) throw httpError(400, "task must not start with --");
   return task.trim();
 }
@@ -253,10 +255,13 @@ export class RunController {
 
   constructor({
     spawnFn = spawn as unknown as SpawnFunction,
-    discoverRunsFn = discoverRuns,
-    locateRunFn = locateRun,
+    catalog = new RunCatalog(),
+    discoverRunsFn = (project) => catalog.list(project),
+    locateRunFn = (project, runId, options) => catalog.locate(project, runId, options),
   }: {
     spawnFn?: SpawnFunction;
+    /** Async run discovery shared with the server; its worker starts on first use. */
+    catalog?: RunCatalog;
     discoverRunsFn?: DiscoverRunsFunction;
     locateRunFn?: LocateRunFunction;
   } = {}) {
@@ -421,26 +426,30 @@ export class RunController {
     return this.owned.child.kill(signal);
   }
 
-  refreshOwnership(): string | null {
+  async refreshOwnership(): Promise<string | null> {
     const owned = this.owned;
     if (!this.#ownedActive() || !owned || owned.runId) return this.ownedRunId;
-    const candidates = this.discoverRunsFn(owned.project, { view: "summary" }).filter(
+    const candidates = (await this.discoverRunsFn(owned.project)).filter(
       (run) => !owned.baselineIds.has(run.id),
     );
-    if (candidates.length === 1 && candidates[0]) {
-      owned.runId = candidates[0].id;
+    // Several new runs can appear at once; the one locked by our child is ours.
+    const mine =
+      candidates.find((run) => lockPid(run) === owned.child.pid) ??
+      (candidates.length === 1 ? candidates[0] : undefined);
+    if (mine && !owned.runId) {
+      owned.runId = mine.id;
       owned.discovered = true;
     }
     return this.ownedRunId;
   }
 
   /** True once a newly started child has recorded its run directory. */
-  #recorded(owned: OwnedRun): boolean {
+  async #recorded(owned: OwnedRun): Promise<boolean> {
     if (this.owned !== owned) return false;
     if (owned.runId) return owned.discovered === true;
     // A cheap directory listing gates the full discovery, which only runs once a candidate exists.
     if (!this.#hasNewRunDirectory(owned)) return false;
-    this.refreshOwnership();
+    await this.refreshOwnership();
     return owned.discovered === true;
   }
 
@@ -471,7 +480,7 @@ export class RunController {
       };
       const deadline = setTimeout(finish, EARLY_EXIT_WAIT_MS);
       const poll = setInterval(() => {
-        if (this.#recorded(owned)) finish();
+        void this.#recorded(owned).then((recorded) => recorded && finish(), finish);
       }, OWNERSHIP_POLL_MS);
       void owned.settled.then(finish);
     });
@@ -487,9 +496,8 @@ export class RunController {
   ): Promise<JsonRecord> {
     const { task, checkpointPolicy, provider, model } = validateStartInput(body, executionProfile);
     this.#assertNoProjectCleanup(project);
-    const baselineIds = new Set(
-      this.discoverRunsFn(project, { view: "summary" }).map((run) => run.id),
-    );
+    const baselineIds = new Set((await this.discoverRunsFn(project)).map((run) => run.id));
+    this.#assertNoProjectCleanup(project); // re-check after the last await, before spawning
     const owned = this.#spawn(
       project,
       [
@@ -514,11 +522,11 @@ export class RunController {
         `run exited before it was recorded: ${scrubFailure(failure, [project.root])}`,
       );
     }
-    return { accepted: true, run_id: this.refreshOwnership() };
+    return { accepted: true, run_id: await this.refreshOwnership() };
   }
 
-  stop(project: OperatorProject, runId: string): unknown {
-    const run = this.locateRunFn(project, runId);
+  async stop(project: OperatorProject, runId: string): Promise<unknown> {
+    const run = await this.locateRunFn(project, runId, { view: "summary" });
     if (!["running", "waiting", "stop-requested"].includes(run.status ?? "")) {
       throw httpError(409, `cannot request stop for run status: ${run.status}`);
     }
@@ -546,7 +554,7 @@ export class RunController {
 
   async resume(project: OperatorProject, runId: string): Promise<JsonRecord> {
     this.#assertNotCleaning(project, runId);
-    const run = this.locateRunFn(project, runId);
+    const run = await this.locateRunFn(project, runId, { view: "checkpoints" });
     if (run.runtime_active) throw httpError(409, "run already has an active autonomous lock");
     if ((run.checkpoints ?? []).some((item) => item.status === "pending")) {
       throw httpError(409, "resolve the pending checkpoint before resume");
@@ -560,6 +568,7 @@ export class RunController {
       throw httpError(409, `cannot resume run status: ${run.status}`);
     }
     const provider = validateResumeRequest(run);
+    this.#assertNotCleaning(project, runId); // re-check after the last await, before spawning
     const owned = this.#spawn(
       project,
       [
@@ -584,11 +593,12 @@ export class RunController {
     return { accepted: true, run_id: run.id };
   }
 
-  interrupt(project: OperatorProject, runId: string, body: JsonRecord): JsonRecord {
+  async interrupt(project: OperatorProject, runId: string, body: JsonRecord): Promise<JsonRecord> {
     requireTypedConfirmation(body, runId);
     this.#assertNotCleaning(project, runId);
-    const run = this.locateRunFn(project, runId);
-    this.refreshOwnership();
+    const run = await this.locateRunFn(project, runId, { view: "summary" });
+    await this.refreshOwnership();
+    this.#assertNotCleaning(project, runId); // re-check after the last await
     const owned = this.owned;
     if (!owned || owned.projectId !== project.id || owned.runId !== runId || !this.#ownedActive()) {
       throw httpError(409, "interrupt is allowed only for the active server-owned process");
@@ -613,8 +623,13 @@ export class RunController {
     };
   }
 
-  decideCheckpoint(project: OperatorProject, runId: string, body: JsonRecord): unknown {
-    const run = this.locateRunFn(project, runId);
+  async decideCheckpoint(
+    project: OperatorProject,
+    runId: string,
+    body: JsonRecord,
+  ): Promise<unknown> {
+    const run = await this.locateRunFn(project, runId, { view: "checkpoints" });
+    this.#assertNotCleaning(project, runId); // re-check after the last await
     ensureRuntimeStateReadable(run.workspaceRoot, { expectedRunId: run.id });
     const allowed = new Set(["checkpoint_id", "decision", "decision_id", "rationale"]);
     for (const key of Object.keys(body)) {
@@ -664,7 +679,7 @@ export class RunController {
   async cleanup(project: OperatorProject, runId: string, body: JsonRecord): Promise<JsonRecord> {
     requireTypedConfirmation(body, runId);
     this.#assertNotCleaning(project, runId);
-    const run = this.locateRunFn(project, runId);
+    const run = await this.locateRunFn(project, runId, { view: "summary" });
     if (run.workspace_mode !== "git-worktree") {
       throw httpError(409, "only pipeline-owned worktree runs can be cleaned up");
     }
@@ -675,6 +690,7 @@ export class RunController {
       throw httpError(409, "cannot clean up an active server-owned run");
     }
     ensureRuntimeStateReadable(run.workspaceRoot, { expectedRunId: run.id });
+    this.#assertNotCleaning(project, runId); // re-check after the last await, same sync block
     const key = this.#cleanupKey(project, runId);
     this.cleanupsInFlight.add(key);
     try {
@@ -725,6 +741,21 @@ export class RunController {
         [project.root, run.workspaceRoot],
       )}`,
     );
+  }
+}
+
+/** The pid recorded in a run's engine lock, or null when it is absent or unreadable. */
+function lockPid(run: InternalRun): number | null {
+  try {
+    const lock = JSON.parse(
+      readFileSync(
+        resolve(run.workspaceRoot, ".pipeline", "runs", run.id, "autonomous.lock"),
+        "utf8",
+      ),
+    ) as JsonRecord;
+    return typeof lock.pid === "number" ? lock.pid : null;
+  } catch {
+    return null;
   }
 }
 

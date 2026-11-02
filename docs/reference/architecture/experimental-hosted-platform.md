@@ -17,7 +17,7 @@ currently connects them. The platform is not a production deployment.
 
 The control process loads TOML configuration, requires explicit database
 migrations, checks readiness, and serves a raw Node HTTP surface. PostgreSQL
-stores revisions, runs, nodes, leases, attempts, events, an outbox, workers,
+stores revisions, runs, nodes, leases, attempts, events, workers,
 and artifact metadata. The worker polls the control plane over HTTPS, renews
 its lease, maps logical projects to private canonical Git roots, verifies
 local profile digests, runs the sandboxed Codex child, and reports its result.

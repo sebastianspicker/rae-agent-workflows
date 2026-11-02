@@ -214,6 +214,13 @@ worktree cleanup operation. It waits for that operation and returns `200` with
 flight, start in the same project and resume, interrupt or cleanup of that run
 return `409`.
 
+A run counts as active (`runtime_active`, workflow edits blocked) only while the
+owner recorded in its `autonomous.lock` is alive. After a crash the stale lock
+no longer blocks workflow edits, and Resume is offered for `running` and
+`stop-requested` runs whose owner is gone; the engine's resume clears the stop
+request. A `waiting` run always counts as active. A task containing a NUL byte
+is rejected with `400`.
+
 Compatibility note: earlier versions answered cleanup with `202` and
 `{ "pid": … }` before the operation finished. Clients that polled for completion
 or read `pid` must now read `exit_code` from the `200` response instead.

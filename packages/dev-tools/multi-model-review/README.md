@@ -20,6 +20,9 @@ Accepts a non-empty `reviewer_findings` array and:
 3. evaluates cost and benefit; and
 4. returns a structured review report.
 
+When two reviewers use the same finding ID, the later one becomes
+`<reviewer_id>:<id>` so every ID in the report is unique.
+
 ### drift-detect
 
 Compares a source document with the file named by

@@ -86,22 +86,6 @@ export function recommend(risk: Risk, cost: Cost): Rec {
   return RECOMMENDATION_MATRIX[risk][cost];
 }
 
-export function costly(cost: Cost): boolean {
-  return cost === "high" || cost === "prohibitive";
-}
-
-export function isCheap(cost: Cost): boolean {
-  return cost === "trivial" || cost === "low";
-}
-
-export function recommendHighRisk(cost: Cost): Rec {
-  return isCheap(cost) ? "fix-now" : "fix-before-ship";
-}
-
-export function recommendModerateRisk(cost: Cost): Rec {
-  return isCheap(cost) ? "fix-before-ship" : "defer";
-}
-
 export function analyzeCostBenefit(findings: Finding[]): CostBenefitEntry[] {
   return findings.map((f) => {
     const severity: Severity = f.severity;

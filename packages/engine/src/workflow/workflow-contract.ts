@@ -517,7 +517,7 @@ function validateTopology(workflow: WorkflowShape): void {
   assertEntryAndTerminalTopology(workflow, graph);
   assertJoinTopology(workflow, graph);
   if (workflow.schema_version === "2.1.0") validateV21Topology(workflow, nodes, graph);
-  if (workflow.schema_version === "2.2.0") validateV22Topology(workflow, nodes, graph);
+  if (workflow.schema_version === "2.2.0") validateV22Topology(workflow, nodes);
   const dom = dominators(workflow, graph.incoming);
   assertWriterDominance(workflow, dom);
   assertVerificationDominance(workflow, dom);
@@ -731,19 +731,10 @@ function assertV22FailureEdges(
 }
 
 /** Enforces the deliberately narrow v2.2 wait contract independently of v2.1. */
-function validateV22Topology(
-  workflow: WorkflowShape,
-  nodes: Map<string, WorkflowNodeShape>,
-  graph: WorkflowGraph,
-): void {
+function validateV22Topology(workflow: WorkflowShape, nodes: Map<string, WorkflowNodeShape>): void {
   validatePayloadContracts(workflow.signal_contracts ?? {});
   assertV22NodeShapes(workflow);
   assertV22FailureEdges(workflow, nodes);
-  // Reuse the normal graph analysis so a wait cannot create an unbounded cycle.
-  assertBoundedStreamDepth(new Map());
-  if ((graph.incoming.get(workflow.entry_node) ?? []).length !== 0) {
-    throw contractError("entry node has predecessors");
-  }
 }
 
 function workflowVersion(value: unknown): string | undefined {

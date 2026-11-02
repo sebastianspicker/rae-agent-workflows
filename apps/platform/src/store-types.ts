@@ -80,6 +80,8 @@ export interface ClaimInput {
   longPollSeconds?: number;
   projects?: string[];
   idempotencyKey: string;
+  /** Aborted when the caller hangs up; the claim then returns null without leasing work. */
+  signal?: AbortSignal;
 }
 export interface Claim {
   attemptId: string;
@@ -159,13 +161,6 @@ export interface MemoryEvent {
   traceparent: string | null;
   createdAt: string;
   [key: string]: unknown;
-}
-export interface OutboxRecord {
-  id: number;
-  topic: string;
-  payload: unknown;
-  createdAt: string;
-  deliveredAt: string | null;
 }
 export interface SignalInput {
   runId: string;

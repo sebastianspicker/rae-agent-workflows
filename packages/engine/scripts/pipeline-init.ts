@@ -3,7 +3,8 @@
 import { execFileSync } from "node:child_process";
 import { closeSync, fsyncSync, mkdirSync, readSync, realpathSync, writeSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { isAbsolute, relative, resolve } from "node:path";
+import { relative, resolve } from "node:path";
+import { isContainedRelative } from "../src/primitives/paths.js";
 import { openDirectoryAt, openFileAt, openParent, openRoot, renameAt } from "@rae/fs-bridge";
 
 const PHASE_ORDER = [
@@ -19,12 +20,15 @@ const PHASE_ORDER = [
   "release-readiness",
 ] as const;
 
+const RUN_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
 interface InitOptions {
   projectRoot: string;
   useWorktree: boolean;
   worktreeRoot: string | null;
   branchPrefix: string;
   cleanupTarget: string | null;
+  runId: string | null;
 }
 
 interface OwnershipState {
@@ -51,13 +55,14 @@ function shellQuote(value: string): string {
 }
 
 function usage(): string {
-  return `Usage: rae-pipeline-init [project-root] [--use-worktree] [--worktree-root <path>] [--branch-prefix <prefix>]
+  return `Usage: rae-pipeline-init [project-root] [--use-worktree] [--worktree-root <path>] [--branch-prefix <prefix>] [--run-id <uuid>]
        rae-pipeline-init --cleanup-worktree <path>
 
 Options:
   --use-worktree            Create a dedicated git worktree for the run.
   --worktree-root <path>    Parent directory for worktrees. Default: <git-root>/.worktrees
   --branch-prefix <prefix>  Branch prefix for isolated worktrees. Default: pipeline
+  --run-id <uuid>           Use this lowercase UUID as the run id. Default: a new random UUID.
   --cleanup-worktree <path> Remove a clean, pipeline-owned worktree and its branch. Idempotent.
   -h, --help                Show this help.\n`;
 }
@@ -75,6 +80,7 @@ function parseArguments(args: string[]): InitOptions {
     worktreeRoot: null,
     branchPrefix: "pipeline",
     cleanupTarget: null,
+    runId: null,
   };
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index]!;
@@ -83,7 +89,10 @@ function parseArguments(args: string[]): InitOptions {
       options.worktreeRoot = requiredValue(args, index++, argument);
     else if (argument === "--branch-prefix")
       options.branchPrefix = requiredValue(args, index++, argument);
-    else if (argument === "--cleanup-worktree")
+    else if (argument === "--run-id") {
+      options.runId = requiredValue(args, index++, argument);
+      if (!RUN_ID_PATTERN.test(options.runId)) throw new Error("--run-id must be a lowercase UUID");
+    } else if (argument === "--cleanup-worktree")
       options.cleanupTarget = requiredValue(args, index++, argument);
     else if (argument === "-h" || argument === "--help") {
       process.stdout.write(usage());
@@ -171,7 +180,7 @@ function assertOwnedCleanup(worktree: string, state: OwnershipState): ValidatedO
     throw new Error("refusing cleanup: target does not match owned worktree path");
   }
   const inside = relative(canonical.worktree_root, worktree);
-  if (!inside || inside.startsWith("..") || isAbsolute(inside)) {
+  if (!inside || !isContainedRelative(inside)) {
     throw new Error("refusing cleanup: target is outside owned worktree root");
   }
   return canonical;
@@ -366,7 +375,7 @@ function initialize(options: InitOptions): void {
   let mode = "main-repo";
   let branch = git(projectRoot, ["branch", "--show-current"], true);
   let worktreeRoot: string | null = null;
-  const runId = randomUUID().toLowerCase();
+  const runId = options.runId ?? randomUUID().toLowerCase();
   if (options.useWorktree) {
     const gitRoot = git(projectRoot, ["rev-parse", "--show-toplevel"], true);
     if (!gitRoot) throw new Error("--use-worktree requires a git repository");

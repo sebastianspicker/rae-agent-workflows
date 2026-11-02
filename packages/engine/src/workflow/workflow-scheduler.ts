@@ -1,6 +1,6 @@
 /** Deterministically schedules graph workflow nodes with reader and writer isolation. */
-import { createHash, randomUUID } from "node:crypto";
-import { canonicalJson, validateWorkflow, workflowDigest } from "./workflow-contract.js";
+import { randomUUID } from "node:crypto";
+import { validateWorkflow, workflowDigest } from "./workflow-contract.js";
 import { assembleBoundedWorkflowContext } from "./workflow-context-bounded.js";
 import { scheduleWorkflowV21 } from "./workflow-scheduler-v21.js";
 import { scheduleWorkflowV22 } from "./workflow-scheduler-v22.js";
@@ -8,6 +8,8 @@ import {
   abortOnStop,
   conditionMatches as edgeConditionMatches,
   contextInputs,
+  digest,
+  payloadField,
   decideBoundedRepeat,
   drainSettled,
   gateProgress,
@@ -18,6 +20,7 @@ import {
   MAX_LOOP_ITERATION,
   ownershipPlanInput,
   persistEnvelope,
+  persistFailedAttempt,
   runBudgetStop,
 } from "./workflow-scheduler-common.js";
 import type { LoopLedger, LoopState, RunBudgetStop } from "./workflow-scheduler-common.js";
@@ -76,11 +79,6 @@ type BoundedContextAssembler = (options: Record<string, unknown>) => {
   evidence: Record<string, unknown>;
 };
 
-function payloadField(payload: JsonValue, key: string): JsonValue | undefined {
-  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return undefined;
-  return payload[key];
-}
-
 export interface ScheduleWorkflowOptions {
   workflow: WorkflowContract;
   runId: string;
@@ -102,10 +100,6 @@ export interface ScheduleWorkflowOptions {
   contextMode?: string;
   /** Wall clock in milliseconds; injectable so tests can exhaust `max_wall_clock_seconds`. */
   now?: () => number;
-}
-
-function digest(value: unknown): string {
-  return createHash("sha256").update(canonicalJson(value)).digest("hex");
 }
 
 function freezeEnvelope(
@@ -537,6 +531,23 @@ export async function scheduleWorkflow({
     } catch (error) {
       const flagged = error as { workflowWaiting?: unknown; workflowTerminal?: unknown } | null;
       if (flagged?.workflowWaiting === true || flagged?.workflowTerminal === true) throw error;
+      if (!abort.signal.aborted) {
+        const payload = { status: "failed", message: String(error) };
+        persistFailedAttempt(
+          runDir,
+          freezeEnvelope({
+            run_id: runId,
+            workflow_digest: workflowHash,
+            node_id: node.id,
+            attempt,
+            loop_iteration: loopIteration,
+            status: "failed",
+            payload,
+            input_digest: inputDigest,
+            output_digest: digest(payload),
+          }),
+        );
+      }
       emit("node_attempt_failed", {
         node_id: node.id,
         attempt,

@@ -16,6 +16,8 @@ import {
   fileState,
   readNamed,
   same,
+  defaultFileMode,
+  ensureParents,
   writeNoClobber,
   writeRecovery,
   type FileState,
@@ -27,6 +29,8 @@ export interface Mutation {
   relative: string;
   expected: FileState;
   replacement: Buffer | null;
+  /** Permission bits for the replacement; defaults to the replaced file's, else 0644 & ~umask. */
+  mode?: number;
 }
 interface Receipt extends Mutation {
   parent: number;
@@ -211,7 +215,13 @@ async function apply(root: number, receipt: Receipt, action: string, hook: Hook)
   receipt.stage = "captured";
   if (receipt.replacement !== null) {
     await hook(`${action}-before-replacement`, receipt.relative);
-    writeNoClobber(receipt.parent, receipt.name, receipt.replacement);
+    writeNoClobber(
+      receipt.parent,
+      receipt.name,
+      receipt.replacement,
+      false,
+      receipt.mode ?? receipt.expected.mode ?? defaultFileMode(),
+    );
   }
   receipt.stage = "installed";
   await hook(`${action}-after-replacement`, receipt.relative);
@@ -256,7 +266,13 @@ async function rollbackReceipt(root: number, receipt: Receipt, hook: Hook): Prom
       }
     } else {
       try {
-        writeNoClobber(receipt.parent, receipt.name, receipt.expected.data);
+        writeNoClobber(
+          receipt.parent,
+          receipt.name,
+          receipt.expected.data,
+          false,
+          receipt.expected.mode,
+        );
       } catch {
         retain(receipt, capture);
         return false;
@@ -367,6 +383,7 @@ export async function transact(
     writeNoClobber(root, JOURNAL, journalBytes(journal), true);
     for (const [index, mutation] of mutations.entries()) {
       if (mutation.relative === ".rae-profile-install.json") await hook(`${action}-after-files`);
+      if (mutation.replacement !== null) ensureParents(root, mutation.relative);
       const parent = openParent(root, mutation.relative, mutation.replacement !== null);
       const entry = journal.entries[index];
       const receipt: Receipt = {

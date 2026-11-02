@@ -38,6 +38,8 @@ export interface RewriteResult {
   backupRemoteRetained?: string;
   /** Local refs other than the recovery ref that still contain a rewritten original commit. */
   residualRefs?: string[];
+  /** An --apply found no commit to rewrite, so no refs were created or pushed. */
+  nothingToChange?: boolean;
   /** Non-fatal problems after a completed rewrite. */
   warnings?: string[];
 }
@@ -79,7 +81,7 @@ export function git(
   const child = spawnSync("git", ["-C", path, ...args], {
     input,
     env: environment,
-    maxBuffer: 20 * 1024 * 1024,
+    maxBuffer: 256 * 1024 * 1024, // rev-list prints 41 bytes per commit; fits ~1M commits
   });
   if (child.error) throw child.error;
   if (child.status !== 0)
@@ -303,6 +305,20 @@ export function rewriteRepository(repository: Repository, options: RewriteOption
       if (changed) result.changedCommits++;
       result.invalidatedSignatures += transformed.invalidatedSignatures;
     }
+    return result;
+  }
+  // Scan first: a no-op apply must not create recovery/transaction refs or push.
+  const scanned = new Map<string, string>();
+  const unchanged = text(path, "rev-list", "--reverse", "--topo-order", original)
+    .split("\n")
+    .every((commit) => {
+      const raw = git(path, ["cat-file", "commit", commit]);
+      scanned.set(commit, commit);
+      return transformCommit(raw, scanned, options.targets).bytes.equals(raw);
+    });
+  if (unchanged) {
+    result.commits = scanned.size;
+    result.nothingToChange = true;
     return result;
   }
   const guard = referenceTransactions(path, branch, original);

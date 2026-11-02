@@ -15,7 +15,7 @@ import { createRequire } from "node:module";
 import { RalphError } from "./errors.js";
 import { atomicWriteRelative } from "./safe-fs.js";
 import { appendProgress, recordLearning, writeProgress } from "./state.js";
-import { isoUtc, isoUtcCompact, safeRelativePath } from "./util.js";
+import { isWithin, isoUtc, isoUtcCompact, safeRelativePath } from "./util.js";
 import type { Mode, Prd, RuntimePaths, Story } from "./types.js";
 
 const EMBEDDED_FILES = [
@@ -102,9 +102,36 @@ function canonicalDestination(path: string): string {
   return join(realpathSync.native(cursor), ...missing);
 }
 
-export function bootstrap(target: string, force = false): string {
+/** Names --force may replace inside a receipt-marked install; everything else there is the user's. */
+const OWNED_PAYLOAD = [
+  "dist",
+  "node_modules",
+  "package.json",
+  ...EMBEDDED_FILES.filter((file) => file !== "learnings.md"),
+];
+
+/** Checks every input of an install before anything in the destination is touched. */
+function assertBootstrapSource(sourceRoot: string, bridgeRoot: string): void {
+  if (!existsSync(join(sourceRoot, "dist", "src", "cli.js")))
+    throw new RalphError("compiled Ralph runtime is missing; run npm run build first");
+  const missing = ["package.json", ...EMBEDDED_FILES].filter(
+    (file) => !existsSync(join(sourceRoot, file)),
+  );
+  for (const item of ["package.json", "dist", join("build", "Release", BRIDGE_ADDON)])
+    if (!existsSync(join(bridgeRoot, item))) missing.push(join(bridgeRoot, item));
+  for (const dependency of EMBEDDED_DEPENDENCIES) {
+    try {
+      require.resolve(`${dependency}/package.json`);
+    } catch {
+      missing.push(dependency);
+    }
+  }
+  if (missing.length > 0)
+    throw new RalphError(`cannot bootstrap; missing build inputs: ${missing.join(", ")}`);
+}
+
+export function bootstrap(target: string, force = false, sourceRoot = packageRoot()): string {
   const targetRoot = existingDirectory(target, "target repo");
-  const sourceRoot = packageRoot();
   const claude = join(targetRoot, ".claude");
   const destination = join(claude, "ralph-audit");
   if (existsSync(claude)) {
@@ -114,12 +141,29 @@ export function bootstrap(target: string, force = false): string {
   }
   if (existsSync(destination) && !force)
     throw new RalphError(`destination already exists: ${destination} (use --force to overwrite)`);
+  const bridgeRoot = resolve(sourceRoot, "../fs-bridge");
+  assertBootstrapSource(sourceRoot, bridgeRoot);
   if (existsSync(destination)) {
     if (!isRalphInstall(destination))
       throw new RalphError(
         `refusing to replace ${destination}: it has no Ralph install receipt (${INSTALL_MARKER})`,
       );
-    rmSync(destination, { recursive: true, force: true });
+    // A symlinked or non-directory parent would make the deletes below follow it out of the install.
+    for (const name of OWNED_PAYLOAD) {
+      const parts = name.split("/").slice(0, -1);
+      for (let depth = 1; depth <= parts.length; depth += 1) {
+        const parent = join(destination, ...parts.slice(0, depth));
+        const entry = lstatSync(parent, { throwIfNoEntry: false });
+        if (!entry) break;
+        if (entry.isSymbolicLink() || !entry.isDirectory())
+          throw new RalphError(
+            `refusing to replace ${destination}: ${parent} is not a plain directory`,
+          );
+      }
+    }
+    // The receipt is overwritten below. prd.json, .runtime/, audit/ and learnings.md stay.
+    for (const name of OWNED_PAYLOAD)
+      rmSync(join(destination, name), { recursive: true, force: true });
   }
   mkdirSync(destination, { recursive: true, mode: 0o700 });
   const version = (
@@ -136,14 +180,12 @@ export function bootstrap(target: string, force = false): string {
   for (const relativePath of EMBEDDED_FILES) {
     const source = join(sourceRoot, relativePath);
     const output = join(destination, relativePath);
+    if (relativePath === "learnings.md" && existsSync(output)) continue;
     mkdirSync(dirname(output), { recursive: true, mode: 0o700 });
     cpSync(source, output, { preserveTimestamps: true });
   }
   const compiled = join(sourceRoot, "dist", "src");
-  if (!existsSync(join(compiled, "cli.js")))
-    throw new RalphError("compiled Ralph runtime is missing; run npm run build first");
   cpSync(compiled, join(destination, "dist", "src"), { recursive: true });
-  const bridgeRoot = resolve(sourceRoot, "../fs-bridge");
   // The loader needs only the compiled addon at build/Release; CMake state embeds local paths.
   for (const item of ["package.json", "dist", join("build", "Release", BRIDGE_ADDON)]) {
     const output = join(destination, "node_modules", "@rae", "fs-bridge", item);
@@ -205,7 +247,7 @@ export function syncAgents(rootPath: string): void {
   if (current.split("\n").includes(latest)) return;
   const heading = "## Learned Patterns";
   const next = current.includes(heading)
-    ? current.replace(heading, `${heading}\n\n${latest}`)
+    ? current.replace(heading, () => `${heading}\n\n${latest}`)
     : `${current.trimEnd()}\n\n${heading}\n\n${latest}\n`;
   atomicWriteRelative(root, "AGENTS.md", next);
 }
@@ -261,14 +303,19 @@ export function archiveState(
   label = "",
   reason = "",
   force = false,
+  /** `prdCopy` is the PRD to archive instead of source/prd.json; reports live under `repoRoot`. */
+  options: { prdCopy?: string; repoRoot?: string } = {},
 ): string {
   const source = existingDirectory(sourcePath, "source root");
+  const repoRoot = options.repoRoot ? existingDirectory(options.repoRoot, "repo root") : source;
   const archive = resolve(archivePath);
   if (archive === dirname(archive))
     throw new RalphError("archive root must not be filesystem root");
   mkdirSync(archive, { recursive: true, mode: 0o700 });
   const canonicalArchive = realpathSync.native(archive);
-  const prdFile = join(source, "prd.json");
+  // A missing previous copy (first run after an upgrade) must not archive the new project's PRD.
+  const missingCopy = Boolean(options.prdCopy) && !existsSync(options.prdCopy as string);
+  const prdFile = options.prdCopy && !missingCopy ? options.prdCopy : join(source, "prd.json");
   const prd = existsSync(prdFile) ? (JSON.parse(readFileSync(prdFile, "utf8")) as Prd) : undefined;
   const target = join(
     canonicalArchive,
@@ -278,12 +325,25 @@ export function archiveState(
     throw new RalphError(`archive target already exists: ${target} (use --force)`);
   if (existsSync(target)) rmSync(target, { recursive: true, force: true });
   mkdirSync(target, { mode: 0o700 });
-  const items = ["prd.json", "progress.txt", "learnings.md"];
-  if (prd?.defaults.report_dir) items.push(safeRelativePath(prd.defaults.report_dir));
-  for (const item of items)
-    if (existsSync(join(source, item)))
-      cpSync(join(source, item), join(target, item), { recursive: true });
-  const metadata = `archived_at_utc=${isoUtc()}\n${reason ? `reason=${reason}\n` : ""}source_root=${source}\n`;
+  const copy = (from: string, to: string): void => {
+    if (existsSync(from)) cpSync(from, join(target, to), { recursive: true });
+  };
+  if (!missingCopy) copy(prdFile, "prd.json");
+  for (const item of ["progress.txt", "learnings.md"]) copy(join(source, item), item);
+  if (prd?.defaults.report_dir) {
+    const reportDir = safeRelativePath(prd.defaults.report_dir, "defaults.report_dir");
+    const reports = resolve(repoRoot, reportDir);
+    if (!isWithin(repoRoot, reports))
+      throw new RalphError(`defaults.report_dir escapes the repository: ${reportDir}`);
+    if (
+      existsSync(reports) &&
+      !isWithin(realpathSync.native(repoRoot), realpathSync.native(reports))
+    )
+      throw new RalphError(`defaults.report_dir resolves outside the repository: ${reportDir}`);
+    mkdirSync(dirname(join(target, reportDir)), { recursive: true, mode: 0o700 });
+    copy(reports, reportDir);
+  }
+  const metadata = `archived_at_utc=${isoUtc()}\n${reason ? `reason=${reason}\n` : ""}source_root=${source}\n${missingCopy ? "prd=missing-previous-copy\n" : ""}`;
   atomicWriteRelative(target, "archive.meta", metadata);
   return target;
 }

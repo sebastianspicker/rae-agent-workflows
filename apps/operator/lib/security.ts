@@ -209,6 +209,31 @@ function pathVariants(path: string): string[] {
   return [...variants];
 }
 
+/** Roots whose path spellings are resolved once when added, not on every scrub. */
+export class KnownRoots implements Iterable<string> {
+  private readonly spellings = new Map<string, string[]>();
+
+  constructor(roots: Iterable<string> = []) {
+    for (const root of roots) this.add(root);
+  }
+
+  add(root: string): void {
+    if (!this.spellings.has(root)) this.spellings.set(root, pathVariants(root));
+  }
+
+  delete(root: string): void {
+    this.spellings.delete(root);
+  }
+
+  variants(): string[] {
+    return [...this.spellings.values()].flat();
+  }
+
+  [Symbol.iterator](): Iterator<string> {
+    return this.spellings.keys();
+  }
+}
+
 function looksLikeSecret(token: string): boolean {
   return !KEPT_IDENTIFIERS.some((pattern) => pattern.test(token));
 }
@@ -220,8 +245,8 @@ function looksLikeSecret(token: string): boolean {
 export function scrubMessage(text: string, roots: Iterable<string> = []): string {
   let value = text;
   const replacements: Array<[string, string]> = [
-    ...[...roots].flatMap((root) =>
-      pathVariants(root).map((variant): [string, string] => [variant, "<project>"]),
+    ...(roots instanceof KnownRoots ? roots.variants() : [...roots].flatMap(pathVariants)).map(
+      (variant): [string, string] => [variant, "<project>"],
     ),
     ...pathVariants(homedir()).map((variant): [string, string] => [variant, "<home>"]),
     ...pathVariants(tmpdir()).map((variant): [string, string] => [variant, "<tmp>"]),

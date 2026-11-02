@@ -3,8 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { openDirectoryAt, openFileAt, openRoot, renameAt, unlinkAt } from "@rae/fs-bridge";
+import { CLAIM_ID_PATTERN } from "./store-types.js";
 
-const SAFE_ID = /^[A-Za-z0-9._-]{1,128}$/;
 const MAX_SCHEMA_BYTES = 1024 * 1024;
 const MAX_ARTIFACT_BYTES = 20 * 1024 * 1024;
 interface Identity {
@@ -52,7 +52,7 @@ export function prepareHostedAttempt(
   attemptId: string,
   outputSchema: Record<string, unknown>,
 ) {
-  if (!SAFE_ID.test(runId) || !SAFE_ID.test(attemptId))
+  if (!CLAIM_ID_PATTERN.test(runId) || !CLAIM_ID_PATTERN.test(attemptId))
     throw new Error("hosted runtime run and attempt identifiers are invalid");
   const root = fs.realpathSync(projectRoot);
   const schemaBytes = Buffer.from(`${JSON.stringify(outputSchema)}\n`);

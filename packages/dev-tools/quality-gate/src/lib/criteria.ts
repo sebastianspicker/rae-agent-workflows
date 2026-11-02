@@ -30,8 +30,57 @@ export function hasUnsafeRegexStructure(pattern: string): boolean {
     hasRegexLookaround(pattern) ||
     hasRegexGreedyWildcard(pattern) ||
     hasRegexRepeatedQuantifier(pattern) ||
-    hasRegexUnboundedRange(pattern)
+    hasRegexUnboundedRange(pattern) ||
+    hasTooManyQuantifiers(pattern)
   );
+}
+
+/**
+ * Two variable-length atoms with nothing between them that separates their alphabets give O(n^3)
+ * under an unanchored search (`a*a*b`); one gives O(n^2), about 16M steps at 4096 characters.
+ */
+export function hasTooManyQuantifiers(pattern: string): boolean {
+  const canMatch = (atom: string, char: string): boolean => {
+    try {
+      return new RegExp(`^${atom}$`).test(char);
+    } catch {
+      return true;
+    }
+  };
+  let lastVariable: string | undefined;
+  for (let i = 0; i < pattern.length; ) {
+    const start = i;
+    const ch = pattern[i] as string;
+    i++;
+    if (ch === "^" || ch === "$") continue;
+    if (ch === "\\") {
+      // Multi-character escapes (\xHH, \uHHHH, \u{...}, \p{...}, \cX) are one atom, never a separator.
+      const escapeAtom =
+        /^\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F]+\}|u[0-9a-fA-F]{4}|[pP]\{[^}]*\}|c[A-Za-z]|.)/s;
+      i = start + (escapeAtom.exec(pattern.slice(start))?.[0].length ?? 2);
+      if (/^\\[bB]$/.test(pattern.slice(start, i))) continue;
+    } else if (ch === "[") {
+      while (i < pattern.length && pattern[i] !== "]") i += pattern[i] === "\\" ? 2 : 1;
+      i++;
+    }
+    const atom = pattern.slice(start, i);
+    const quantifier = /^(?:[*+?]|\{(\d+)(,(\d*))?\})\??/.exec(pattern.slice(i));
+    if (quantifier) i += quantifier[0].length;
+    const variable =
+      quantifier !== null &&
+      (quantifier[0][0] !== "{" ||
+        (quantifier[2] !== undefined && (quantifier[3] === "" || quantifier[3] !== quantifier[1])));
+    if (variable) {
+      if (lastVariable !== undefined) return true;
+      lastVariable = atom;
+    } else if (lastVariable !== undefined && !quantifier) {
+      const literal = ch === "\\" ? atom[1] : atom;
+      const isLiteral = ch === "\\" ? /[^a-zA-Z0-9]/.test(literal as string) : !"[.".includes(ch);
+      if (isLiteral && literal?.length === 1 && !canMatch(lastVariable, literal))
+        lastVariable = undefined;
+    }
+  }
+  return false;
 }
 
 export function hasRegexBackreference(pattern: string): boolean {
@@ -282,14 +331,14 @@ export function hasMissingCoverageTargets(criterion: Criterion): boolean {
 
 export function coverageSourceIds(source: unknown[], criterion: Criterion): string[] {
   return source
+    .map((entry, index) => ({ entry, index }))
     .filter(
-      (entry) =>
+      ({ entry }) =>
         !criterion.source_filter_path ||
         (isRecord(entry) &&
           resolvePath(entry, criterion.source_filter_path) === criterion.source_filter_value),
     )
-    .map(extractTraceId)
-    .filter((id): id is string => typeof id === "string");
+    .map(({ entry, index }) => extractTraceId(entry) ?? `<entry ${index} without id>`);
 }
 
 export function coveredTraceIds(artifact: Record<string, unknown>, paths: string[]): Set<string> {

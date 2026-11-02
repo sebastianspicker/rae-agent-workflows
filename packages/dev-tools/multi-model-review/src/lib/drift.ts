@@ -86,7 +86,7 @@ export function findBestClaimMatch(
 }
 
 export function claimSimilarity(left: ExtractorClaimInput, right: ExtractorClaimInput): number {
-  return left.id === right.id ? 1 : tokenSimilarity(left.claim, right.claim);
+  return tokenSimilarity(left.claim, right.claim);
 }
 
 export function mergeConfidence(first?: number, second?: number): number | undefined {

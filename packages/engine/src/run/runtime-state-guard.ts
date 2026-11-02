@@ -250,6 +250,25 @@ function guardPaths(workspaceRoot: string): GuardPaths {
   return { identity, base, key, active: resolve(base, key) };
 }
 
+/**
+ * Cheap pre-check before the three Git spawns of `guardPaths`: lists the guard base for entries
+ * that could belong to this workspace. Read-only; a full path validation still runs whenever one exists.
+ */
+function guardMayExist(workspaceRoot: string): boolean {
+  const key = createHash("sha256").update(realpathSync(workspaceRoot)).digest("hex");
+  const override = process.env.RAE_STATE_HOME;
+  const home = override
+    ? resolve(override)
+    : resolve(realpathSync(userInfo().homedir), ".local", "state");
+  try {
+    return readdirSync(resolve(home, "rae", "pipeline-guards")).some(
+      (name) => name === key || name.startsWith(`${key}.`),
+    );
+  } catch {
+    return false;
+  }
+}
+
 function guardClaimEntries({
   base,
   key,
@@ -795,6 +814,7 @@ export function inspectRuntimeStateGuard(
   workspaceRoot: string,
   { expectedRunId = null }: { expectedRunId?: string | null } = {},
 ): GuardInspection {
+  if (!guardMayExist(workspaceRoot)) return { found: false, ownerActive: false };
   const paths = guardPaths(workspaceRoot);
   const { identity } = paths;
   const evidence = guardEvidence(paths);
@@ -862,6 +882,11 @@ function claimedManifest(
   return manifest;
 }
 
+/** Refs the operator control plane rewrites during a phase: control file, its lock and the trace. */
+export function operatorControlRefs(controlRef: string, traceRef: string): string[] {
+  return [controlRef, `${controlRef}.lock`, traceRef];
+}
+
 function guardedRuntimeState(
   claimPath: string,
   manifest: GuardManifest,
@@ -875,7 +900,10 @@ function guardedRuntimeState(
   } catch (error) {
     transitionError = error;
   }
-  const ignored = new Set([...allowedRefs, manifest.control_ref, manifest.trace_ref]);
+  const ignored = new Set([
+    ...allowedRefs,
+    ...operatorControlRefs(manifest.control_ref, manifest.trace_ref),
+  ]);
   let changed: string[] = [];
   let currentError: unknown = null;
   try {
@@ -989,6 +1017,7 @@ export function reconcileRuntimeStateGuard(
     afterPipelineRemoval = null,
   } = options;
   assertReconcileSeams({ afterClaim, afterPipelineRemoval });
+  if (!guardMayExist(workspaceRoot)) return { found: false, restored: false, tampered: false };
   const paths = guardPaths(workspaceRoot);
   const claim = acquireGuardClaim(paths);
   if (!claim.found) return { found: false, restored: false, tampered: false };
@@ -1014,8 +1043,4 @@ export function reconcileRuntimeStateGuard(
     releaseFailedClaim(paths, claim.path, error);
     throw error;
   }
-}
-
-export function runtimeStateGuardPath(workspaceRoot: string): string {
-  return guardPaths(workspaceRoot).active;
 }

@@ -28,12 +28,14 @@ export const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 
 const PROCESS_GROUP_TERMINATION_GRACE_MS = 100;
 const ASSIGNMENT_SECRET_PATTERN =
-  /((?:token|secret|password|api[_-]?key|access[_-]?key)\s*[:=]\s*)[^\s,;]+/gi;
+  /((?:token|secret|password|api[_-]?key|access[_-]?key)(?:\\*["'])?\s*[:=]\s*)(?:"[^"\n]*"|'[^'\n]*'|[^\s,;}]+)/gi;
 const FLAG_SECRET_PATTERN =
   /(--?(?:api[_-]?key|access[_-]?key|auth[_-]?token|token|secret|password)(?:=|\s+))[^\s,;]+/gi;
 const BEARER_SECRET_PATTERN = /(\bBearer\s+)[A-Za-z0-9._~+/-]{8,}=*/gi;
 const OPENAI_SECRET_PATTERN = /\b(?:sk|rk|pk)-[A-Za-z0-9_-]{10,}\b/g;
 const GITHUB_SECRET_PATTERN = /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b/g;
+const JWT_SECRET_PATTERN = /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g;
+const URL_USERINFO_PATTERN = /((?<![a-z0-9+.-])[a-z][a-z0-9+.-]{0,31}:\/\/)[^@\s/]+@/gi;
 const CHILD_ENV_ALLOWLIST = [
   "PATH",
   "HOME",
@@ -115,7 +117,9 @@ export function redact(text: unknown): string {
     .replace(FLAG_SECRET_PATTERN, "$1[REDACTED]")
     .replace(BEARER_SECRET_PATTERN, "$1[REDACTED]")
     .replace(OPENAI_SECRET_PATTERN, "[REDACTED]")
-    .replace(GITHUB_SECRET_PATTERN, "[REDACTED]");
+    .replace(GITHUB_SECRET_PATTERN, "[REDACTED]")
+    .replace(JWT_SECRET_PATTERN, "[REDACTED]")
+    .replace(URL_USERINFO_PATTERN, "$1[REDACTED]@");
 }
 
 interface ProcessOutput {

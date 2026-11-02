@@ -41,7 +41,10 @@ copies a self-contained Node runtime and the compiled native bridge (no CMake
 build files), refuses symlinked or invalid destination parents, and verifies
 the copied payload. The install records the build platform and architecture in
 `.ralph-install.json`; the embedded CLI refuses to run on a different one, so
-re-run bootstrap there.
+re-run bootstrap there. `--force` checks the build inputs first, then replaces
+only the installed payload (`dist`, `node_modules`, `package.json`, the receipt
+and the embedded documents); `prd.json`, `.runtime/`, reports and an existing
+`learnings.md` are kept.
 
 ## Usage
 
@@ -180,7 +183,8 @@ Safety and state:
 - `RALPH_STALE_LOCK_NO_PID_SECONDS`: age before a lock without a valid process
   ID is considered stale; default `30`
 - `RALPH_AUTO_ARCHIVE_ON_PROJECT_CHANGE`: archive state when the PRD project
-  changes; default `false`
+  changes (the previous run's PRD copy, kept in the state directory, and its
+  reports under `defaults.report_dir`); default `false`
 - `RALPH_REQUIRE_LEARNING_ENTRY_FOR_FIXING`: require a learning entry after a
   successful fixing story; default `false`
 - `RALPH_SYNC_BRANCH_FROM_PRD`: synchronize the current branch from the PRD;

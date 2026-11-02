@@ -13,7 +13,6 @@ import {
   projectGraph,
   queryGraph,
   rebuildMemory,
-  recordRunMemory,
 } from "../graph/index.js";
 import { loadWorkflow } from "../workflow/workflow-contract.js";
 import { loadExecutionProfile } from "../workflow/execution-profile.js";
@@ -289,7 +288,7 @@ function rebuildGraphMemory(options: GraphOptions): unknown {
   const runId = options.runId;
   const result = rebuildMemory({ projectRoot: project, runId });
   if (!runId) return result;
-  return { ...result, imported: recordRunMemory({ projectRoot: project, runId }) };
+  return { ...result, imported: memoryStatus(project) };
 }
 
 function decideGraphMemory(decision: "promoted" | "rejected", options: GraphOptions): unknown {

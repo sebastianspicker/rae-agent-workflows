@@ -5,27 +5,10 @@ import path from "node:path";
 import { badInput } from "./errors.js";
 import {
   assertSafeRelative,
-  isUnsafeRelativePath,
   resolveExistingAncestor,
   resolveRoot,
   validateNonEmpty,
 } from "./path-safety-helpers.js";
-
-/**
- * Rejects traversal, absolute paths, and empty references before a tool resolves a repository path.
- */
-export function assertRepoRelativePath(ref: string, label: string): void {
-  const normalizedInput = validateNonEmpty(ref, label);
-  assertSafeRelative(ref, path.normalize(normalizedInput), `${label} must be repository-relative`);
-}
-
-export function requireNonEmptyString(value: string, label: string): string {
-  return validateNonEmpty(value, label);
-}
-
-export function isOutsideRelativePath(ref: string): boolean {
-  return isUnsafeRelativePath(ref, path.normalize(ref));
-}
 
 /**
  * Resolves a reference under a workspace after realpath checks prevent symlink escapes.
@@ -52,10 +35,6 @@ export function resolveWithinWorkspace(
 
   assertRealPathStaysWithinRoot(root, resolved, outOfRootMessage);
   return resolved;
-}
-
-export function resolveExistingRoot(workspaceRoot: string, rootLabel: string): string {
-  return resolveRoot(workspaceRoot, rootLabel);
 }
 
 export function isOutsideResolvedRoot(relative: string): boolean {

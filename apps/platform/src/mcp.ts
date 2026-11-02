@@ -23,6 +23,7 @@ const runEnvelope = z
           access: z.enum(["read", "write"]).default("read"),
         }),
       )
+      .min(1)
       .max(MAX_RUN_NODES),
     request: z.record(z.string(), z.unknown()).default({}),
     repositoryDigest: z.string().length(64).optional(),

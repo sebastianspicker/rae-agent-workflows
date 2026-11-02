@@ -1,6 +1,6 @@
 /** Schedules the local v2.2 wait-and-signal workflow subset deterministically. */
-import { createHash, randomUUID } from "node:crypto";
-import { canonicalJson, validateWorkflow, workflowDigest } from "./workflow-contract.js";
+import { randomUUID } from "node:crypto";
+import { validateWorkflow, workflowDigest } from "./workflow-contract.js";
 import { assembleWorkflowContextV22 } from "./workflow-context-v22.js";
 import { applyWorkflowV22Event, readWorkflowV22State } from "./workflow-v22-reducer.js";
 import {
@@ -8,6 +8,8 @@ import {
   checkpointResumable,
   conditionMatches as edgeConditionMatches,
   contextInputs,
+  digest,
+  payloadField,
   isContextEdge,
   noProgressMessage,
   ownershipPlanInput,
@@ -81,14 +83,6 @@ interface ScheduleV22Options {
 type ContextAssembler = (options: Record<string, unknown>) => WorkflowContext;
 type StateReader = (options: Record<string, unknown>) => WorkflowV22State;
 type StateReducer = (options: Record<string, unknown>) => WorkflowV22State;
-
-function payloadField(payload: JsonValue, key: string): JsonValue | undefined {
-  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return undefined;
-  return payload[key];
-}
-
-const digest = (value: unknown): string =>
-  createHash("sha256").update(canonicalJson(value)).digest("hex");
 
 function conditionMatches(edge: WorkflowEdge, envelope: WorkflowsNodeEnvelopeV22): boolean {
   return edgeConditionMatches("2.2.0", edge, envelope);
@@ -585,6 +579,19 @@ export async function scheduleWorkflowV22({
       ),
     );
 
+  /** Nodes sharing a `resource` label never start together; the skipped one runs in a later batch. */
+  function resourceBatch(nodes: WorkflowNode[], limit: number): WorkflowNode[] {
+    const busy = new Set<string>();
+    const picked: WorkflowNode[] = [];
+    for (const node of nodes) {
+      if (picked.length >= limit) break;
+      if (node.resource && busy.has(node.resource)) continue;
+      if (node.resource) busy.add(node.resource);
+      picked.push(node);
+    }
+    return picked;
+  }
+
   async function mainLoop(): Promise<Record<string, unknown>> {
     while (!completed.has(workflow.terminal_node)) {
       if (stopRequested()) {
@@ -599,7 +606,7 @@ export async function scheduleWorkflowV22({
       if (!readyNodes.length) throw cannotProgress();
       const wait = readyNodes.find((node) => node.kind === "wait");
       const writer = readyNodes.find((node) => node.access === "write");
-      const batch = wait ? [wait] : writer ? [writer] : readyNodes.slice(0, concurrency);
+      const batch = wait ? [wait] : writer ? [writer] : resourceBatch(readyNodes, concurrency);
       // Every batch member settles before any outcome is acted on, so none is abandoned.
       const outcomes = await Promise.allSettled(
         batch.map(async (node) => {

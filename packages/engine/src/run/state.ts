@@ -2,25 +2,24 @@
  * Owns pipeline state storage, locking, and containment-safe workspace path resolution.
  */
 import {
-  closeSync,
   existsSync,
   mkdirSync,
-  openSync,
   readdirSync,
   readFileSync,
   renameSync,
   realpathSync,
   rmSync,
   statSync,
-  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { spawnSync } from "node:child_process";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { badInput } from "../primitives/errors.js";
 import { engineRuntimeRoot } from "../primitives/installation-paths.js";
+import { isContainedRelative } from "../primitives/paths.js";
+import { registeredWorktreeRoots } from "../primitives/git-worktrees.js";
+import { acquireExclusiveLock } from "../primitives/stale-lock.js";
 
 const packageRoot = engineRuntimeRoot;
 const RUN_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -218,26 +217,21 @@ export function withLockedState<T>(
   fn: (state: PipelineState) => T | Promise<T>,
 ): T | Promise<T> {
   const lockPath = join(getPipelineDir(root), "pipeline-state.lock");
-  let fd: number;
+  // A lock whose recorded owner is dead is retired; a live owner's lock is never replaced.
+  let lock: ReturnType<typeof acquireExclusiveLock>;
   try {
-    fd = openSync(lockPath, "wx", 0o600); // fails if lock exists
-  } catch (err) {
-    if (err instanceof Error && "code" in err && err.code === "EEXIST") {
-      throw badInput(
-        `Pipeline state is locked by another process. If this is stale, remove: ${lockPath}`,
-      );
-    }
-    throw err;
+    lock = acquireExclusiveLock(lockPath);
+  } catch (error) {
+    // A lock held on another host throws a plain Error (no errno code); keep the bad-input contract.
+    if (error instanceof Error && !("code" in error)) throw badInput(error.message);
+    throw error;
   }
-  const releaseLock = () => {
-    try {
-      unlinkSync(lockPath);
-    } catch {
-      /* ignore cleanup errors */
-    }
-  };
-
-  closeSync(fd);
+  if (!lock) {
+    throw badInput(
+      `Pipeline state is locked by another process. If this is stale, remove: ${lockPath}`,
+    );
+  }
+  const releaseLock = () => lock.release();
   let state: ReturnType<typeof loadPipelineState>;
   try {
     state = loadPipelineState(root);
@@ -283,7 +277,7 @@ function assertPathWithinBase(
   baseLabel = "base directory",
 ): void {
   const rel = relative(baseReal, resolvedPath);
-  if (rel.startsWith("..") || isAbsolute(rel) || (!allowBase && rel.length === 0)) {
+  if (!isContainedRelative(rel) || (!allowBase && rel.length === 0)) {
     if (!allowBase && rel.length === 0) {
       throw badInput(`path reference must not point to ${baseLabel}`);
     }
@@ -361,7 +355,7 @@ export function toWorkspaceRelative(absPath: string, root = getRepoRoot()): stri
   const rootReal = realpathSync(root);
   const resolved = existsSync(absPath) ? realpathSync(absPath) : resolve(absPath);
   const rel = relative(rootReal, resolved);
-  if (rel.startsWith("..") || isAbsolute(rel) || rel.length === 0) {
+  if (!isContainedRelative(rel) || rel.length === 0) {
     throw badInput(`path is outside repository root: ${absPath}`);
   }
   return rel;
@@ -416,17 +410,8 @@ function addNestedWorktreeRoots(candidateRoots: Set<string>, gitTopLevel: string
 function addRegisteredWorktreeRoots(candidateRoots: Set<string>, gitTopLevel: string): void {
   // Custom --worktree-root paths are not descendants of .worktrees. Git's
   // registry is the authoritative source for every linked worktree location.
-  const worktreeList = spawnSync(
-    "git",
-    ["-C", gitTopLevel, "worktree", "list", "--porcelain", "-z"],
-    { encoding: "utf8" },
-  );
-  if (worktreeList.status !== 0) return;
-
-  for (const field of worktreeList.stdout.split("\0")) {
-    if (field.startsWith("worktree ")) {
-      candidateRoots.add(resolve(field.slice("worktree ".length)));
-    }
+  for (const worktree of registeredWorktreeRoots(gitTopLevel) ?? []) {
+    candidateRoots.add(resolve(worktree));
   }
 }
 
@@ -485,8 +470,4 @@ export function resolveWorkspaceRootForRun(runId: string, root = getRepoRoot()):
   }
 
   return root;
-}
-
-export function activateWorkspaceForRun(runId: string, root = getRepoRoot()): string {
-  return resolveWorkspaceRootForRun(runId, root);
 }

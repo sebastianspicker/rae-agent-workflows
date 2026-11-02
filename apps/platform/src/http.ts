@@ -26,6 +26,7 @@ const runInput = z.object({
         access: z.enum(["read", "write"]).default("read"),
       }),
     )
+    .min(1)
     .max(MAX_RUN_NODES),
   request: object.default({}),
   repositoryDigest: z.string().length(64).optional(),
@@ -44,6 +45,16 @@ function send(
   res.end(JSON.stringify(value));
 }
 
+/** Aborts when the client disconnects before the reply was written. */
+export function hangupSignal(res: ServerResponse) {
+  const hangup = new AbortController();
+  res.on("close", () => {
+    if (!res.writableEnded) hangup.abort();
+  });
+  if (res.destroyed || res.closed || res.socket?.destroyed) hangup.abort();
+  return hangup.signal;
+}
+
 function closeFailedResponse(res: ServerResponse) {
   if (!res.destroyed) res.destroy();
 }
@@ -58,6 +69,8 @@ function key(req: IncomingMessage) {
 const EVENT_PAGE_SIZE = 100;
 /** Idle SSE streams send a comment at this interval so proxies keep the connection open. */
 const EVENT_STREAM_PING_MS = 15_000;
+/** An idle stream polls less often, doubling its interval up to this cap. */
+const EVENT_STREAM_MAX_POLL_MS = 5000;
 const DEFAULT_EVENT_STREAM_LIMITS = Object.freeze({ total: 256, perPrincipal: 8 });
 const RUN_ACTION_SCOPES = new Map([
   ["GET:", "rae.run.read"],
@@ -167,6 +180,8 @@ export async function streamRunEvents(
   });
   const deadline = Date.now() + 30 * 60 * 1000;
   let lastWrite = Date.now();
+  const basePollMs = Math.min(1000, pingIntervalMs);
+  let pollMs = basePollMs;
   try {
     while (!closed && !signal?.aborted && Date.now() < deadline) {
       for (const event of page.events) {
@@ -185,7 +200,9 @@ export async function streamRunEvents(
         lastWrite = Date.now();
       }
       if (closed || signal?.aborted) break;
-      if (!page.nextCursor) {
+      // Only an empty page needs the run state and a pause; busy streams just read the next page.
+      if (page.events.length) pollMs = basePollMs;
+      if (!page.nextCursor && !page.events.length) {
         const run = await store.getRun(runId);
         if (!run || ["succeeded", "failed", "cancelled"].includes(run.state)) {
           page = await read();
@@ -199,7 +216,9 @@ export async function streamRunEvents(
           }
           lastWrite = Date.now();
         }
-        if (await waitForPoll(res, Math.min(1000, pingIntervalMs), signal)) break;
+        if (await waitForPoll(res, pollMs, signal)) break;
+        // Idle streams back off so many of them do not each query the database every second.
+        pollMs = Math.min(pollMs * 2, EVENT_STREAM_MAX_POLL_MS, pingIntervalMs);
       }
       page = await read();
     }
@@ -460,6 +479,7 @@ export async function handlePlatformRequest(
         ...value,
         projects: authorizedProjects(principal),
         idempotencyKey: key(req),
+        signal: hangupSignal(res),
       });
       if (claim) metrics.leaseClaims += 1;
       return send(res, 200, { claim });

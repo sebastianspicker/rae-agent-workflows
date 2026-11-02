@@ -19,6 +19,8 @@ echo '{ ... }' | node dist/index.js
 - either `events` (an array of trace events) or `trace_path` (a JSONL path)
 - optional `schema_ref`; the execution-trace schema is the default
 
+Every event must be a JSON object. Trace files larger than 64 MiB are rejected.
+
 ## Output
 
 - `valid` flag

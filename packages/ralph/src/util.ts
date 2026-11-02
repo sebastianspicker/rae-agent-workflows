@@ -2,12 +2,9 @@
 import {
   closeSync,
   constants,
-  copyFileSync,
-  existsSync,
   fsyncSync,
   mkdirSync,
   openSync,
-  readFileSync,
   realpathSync,
   renameSync,
   statSync,
@@ -69,10 +66,6 @@ export function safeRelativePath(value: string, label = "path"): string {
   return normalized;
 }
 
-export function readJson<T>(path: string): T {
-  return JSON.parse(readFileSync(path, "utf8")) as T;
-}
-
 export function atomicWrite(path: string, content: string | Buffer, mode = 0o600): void {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const temporary = resolve(dirname(path), `.${process.pid}.${randomUUID()}.tmp`);
@@ -111,15 +104,4 @@ export function atomicJson(path: string, value: unknown): void {
 
 export function sha256(value: string | Buffer): string {
   return createHash("sha256").update(value).digest("hex");
-}
-
-export function copyFileAtomic(source: string, target: string): void {
-  mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
-  const temporary = `${target}.${randomUUID()}.tmp`;
-  copyFileSync(source, temporary, constants.COPYFILE_EXCL);
-  renameSync(temporary, target);
-}
-
-export function pathExists(path: string): boolean {
-  return existsSync(path);
 }

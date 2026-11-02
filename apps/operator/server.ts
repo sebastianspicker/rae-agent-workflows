@@ -2,7 +2,6 @@
 /** Serves the authenticated loopback-only operator API and static console. */
 import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
-import type { AddressInfo } from "node:net";
 import { readFileSync } from "node:fs";
 import { dirname, extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,21 +12,14 @@ import {
   findProject,
   isAuthorized,
   positiveInteger,
+  KnownRoots,
   readJsonBody,
   sanitizeLogText,
   scrubMessage,
   validateLoopbackRequest,
   validateRunId,
 } from "./lib/security.js";
-import {
-  discoverRuns,
-  locateRun,
-  paginatedEvents,
-  publicRun,
-  publicRunSummary,
-  projectRunDetails,
-  RunCatalog,
-} from "./lib/runs.js";
+import { paginatedEvents, publicRun, RunCatalog } from "./lib/runs.js";
 import type { InternalRun } from "./lib/runs.js";
 import {
   analyzeWorkflowFor,
@@ -65,7 +57,6 @@ const STATIC_ROOT_FILES = new Map<string, string>([
 ]);
 const API_PREFIX = "/api/v1";
 
-type JsonRecord = Record<string, unknown>;
 type HttpError = Error & { status?: number };
 type WorkflowRegistry = Record<string, unknown>;
 interface OperatorContext {
@@ -80,7 +71,7 @@ interface OperatorContext {
   host: string;
   origin: string;
   /** Per-instance project and run workspace roots that error messages must not reveal. */
-  knownRoots: Set<string>;
+  knownRoots: KnownRoots;
   workflowRegistry?: WorkflowRegistry;
   /** Result of the startup probe of the default provider; null until probed or when skipped. */
   providerHealth?: ProviderHealthHolder;
@@ -414,7 +405,7 @@ async function routeApi(
     requireMethod(req, "GET");
     sendJson(res, 200, {
       projects: projects.map(({ id, label }) => ({ id, label })),
-      active_run_id: controller.refreshOwnership(),
+      active_run_id: await controller.refreshOwnership(),
       provider_health: context.providerHealth?.current ?? null,
     });
     return;
@@ -437,7 +428,7 @@ async function routeApi(
   if (parts.length === 5) {
     if (req.method === "GET") {
       const limit = positiveInteger(url.searchParams.get("limit"), 30, 100);
-      controller.refreshOwnership();
+      await controller.refreshOwnership();
       const view = url.searchParams.get("view");
       if (view !== null && view !== "summary")
         throw Object.assign(new Error("invalid run view"), { status: 400 });
@@ -467,7 +458,7 @@ async function routeApi(
   const runId = validateRunId(parts[5]);
   if (parts.length === 6) {
     requireMethod(req, "GET");
-    controller.refreshOwnership();
+    await controller.refreshOwnership();
     sendJson(res, 200, {
       run: publicRun(await locateKnownRun(context, project, runId), controller.ownedRunId),
     });
@@ -509,15 +500,24 @@ async function routeApi(
   const body = await readJsonBody(req);
   try {
     if (action === "stop") {
-      sendJson(res, 200, { control: controller.stop(project, runId) });
+      sendJson(res, 200, { control: await controller.stop(project, runId) });
     } else if (action === "resume") {
       sendJson(res, 202, await controller.resume(project, runId));
     } else if (action === "interrupt") {
-      sendJson(res, 202, controller.interrupt(project, runId, body));
+      sendJson(res, 202, await controller.interrupt(project, runId, body));
     } else if (action === "checkpoint-decision") {
-      sendJson(res, 200, { checkpoint: controller.decideCheckpoint(project, runId, body) });
+      sendJson(res, 200, {
+        checkpoint: await controller.decideCheckpoint(project, runId, body),
+      });
     } else {
+      // The worktree is going away; its root should not stay in the scrub list forever.
+      const root = await locateKnownRun(context, project, runId, "summary").then(
+        (run) => run.workspaceRoot,
+        () => null,
+      );
       sendJson(res, 200, await controller.cleanup(project, runId, body));
+      if (root && !projects.some((candidate) => candidate.root === root))
+        context.knownRoots.delete(root);
     }
   } catch (error) {
     if (!(error instanceof Error && "status" in error)) {
@@ -527,11 +527,14 @@ async function routeApi(
   }
 }
 
-function projectHasActiveRun(project: OperatorProject): boolean {
+/** A waiting run is active; a running or stop-requested one only while its lock owner lives. */
+async function projectHasActiveRun(
+  context: OperatorContext,
+  project: OperatorProject,
+): Promise<boolean> {
   try {
-    return discoverRuns(project, { view: "summary" }).some(
-      (run) =>
-        run.runtime_active || ["running", "waiting", "stop-requested"].includes(run.status ?? ""),
+    return (await context.runCatalog.list(project)).some(
+      (run) => run.runtime_active || run.status === "waiting",
     );
   } catch {
     // A missing or unreadable runtime directory is not an active execution.
@@ -539,9 +542,13 @@ function projectHasActiveRun(project: OperatorProject): boolean {
   }
 }
 
-function workflowMutationAllowed(project: OperatorProject, controller: RunController): void {
-  controller.refreshOwnership();
-  if (controller.ownedRunId || projectHasActiveRun(project)) {
+async function workflowMutationAllowed(
+  context: OperatorContext,
+  project: OperatorProject,
+): Promise<void> {
+  const { controller } = context;
+  await controller.refreshOwnership();
+  if (controller.ownedRunId || (await projectHasActiveRun(context, project))) {
     throw Object.assign(new Error("workflow revisions are immutable while a run is active"), {
       status: 409,
     });
@@ -647,7 +654,7 @@ async function routeWorkflows(
   }
   if (tail[1] === "drafts" && tail.length === 2) {
     requireMethod(req, "POST");
-    workflowMutationAllowed(project, context.controller);
+    await workflowMutationAllowed(context, project);
     sendJson(res, 201, {
       revision: await assertRegistryMethod(await getRegistry(), "draft")(
         workflowId,
@@ -679,7 +686,7 @@ async function routeWorkflows(
   }
   if (tail[1] === "revisions" && tail[3] === "activate" && tail.length === 4) {
     requireMethod(req, "POST");
-    workflowMutationAllowed(project, context.controller);
+    await workflowMutationAllowed(context, project);
     sendJson(res, 200, {
       activation: await assertRegistryMethod(await getRegistry(), "activate")(
         workflowId,
@@ -718,13 +725,13 @@ export async function handleOperatorRequest(
 export function createOperatorServer({
   projects = [],
   token = createSessionToken(),
-  controller = new RunController(),
+  runCatalog = new RunCatalog(),
+  controller = new RunController({ catalog: runCatalog }),
   remoteUrl = null,
   tokenFile = null,
   fetchImpl,
   profiles = new OperatorProfiles(),
   proposalJobs = new WorkflowProposalJobs(),
-  runCatalog = new RunCatalog(),
   tailHub = new EventTailHub(),
   providerHealth = { current: null },
 }: OperatorServerOptions): {
@@ -741,7 +748,7 @@ export function createOperatorServer({
   if (!profiles || typeof profiles.list !== "function" || typeof profiles.resolve !== "function") {
     throw new Error("profiles must be an OperatorProfiles instance");
   }
-  const knownRoots = new Set(projects.map((project) => project.root));
+  const knownRoots = new KnownRoots(projects.map((project) => project.root));
   const remote = remoteUrl
     ? createRemoteOperatorProxy({ remoteUrl, tokenFile, ...(fetchImpl ? { fetchImpl } : {}) })
     : null;

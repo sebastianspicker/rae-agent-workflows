@@ -1,22 +1,21 @@
 /** Stores append-only workflow revisions and activation decisions beside Git metadata. */
 import {
   chmodSync,
-  closeSync,
   existsSync,
   lstatSync,
   mkdirSync,
-  openSync,
   readFileSync,
   readdirSync,
   realpathSync,
   renameSync,
-  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { basename, resolve } from "node:path";
 import { loadWorkflow, validateWorkflow, workflowDigest } from "./workflow-contract.js";
 import { workflowsRoot } from "../primitives/installation-paths.js";
+import { registeredWorktreeRoots } from "../primitives/git-worktrees.js";
+import { acquireExclusiveLock } from "../primitives/stale-lock.js";
 import type { WorkflowContract } from "./workflow-contract.js";
 
 export const DEFAULT_WORKFLOW_PATH = resolve(workflowsRoot, "graph-native-default.workflow.json");
@@ -77,16 +76,8 @@ function gitCommonDirectory(projectRoot: string): string {
 }
 
 function registeredWorktrees(projectRoot: string): string[] {
-  const result = spawnSync(
-    "git",
-    ["-C", realpathSync(projectRoot), "worktree", "list", "--porcelain", "-z"],
-    { encoding: "utf8", timeout: 10_000 },
-  );
-  if (result.status !== 0) return [realpathSync(projectRoot)];
-  return result.stdout
-    .split("\0")
-    .filter((field) => field.startsWith("worktree "))
-    .map((field) => field.slice("worktree ".length));
+  const root = realpathSync(projectRoot);
+  return registeredWorktreeRoots(root) ?? [root];
 }
 
 function assertNoActiveRun(projectRoot: string): void {
@@ -144,21 +135,22 @@ function atomicJson(pathValue: string, value: unknown): void {
 }
 
 function withLock<T>(root: string, action: () => T): T {
-  const lockPath = resolve(root, ".registry.lock");
-  let descriptor: number;
+  // A lock whose recorded owner is dead is retired; a live owner's lock is never replaced.
+  let lock: ReturnType<typeof acquireExclusiveLock>;
   try {
-    descriptor = openSync(lockPath, "wx", 0o600);
+    lock = acquireExclusiveLock(resolve(root, ".registry.lock"));
   } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "EEXIST") {
-      throw httpError("workflow registry is busy", 409);
+    // A lock held on another host throws a plain Error (no errno code).
+    if (error instanceof Error && !("code" in error)) {
+      throw httpError(`workflow registry is busy: ${error.message}`, 409);
     }
     throw error;
   }
+  if (!lock) throw httpError("workflow registry is busy", 409);
   try {
     return action();
   } finally {
-    closeSync(descriptor);
-    unlinkSync(lockPath);
+    lock.release();
   }
 }
 

@@ -145,6 +145,49 @@ packages retain their own changelogs where applicable.
 
 ### Fixed
 
+- Repository audit (2026-11-02), engine: v2.2 workflows respect `resource`
+  labels; graph memory no longer marks a finished run with map nodes as
+  blocked, and projection accepts the `INSTANCE_OF`, `NEXT`, `SELECTS` and
+  `RECOMMENDS` edges the schema allows, and canonical JSON never writes
+  `undefined`; `graph memory rebuild` never deletes records and re-imports
+  every completed run of the project and its worktrees (its output gains
+  `imported_runs` and `skipped_runs`); secret redaction covers JSON-quoted and
+  escaped keys, quoted values, JWTs and URL credentials in linear time; the
+  legacy `pipeline-state.lock` and the workflow registry lock retire dead
+  owners; a lock is foreign when the machine id or the hostname differs, except
+  on the same Mac; a v2.1 `join: all` with no
+  matching input no longer runs; resume refuses a live owner's runtime guard
+  and reads completed gates under the workflow lock; a failed or timed-out
+  `pipeline-init` rolls back its named worktree; v2.0 failed attempts count in
+  experiment evidence; OpenCode error events keep a redacted excerpt; graph
+  query `traversal_path` reports the real path; the operator trace reader
+  retries concurrent appends and reads only new bytes.
+- Repository audit, operator console: a crashed run (dead lock owner) can be
+  resumed and no longer blocks workflow edits; run discovery has one
+  asynchronous path; list and detail views agree on controls; the console
+  identifies its own run by the lock's pid; a NUL byte in a task is a 400.
+- Repository audit, experimental platform: runs without nodes are rejected; a
+  long-poll claim stops when the worker hangs up instead of leasing work to
+  nobody; a retried artifact verification returns the verified record and a
+  verification in progress is a retryable 503; verifications are capped per
+  process; one non-global address classifier guards
+  configuration and workers; idle event streams back off their polling; the
+  lease reconciler never overlaps itself; log redaction reuses the engine rules.
+- Repository audit, Ralph: `bootstrap --force` checks its inputs first and
+  replaces only the files bootstrap installs, keeping `prd.json`, `.runtime/`,
+  reports and `learnings.md`; log redaction runs in linear time; learning
+  notes with `$'` no longer corrupt `AGENTS.md`; auto-archive saves the
+  previous project's PRD and its reports; lock ownership compares the machine
+  id first; transaction journals accept only generated operation names; the
+  `os.uptime()` call that failed in locked-down sandboxes is gone.
+- Repository audit, tools: the quality gate refuses regexes with more than two
+  quantifiers and counts ID-less coverage entries as uncovered; drift review
+  pairs claims by text; review finding IDs are unique across reviewers;
+  trace-collector rejects non-object events and files over 64 MiB; the history
+  cleaner keeps paragraphs after a removed trailer, does nothing on a no-op
+  `--apply`, and rejects mixed repository sources; the profile installer keeps
+  file modes; the adapter generator writes only to its allowlist.
+
 - Experimental platform: without `oidc.tokenType`, ID tokens (`nonce` or
   `at_hash` claims) are rejected as bearer tokens; `oidc.audience` must be a
   dedicated API identifier.
@@ -251,6 +294,11 @@ packages retain their own changelogs where applicable.
 
 ### Removed
 
+- Experimental platform: the unconsumed `outbox` table (migration
+  `007_drop_outbox.sql`) and the `rae_platform_outbox_pending` metric. Stop
+  servers from older builds before applying the migration; they still write
+  to the table.
+- Dead helpers found by the 2026-11-02 audit.
 - Obsolete runtime compatibility paths and superseded test surfaces.
 - The test-file ignore rules in `.gitignore`.
 

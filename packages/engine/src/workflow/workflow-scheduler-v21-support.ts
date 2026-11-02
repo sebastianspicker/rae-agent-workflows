@@ -1,8 +1,7 @@
 /** Supplies bounded, side-effect-narrow helpers for the v2.1 workflow scheduler. */
-import { createHash } from "node:crypto";
-import { canonicalJson } from "./workflow-contract.js";
 import {
   conditionMatches as edgeConditionMatches,
+  digest,
   isContextEdge,
 } from "./workflow-scheduler-common.js";
 import type {
@@ -11,8 +10,6 @@ import type {
   WorkflowsWorkflowV21DefsEdge,
 } from "@rae/contracts";
 
-export const digest = (value: unknown): string =>
-  createHash("sha256").update(canonicalJson(value)).digest("hex");
 export const successful = (envelope: WorkflowsNodeEnvelopeV21): boolean =>
   envelope.status === "passed";
 export const valueOr = <T>(value: T | undefined, fallback: T): T =>

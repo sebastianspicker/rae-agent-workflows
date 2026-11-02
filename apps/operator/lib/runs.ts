@@ -1,20 +1,21 @@
 /** Projects durable pipeline runs into the console's bounded public view. */
 import { existsSync, readdirSync, realpathSync, readFileSync } from "node:fs";
-import { access, lstat, readdir, readFile, realpath } from "node:fs/promises";
-import { execFile, spawnSync } from "node:child_process";
+import { lstat, readdir, readFile, realpath } from "node:fs/promises";
+import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { basename, join, resolve } from "node:path";
 import {
   ensureRuntimeStateReadable,
   graphStatus,
   listCheckpoints,
+  lockOwnerAlive,
   memoryStatus,
   projectOperatorEvents,
   readOperatorEventsAfter,
   readOperatorControl,
   inspectRuntimeStateGuard,
 } from "@rae/engine";
-import { validateRunId } from "./security.js";
+import { sanitizeLogText, validateRunId } from "./security.js";
 import type { OperatorProject } from "./security.js";
 import type { OperatorEvent, OperatorRun } from "../static/js/types.js";
 
@@ -47,8 +48,10 @@ interface RunCursor {
   started_at: string | null;
   id: string;
 }
+/** "checkpoints" is a summary plus the run's checkpoint rows, enough for resume and decisions. */
+export type RunView = "summary" | "detail" | "checkpoints";
 interface DiscoveryOptions {
-  view?: "summary" | "detail";
+  view?: RunView;
 }
 interface PageOptions extends DiscoveryOptions {
   cursor?: string | null;
@@ -61,6 +64,9 @@ interface EventPageOptions {
 interface CatalogSnapshot {
   runs: InternalRun[];
   signatures: Map<string, string>;
+  /** Worktree roots of the last listing; reused when `git worktree list` fails. */
+  worktreeRoots?: string[];
+  worktreesFailed?: boolean;
 }
 
 function record(value: unknown): JsonRecord {
@@ -90,26 +96,6 @@ function readJson<T>(pathValue: string, fallback: T): T {
   }
 }
 
-function registeredWorktrees(projectRoot: string): string[] {
-  const result = spawnSync(
-    "git",
-    ["-C", projectRoot, "-c", "core.fsmonitor=false", "worktree", "list", "--porcelain", "-z"],
-    { encoding: "utf8", timeout: 10_000 },
-  );
-  if (result.error || result.status !== 0) return [projectRoot];
-  const roots = new Set([projectRoot]);
-  for (const field of result.stdout.split("\0")) {
-    if (!field.startsWith("worktree ")) continue;
-    const candidate = field.slice("worktree ".length);
-    try {
-      roots.add(realpathSync(candidate));
-    } catch {
-      // A concurrently removed worktree is not a durable run source.
-    }
-  }
-  return [...roots];
-}
-
 function belongsToProject(
   state: PipelineState,
   workspaceRoot: string,
@@ -122,40 +108,6 @@ function belongsToProject(
   } catch {
     return false;
   }
-}
-
-function runDirectories(workspaceRoot: string, projectRoot: string): DiscoveredDirectory[] {
-  const state = readJson<PipelineState | null>(
-    join(workspaceRoot, ".pipeline", "pipeline-state.json"),
-    null,
-  );
-  if (!state || !belongsToProject(state, workspaceRoot, projectRoot)) return [];
-  const runsRoot = join(workspaceRoot, ".pipeline", "runs");
-  if (!existsSync(runsRoot)) return [];
-  return readdirSync(runsRoot, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
-    .flatMap((entry) => {
-      try {
-        validateRunId(entry.name);
-        return [{ id: entry.name, workspaceRoot, state }];
-      } catch {
-        return [];
-      }
-    });
-}
-
-export function discoverRuns(
-  project: OperatorProject,
-  { view = "detail" }: DiscoveryOptions = {},
-): InternalRun[] {
-  const found = new Map<string, InternalRun>();
-  const projectRoot = realpathSync(project.root);
-  for (const workspaceRoot of registeredWorktrees(projectRoot)) {
-    for (const run of workspaceRuns(project, workspaceRoot, projectRoot, view)) {
-      if (!found.has(run.id)) found.set(run.id, run);
-    }
-  }
-  return [...found.values()].sort(compareRunKeys);
 }
 
 function compareRunKeys(
@@ -218,12 +170,13 @@ export class CatalogIndex {
       isAfterCursor(run, key),
     );
     const summaries = candidates.slice(0, limit);
+    // Detail rows stay internal: the server projects them through publicRun exactly once.
     const runs =
       view === "summary"
         ? summaries.map(publicRunSummary)
         : await mapWithConcurrency(summaries, 4, async (run) => {
             await new Promise<void>((resolveReady) => setImmediate(resolveReady));
-            return publicRun(projectRunDetails(project, run));
+            return projectRunDetails(project, run);
           });
     return {
       runs,
@@ -232,6 +185,12 @@ export class CatalogIndex {
           ? encodeRunCursor(summaries.at(-1)!)
           : null,
     };
+  }
+
+  /** Every run of the project as an internal summary, newest first. */
+  async list(project: OperatorProject): Promise<InternalRun[]> {
+    if (this.closed) throw new Error("run catalog is closed");
+    return (await this.reconcile(project)).runs;
   }
 
   async locate(
@@ -243,7 +202,8 @@ export class CatalogIndex {
     if (this.closed) throw new Error("run catalog is closed");
     const run = (await this.reconcile(project)).runs.find((candidate) => candidate.id === runId);
     if (!run) throw Object.assign(new Error("run not found"), { status: 404 });
-    return view === "summary" ? run : projectRunDetails(project, run);
+    if (view === "summary") return run;
+    return view === "checkpoints" ? withCheckpoints(run) : projectRunDetails(project, run);
   }
 
   close(): void {
@@ -294,7 +254,10 @@ async function readJsonAsync<T>(pathValue: string, fallback: T): Promise<T> {
   }
 }
 
-async function registeredWorktreesAsync(projectRoot: string): Promise<string[]> {
+async function registeredWorktreesAsync(
+  projectRoot: string,
+  previous?: CatalogSnapshot,
+): Promise<{ roots: string[]; failed: boolean }> {
   try {
     const { stdout } = await execFileAsync(
       "git",
@@ -314,9 +277,17 @@ async function registeredWorktreesAsync(projectRoot: string): Promise<string[]> 
         }
       }),
     );
-    return [...new Set([projectRoot, ...roots.filter((root): root is string => root !== null)])];
-  } catch {
-    return [projectRoot];
+    return {
+      roots: [...new Set([projectRoot, ...roots.filter((root): root is string => root !== null)])],
+      failed: false,
+    };
+  } catch (error) {
+    // Keep the last known worktree roots so a transient git failure does not hide their runs.
+    if (!previous?.worktreesFailed)
+      console.error(
+        `operator worktree listing failed: ${sanitizeLogText(error instanceof Error ? error.message : String(error))}`,
+      );
+    return { roots: previous?.worktreeRoots ?? [projectRoot], failed: true };
   }
 }
 
@@ -352,7 +323,7 @@ async function lightweightRunAsync(
   run: DiscoveredDirectory,
 ): Promise<InternalRun> {
   const runDir = join(run.workspaceRoot, ".pipeline", "runs", run.id);
-  const [request, control, runtimeActive] = await Promise.all([
+  const [request, control] = await Promise.all([
     readJsonAsync<JsonRecord>(join(runDir, "request.json"), {}),
     readJsonAsync<JsonRecord>(join(runDir, "operator-control.json"), {
       schema_version: "1.0.0",
@@ -361,10 +332,6 @@ async function lightweightRunAsync(
       stop_requested: false,
       updated_at: null,
     }),
-    access(join(runDir, "autonomous.lock")).then(
-      () => true,
-      () => false,
-    ),
   ]);
   const legacyStarted =
     typeof request.requested_at === "string"
@@ -379,7 +346,7 @@ async function lightweightRunAsync(
       legacyStarted ?? (typeof control.updated_at === "string" ? control.updated_at : null),
     updated_at:
       typeof control.updated_at === "string" ? control.updated_at : (legacyStarted ?? null),
-    runtime_active: runtimeActive,
+    runtime_active: lockOwnerAlive(join(runDir, "autonomous.lock")),
     workspaceRoot: run.workspaceRoot,
     state: run.state,
   };
@@ -423,9 +390,12 @@ async function workspaceRunSummaries(
     const signature = `${stateIdentity}|${await runSignature(run)}`;
     signatures.set(cacheKey, signature);
     const cached = previousRuns.get(cacheKey);
-    return cached && previousSignatures.get(cacheKey) === signature
-      ? cached
-      : lightweightRunAsync(project, run);
+    if (!cached || previousSignatures.get(cacheKey) !== signature)
+      return lightweightRunAsync(project, run);
+    // An owner can die without touching the lock file, so liveness is rechecked on every hit.
+    const lockPath = join(run.workspaceRoot, ".pipeline", "runs", run.id, "autonomous.lock");
+    const alive = lockOwnerAlive(lockPath);
+    return alive === cached.runtime_active ? cached : { ...cached, runtime_active: alive };
   });
   const after = guardedWorkspaceRun(project, workspaceRoot);
   return after ? { runs: [after], signatures: new Map() } : { runs, signatures };
@@ -436,7 +406,7 @@ async function discoverRunSummaries(
   previous?: CatalogSnapshot,
 ): Promise<CatalogSnapshot> {
   const projectRoot = await realpath(project.root);
-  const roots = await registeredWorktreesAsync(projectRoot);
+  const { roots, failed } = await registeredWorktreesAsync(projectRoot, previous);
   const previousRuns = new Map(
     (previous?.runs ?? []).map((run) => [`${run.workspaceRoot}\0${run.id}`, run]),
   );
@@ -455,22 +425,12 @@ async function discoverRunSummaries(
     for (const run of group.runs) if (!found.has(run.id)) found.set(run.id, run);
     for (const [key, signature] of group.signatures) signatures.set(key, signature);
   }
-  return { runs: [...found.values()].sort(compareRunKeys), signatures };
-}
-
-function workspaceRuns(
-  project: OperatorProject,
-  workspaceRoot: string,
-  projectRoot: string,
-  view: "summary" | "detail",
-): InternalRun[] {
-  const before = guardedWorkspaceRun(project, workspaceRoot);
-  if (before) return [before];
-  const runs = runDirectories(workspaceRoot, projectRoot).map((run) =>
-    view === "summary" ? lightweightRun(project, run) : summarizeRun(project, run),
-  );
-  const after = guardedWorkspaceRun(project, workspaceRoot);
-  return after ? [after] : runs;
+  return {
+    runs: [...found.values()].sort(compareRunKeys),
+    signatures,
+    worktreeRoots: roots,
+    worktreesFailed: failed,
+  };
 }
 
 function guardedWorkspaceRun(project: OperatorProject, workspaceRoot: string): InternalRun | null {
@@ -510,53 +470,20 @@ function guardedWorkspaceRun(project: OperatorProject, workspaceRoot: string): I
   };
 }
 
-export function locateRun(
-  project: OperatorProject,
-  runId: string,
-  { view = "detail" }: DiscoveryOptions = {},
-): InternalRun {
-  validateRunId(runId);
-  const run = discoverRuns(project, { view: "summary" }).find(
-    (candidate) => candidate.id === runId,
-  );
-  if (!run) throw Object.assign(new Error("run not found"), { status: 404 });
-  return view === "summary" ? run : projectRunDetails(project, run);
-}
-
-function lightweightRun(project: OperatorProject, run: DiscoveredDirectory): InternalRun {
-  const runDir = join(run.workspaceRoot, ".pipeline", "runs", run.id);
-  const request = readJson<JsonRecord>(join(runDir, "request.json"), {});
-  const control = record(readOperatorControl(run.id, run.workspaceRoot));
-  // Older runs recorded their start only in the trace. Preserve their list order.
-  const startedAt =
-    request.requested_at ?? projectedEvents(run, runDir)[0]?.ts ?? control.updated_at ?? null;
-  return {
-    id: run.id,
-    project_id: project.id,
-    ...runIdentity(request, control, [], run),
-    ...runWorkspace(run),
-    started_at: typeof startedAt === "string" ? startedAt : null,
-    updated_at:
-      typeof control.updated_at === "string"
-        ? control.updated_at
-        : typeof request.requested_at === "string"
-          ? request.requested_at
-          : null,
-    runtime_active: existsSync(join(runDir, "autonomous.lock")),
-    workspaceRoot: run.workspaceRoot,
-    state: run.state,
-  };
-}
-
 /** Detail projection is performed only after discovery and pagination. */
 export function projectRunDetails(project: OperatorProject, run: InternalRun): InternalRun {
   const before = guardedWorkspaceRun(project, run.workspaceRoot);
   if (before) return before;
-  const result =
-    run.guarded || !run.state
-      ? locateRun(project, run.id)
-      : summarizeRun(project, run as DiscoveredDirectory);
+  // A guarded summary whose guard has since cleared has no state; the next poll rediscovers it.
+  if (run.guarded || !run.state) return run;
+  const result = summarizeRun(project, run as DiscoveredDirectory);
   return guardedWorkspaceRun(project, run.workspaceRoot) ?? result;
+}
+
+/** Summary plus checkpoint rows: all that resume and checkpoint decisions read beyond a summary. */
+function withCheckpoints(run: InternalRun): InternalRun {
+  if (run.guarded) return run;
+  return { ...run, checkpoints: checkpoints(join(run.workspaceRoot, ".pipeline", "runs", run.id)) };
 }
 
 export function publicRunSummary(run: InternalRun): OperatorRun {
@@ -657,7 +584,7 @@ function summarizeRun(project: OperatorProject, run: DiscoveredDirectory): Inter
     workspace_label: basename(run.workspaceRoot),
     started_at: startedAt,
     updated_at: updatedAt,
-    runtime_active: existsSync(join(runDir, "autonomous.lock")),
+    runtime_active: lockOwnerAlive(join(runDir, "autonomous.lock")),
     gates: gateRows(runDir),
     evidence: { present: projectedArtifacts.length },
     resources: runResources(progress, events),
@@ -831,7 +758,10 @@ export function isResumableStatus(
 ): boolean {
   const status = run.status ?? "";
   if (run.graphNative && status === "completed") return false;
-  if (["running", "waiting", "stopped", "blocked", "interrupted"].includes(status)) return true;
+  if (
+    ["running", "waiting", "stop-requested", "stopped", "blocked", "interrupted"].includes(status)
+  )
+    return true;
   return (
     status === "completed" &&
     !run.graphNative &&

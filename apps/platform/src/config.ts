@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import net from "node:net";
 import { parse as parseToml } from "smol-toml";
 import { z } from "zod";
+import { publicAddress } from "./address-policy.js";
 
 const configSchema = z.object({
   management: z
@@ -87,23 +88,8 @@ export function classifyHost(hostname: string) {
     host.endsWith(".localhost") ||
     host.endsWith(".local") ||
     host.endsWith(".internal");
-  const privateV4 =
-    net.isIPv4(host) &&
-    (/^10\./.test(host) ||
-      /^127\./.test(host) ||
-      /^169\.254\./.test(host) ||
-      /^192\.168\./.test(host) ||
-      /^172\.(1[6-9]|2\d|3[01])\./.test(host));
-  const privateV6 =
-    net.isIPv6(host) &&
-    (host === "::1" ||
-      host.startsWith("fc") ||
-      host.startsWith("fd") ||
-      host.startsWith("fe8") ||
-      host.startsWith("fe9") ||
-      host.startsWith("fea") ||
-      host.startsWith("feb"));
-  return privateName || privateV4 || privateV6 ? "private" : "public";
+  const privateIp = net.isIP(host) !== 0 && !publicAddress(host);
+  return privateName || privateIp ? "private" : "public";
 }
 
 /** Identifies bind addresses that cannot resolve to a non-loopback interface. */

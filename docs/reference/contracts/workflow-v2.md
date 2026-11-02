@@ -77,16 +77,26 @@ kinds are deterministic and call no model.
 | `agent` | 2.0 | One provider invocation with a fresh session. `read` agents must not change the repository; `write` agents may change only plan-owned paths. |
 | `map` | 2.1 | One agent instance per item selected by `map.source_pointer`, keyed by `map.stable_key_pointer`, at most `map.max_items` (32). |
 | `transform` | 2.1 | An allowlisted data operation: `select`, `flatten`, `deduplicate`, `sort`, `limit`, `group`, or `cartesian`. |
-| `join` | 2.0 | Collects inputs. `all` waits for every enabled input, `any` proceeds with the first, and `quorum` (2.1) requires `quorum.threshold` inputs, optionally per group. A join needs at least two inputs. |
+| `join` | 2.0 | Collects inputs; the join rule differs by schema version (see [Join rules](#join-rules)). `quorum` (2.1) requires `quorum.threshold` inputs, optionally per group. A join needs at least two inputs. |
 | `gate` | 2.0 | Evaluates its inputs; see [Gate evaluation](#gate-evaluation). |
 | `checkpoint` | 2.0 | Pauses for a human decision when the run's checkpoint policy requires it. |
 | `loop` | 2.0 | Declares a bounded loop over `loop.members`; see [Loops](#loops). |
 | `terminal` | 2.0 | Completes the workflow. |
 
 A node becomes ready when every non-loop-back predecessor has settled and at
-least one incoming edge's condition matches. Writers run alone: the scheduler
+least one incoming edge's condition matches; joins refine this per version. Writers run alone: the scheduler
 drains running readers before starting a writer and starts no reader while a
 writer runs. Nodes that share a `resource` label never run concurrently.
+
+### Join rules
+
+An `all` join with no matching input never runs in any version; it is skipped
+like any other node whose inputs are all unmatched.
+
+| Join | 2.0 | 2.1 | 2.2 |
+| --- | --- | --- | --- |
+| `all` | Runs when every predecessor has settled and every enabled incoming edge matches. | Runs when every predecessor has settled and at least one incoming edge matches; it receives only the matching inputs, which is how `failure_handling: collect` gathers partial results. | Same as 2.0. |
+| `any` | Waits until every predecessor has settled, then runs if one edge matches. | Runs with the first matching input; with none matching after all settle, the workflow fails. | Runs with the first matching input. |
 
 In 2.1, `failure_handling` on a map or join selects `fail-workflow` (default)
 or `collect`, with optional `max_failures` and `minimum_successes`.

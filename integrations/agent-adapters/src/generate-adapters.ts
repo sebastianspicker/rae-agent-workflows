@@ -32,6 +32,13 @@ export function resolveRepoPath(root: string, raw: string): string {
     throw new Error(`Path escapes repository root: ${raw}`);
   return candidate;
 }
+/** Allowlist of write targets; `.git` and `.github` are never writable, whatever the manifest says. */
+export function assertWritableTarget(root: string, path: string, allowed: string[]): void {
+  const target = relative(realpathSync(root), path).split(sep).join("/");
+  const denied = /^\.git(?:hub)?(?:\/|$)/i.test(target);
+  if (denied || !allowed.some((entry) => target === entry || target.startsWith(`${entry}/`)))
+    throw new Error(`Refusing to write outside the adapter allowlist: ${target}`);
+}
 export function renderTemplate(path: string, values: Record<string, string>): string {
   let content = readFileSync(path, "utf8");
   for (const [key, value] of Object.entries(values))
@@ -86,8 +93,16 @@ export function generate(
   const mirrors = mapping(generation.legacy_mirrors ?? {}, "legacy_mirrors");
   const roots = mapping(mirrors.root_entries ?? {}, "root_entries");
   const result = { writes: 0, mismatches: [] as string[] };
+  // Generated content plus exactly the mirrors this manifest declares.
+  const allowed = [
+    "integrations/agent-adapters/content",
+    ...[mirrors.cursor_skills_root, mirrors.codex_playbook, ...Object.values(roots)].flatMap(
+      (entry) => (typeof entry === "string" && entry ? [entry.replace(/\/+$/, "")] : []),
+    ),
+  ];
   function write(target: string, content: string, optional = false): void {
     const path = resolveRepoPath(root, target);
+    assertWritableTarget(root, path, allowed);
     if (optional && !existsSync(path)) return;
     if (optional && options.check && !mirrorIsShared(root, target)) {
       console.log(`SKIP: ${target} is untracked or ignored; not checked`);

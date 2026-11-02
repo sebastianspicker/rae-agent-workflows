@@ -6,7 +6,6 @@ import { assembleBoundedWorkflowContext } from "./workflow-context-bounded.js";
 import {
   anyJoinDecision,
   conditionMatches,
-  digest,
   failureEnvelope,
   freezeEnvelope,
   instanceId,
@@ -18,6 +17,8 @@ import {
 import {
   abortOnStop,
   contextInputs,
+  digest,
+  payloadField,
   decideBoundedRepeat,
   drainSettled,
   checkpointResumable,
@@ -107,11 +108,6 @@ interface ExhaustedResult {
 type BoundedContextAssembler = (options: Record<string, unknown>) => {
   evidence: Record<string, unknown>;
 };
-
-function payloadField(payload: JsonValue, key: string): JsonValue | undefined {
-  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return undefined;
-  return payload[key];
-}
 
 function isWorkflowWaiting(error: unknown): boolean {
   return (error as { workflowWaiting?: unknown } | null)?.workflowWaiting === true;
@@ -484,7 +480,11 @@ export async function scheduleWorkflowV21({
     );
     const passed = envelopes.filter(({ edge, envelope }) => conditionMatches(edge, envelope));
     const allSettled = edges.every((edge) => isSettled(edge.from));
-    if (node.join === "all") return allSettled ? { ready: true, inputs: passed } : { ready: false };
+    if (node.join === "all") {
+      if (!allSettled) return { ready: false };
+      // No matching input: skipped like v2.0/v2.2 (see discoverOrdinary), not run empty.
+      return passed.length ? { ready: true, inputs: passed } : { skip: true };
+    }
     if (node.join === "any") return anyJoinDecision(passed, allSettled);
     return quorumDecision(node, edges, envelopes, passed, allSettled);
   }
@@ -494,6 +494,10 @@ export async function scheduleWorkflowV21({
     if (decision.impossible === true) {
       fatal = new Error(String(decision.reason));
       emit("quorum_impossible", { node_id: node.id, quorum: decision.quorum });
+      return;
+    }
+    if (decision.skip === true) {
+      expanded.add(node.id);
       return;
     }
     if (decision.ready !== true) return;

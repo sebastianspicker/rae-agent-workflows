@@ -174,6 +174,7 @@ export async function install(
             relative: entry.backup_path,
             expected: state(entry.backup_path),
             replacement: state(entry.path).data,
+            mode: state(entry.path).mode, // the backup keeps the original's mode for uninstall
           });
     for (const [path] of files)
       mutations.push({
@@ -204,12 +205,15 @@ export async function uninstall(target: string, hook?: Hook): Promise<boolean> {
     const entries = checkedManifest(root);
     if (!entries) return false;
     const mutations: Mutation[] = [];
-    for (const [path, entry] of entries)
+    for (const [path, entry] of entries) {
+      const backup = entry.backup_path ? fileState(root, entry.backup_path) : null;
       mutations.push({
         relative: path,
         expected: fileState(root, path),
-        replacement: entry.backup_path ? fileState(root, entry.backup_path).data : null,
+        replacement: backup ? backup.data : null,
+        mode: backup?.mode,
       });
+    }
     mutations.push({
       relative: manifestPath,
       expected: fileState(root, manifestPath),

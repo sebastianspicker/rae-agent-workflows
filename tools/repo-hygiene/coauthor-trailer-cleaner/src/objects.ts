@@ -19,7 +19,7 @@ export function cleanMessage(message: Buffer, targets: readonly Target[]): Buffe
   for (const target of targets) {
     const name = escapePattern(asciiFold(Buffer.from(target.name).toString("latin1")));
     const email = escapePattern(asciiFold(Buffer.from(target.email).toString("latin1")));
-    const whitespace = "[ \\t\\n\\r\\f\\v]*";
+    const whitespace = "[ \\t]*"; // a trailer is one line
     const pattern = new RegExp(
       `^${REMOVED}*co-authored-by:${whitespace}${name}${whitespace}<${email}>${whitespace}(?:\\r?\\n)?`,
       "gm",
@@ -39,9 +39,11 @@ export function cleanMessage(message: Buffer, targets: readonly Target[]): Buffe
   if (!removed) return message;
   // Collapse blank lines only where a trailer was removed.
   const junction = new RegExp(`((?:\\r?\\n)*)${REMOVED}+((?:\\r?\\n)*)`, "g");
-  text = text.replace(junction, (_match, before: string, after: string) =>
-    /^(?:\r?\n){3,}$/.test(before + after) ? "\n\n" : before + after,
-  );
+  text = text.replace(junction, (match, before: string, after: string, offset: number) => {
+    // Trailers that ended the message leave at most one line break behind.
+    if (offset + match.length === text.length) return before.match(/\r?\n/)?.[0] ?? "";
+    return /^(?:\r?\n){3,}$/.test(before + after) ? "\n\n" : before + after;
+  });
   return Buffer.from(text, "latin1");
 }
 

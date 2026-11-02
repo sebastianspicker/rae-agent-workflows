@@ -33,7 +33,9 @@ npm run rae -- hygiene coauthor-cleaner [OPTIONS] --config <config.json>
 
 Key options:
 
-- `--apply`: perform the rewrite. Without it the cleaner runs as a dry run
+- `--apply`: perform the rewrite. Without it the cleaner runs as a dry run.
+  When no commit carries a targeted trailer, `--apply` prints
+  `Nothing to change.` and creates no recovery ref and pushes nothing
 - `--target "Name <email>"`: remove this co-author identity; repeatable
 - `--push`: push rewritten history with an exact pre-rewrite upstream OID lease
 - `--no-push`: rewrite locally only (default)
@@ -53,6 +55,12 @@ Key options:
 - `--validate-only`: validate inputs only
 - `--config <file>`: load defaults, targets, and optionally repos from JSON
 - `--repos-file <file>`: load `url path` pairs or a JSON array of repos
+
+Name repositories from one source only: config `repos`, `--repos-file`, or
+`url path` pairs on the command line. Mixing sources is an error.
+
+Only the targeted `Co-authored-by:` line is removed; the paragraphs and
+indentation around it stay as they were.
 
 Accepted repository URLs:
 

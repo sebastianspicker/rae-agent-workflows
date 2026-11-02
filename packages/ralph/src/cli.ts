@@ -233,6 +233,7 @@ function maybeAutoArchive(
   }
   const current = prd.project || "unknown-project";
   const tracking = join(paths.stateDir, ".last-project");
+  const lastPrd = join(paths.stateDir, "last-prd.json");
   let previous = "";
   try {
     previous = readFileSync(tracking, "utf8").trim();
@@ -245,11 +246,16 @@ function maybeAutoArchive(
       join(dirname(paths.prdFile), "archive"),
       previous,
       `auto-archive on project change (${previous} -> ${current})`,
+      false,
+      { prdCopy: lastPrd, repoRoot: paths.repoRoot },
     );
     logger.event("INFO", `auto_archive_on_project_change previous=${previous} current=${current}`);
   }
   const relativeTracking = relative(paths.repoRoot, tracking).split("\\").join("/");
   atomicWriteRelative(paths.repoRoot, relativeTracking, `${current}\n`);
+  // The validated PRD of this run, so a later project change archives the old PRD, not the new one.
+  const relativeCopy = relative(paths.repoRoot, lastPrd).split("\\").join("/");
+  atomicWriteRelative(paths.repoRoot, relativeCopy, readFileSync(paths.prdFile, "utf8"));
 }
 
 /** Read-only actions create no runtime files, take no lock, and write no logs. */

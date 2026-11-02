@@ -37,6 +37,8 @@ export {
   resolveCheckpointById,
   setRunStatus,
 } from "../run/operator-control.js";
+export { redact } from "../agents/agent-provider-runtime.js";
+export { lockOwnerAlive } from "../primitives/stale-lock.js";
 export { graphStatus, memoryStatus } from "../graph/index.js";
 export {
   loadExecutionProfile,

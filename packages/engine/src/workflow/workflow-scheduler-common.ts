@@ -1,5 +1,5 @@
 /** Shares envelope persistence, draining, stop-driven abort, edge conditions, loop restarts and run budgets across schedulers. */
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 import { writeExclusiveFileAtomic } from "../primitives/atomic-file.js";
@@ -51,6 +51,20 @@ export function persistEnvelope(runDir: string | null, envelope: WorkflowNodeEnv
   );
 }
 
+/**
+ * Records a failed v2.0 attempt for run evidence under `workflow/failed-attempts`, which resume
+ * never reads, so the attempt is counted without being treated as completed. The name carries a
+ * random suffix because attempt numbers restart on resume.
+ */
+export function persistFailedAttempt(runDir: string | null, envelope: WorkflowNodeEnvelope): void {
+  validateNodeEnvelope(envelope);
+  if (!runDir) return;
+  const directory = resolve(runDir, "workflow", "failed-attempts", envelope.node_id);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const name = envelopeFileName(envelope).replace(/\.json$/, `.${randomUUID()}.json`);
+  writeExclusiveFileAtomic(resolve(directory, name), `${JSON.stringify(envelope, null, 2)}\n`);
+}
+
 /** Parses a persisted envelope and names the file when it is truncated or not JSON. */
 export function readEnvelopeFile(pathValue: string): unknown {
   const text = readFileSync(pathValue, "utf8");
@@ -85,7 +99,8 @@ function findingBlocks(finding: Record<string, unknown>): boolean {
   return finding.blocking === true || finding.severity === "blocking";
 }
 
-function payloadField(payload: JsonValue, key: string): JsonValue | undefined {
+/** Reads one top-level field of an object payload. */
+export function payloadField(payload: JsonValue, key: string): JsonValue | undefined {
   if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return undefined;
   return payload[key];
 }
@@ -263,7 +278,8 @@ interface GateEnvelope {
   output_digest: string;
 }
 
-function outputDigest(value: unknown): string {
+/** Hex SHA-256 of the canonical JSON form of `value`. */
+export function digest(value: unknown): string {
   return createHash("sha256").update(canonicalJson(value)).digest("hex");
 }
 
@@ -289,7 +305,7 @@ export function gateProgress(envelope: GateEnvelope): { key: string; writerOnly:
   const inputsFailed = payloadField(envelope.payload, "inputs_failed") === true;
   return {
     key: substantive.length
-      ? outputDigest([...new Set(substantive.map(findingIdentity))].sort())
+      ? digest([...new Set(substantive.map(findingIdentity))].sort())
       : `output:${envelope.output_digest}`,
     writerOnly: blocking.length > substantive.length && substantive.length === 0 && !inputsFailed,
   };

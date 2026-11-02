@@ -46,6 +46,10 @@ export const EDGE_KINDS = new Set([
   "SUPPORTS_CLAIM",
   "SUPERSEDES",
   "INVALIDATES",
+  "INSTANCE_OF",
+  "NEXT",
+  "SELECTS",
+  "RECOMMENDS",
 ]);
 export const PHASES = [
   "arm",
@@ -374,9 +378,11 @@ export function atomicWrite(path: string, body: string, mode = 0o600): void {
 }
 
 export function canonicalJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (Array.isArray(value))
+    return `[${value.map((item) => canonicalJson(item ?? null)).join(",")}]`;
   if (value && typeof value === "object") {
     return `{${Object.keys(value)
+      .filter((key) => (value as Record<string, unknown>)[key] !== undefined)
       .sort()
       .map(
         (key) => `${JSON.stringify(key)}:${canonicalJson((value as Record<string, unknown>)[key])}`,

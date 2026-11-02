@@ -56,6 +56,14 @@ function readTargetDocument(targetRef: string, logs: string[]): string {
   }
 }
 
+/** Keeps an id unless another reviewer already used it; then prefixes the reviewer id. */
+function uniqueFindingId(id: string, reviewerId: string, seen: Set<string>): string {
+  let candidate = seen.has(id) ? `${reviewerId}:${id}` : id;
+  for (let n = 2; seen.has(candidate); n++) candidate = `${reviewerId}:${id}#${n}`;
+  seen.add(candidate);
+  return candidate;
+}
+
 /**
  * Normalizes reviewer outputs into a deterministic deduplicated review report.
  */
@@ -63,6 +71,7 @@ export function runReview(input: Input, logs: string[]): ReviewData {
   const reviewerFindings = input.reviewer_findings as ReviewerFindings[];
   const taggedFindings: TaggedFinding[] = [];
   const reviewers: ReviewerSummary[] = [];
+  const seenIds = new Set<string>();
 
   for (const rf of reviewerFindings) {
     reviewers.push({
@@ -73,7 +82,8 @@ export function runReview(input: Input, logs: string[]): ReviewData {
       `Processing findings from reviewer: ${rf.reviewer_id} (${rf.role}), ${rf.findings.length} findings`,
     );
     for (const f of rf.findings) {
-      taggedFindings.push({ ...f, _source: rf.reviewer_id });
+      const id = uniqueFindingId(f.id, rf.reviewer_id, seenIds);
+      taggedFindings.push({ ...f, id, _source: rf.reviewer_id });
     }
   }
 

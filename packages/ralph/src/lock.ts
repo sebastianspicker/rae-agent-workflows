@@ -10,7 +10,7 @@ import {
   writeSync,
 } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { hostname, uptime } from "node:os";
+import { hostname } from "node:os";
 import {
   mkdirAt,
   openDirectoryAt,
@@ -32,7 +32,6 @@ const CLOCK_TICKS = 100;
 
 interface HostMarker {
   hostname: string;
-  boot_ms: number;
   /** Stable machine identity where the platform offers one; only ever used to refuse reclaiming. */
   machine_id?: string;
   /** Start time (epoch seconds) of the lock holder; absent where it cannot be read. */
@@ -118,7 +117,6 @@ export function hostMarker(): HostMarker {
   const id = machineId();
   return {
     hostname: hostname(),
-    boot_ms: Math.round(Date.now() - uptime() * 1000),
     ...(id ? { machine_id: id } : {}),
     ...(started !== undefined ? { started } : {}),
   };
@@ -128,12 +126,9 @@ export function hostMarker(): HostMarker {
 export function foreignHost(recorded: unknown, current: HostMarker = hostMarker()): boolean {
   if (!recorded || typeof recorded !== "object") return false;
   const marker = recorded as Partial<HostMarker>;
-  if (typeof marker.hostname === "string" && marker.hostname !== current.hostname) return true;
-  return (
-    typeof marker.machine_id === "string" &&
-    current.machine_id !== undefined &&
-    marker.machine_id !== current.machine_id
-  );
+  if (typeof marker.machine_id === "string" && current.machine_id !== undefined)
+    return marker.machine_id !== current.machine_id; // a renamed host is still the same machine
+  return typeof marker.hostname === "string" && marker.hostname !== current.hostname;
 }
 
 /** True when the recorded start time proves the PID now belongs to a different process. */

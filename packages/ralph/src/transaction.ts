@@ -169,11 +169,21 @@ function validateOperationPlacement(operation: TransactionOperation): void {
   )
     throw new RalphError("transaction operation parent identity is invalid", EXIT.scope);
 }
+/** The exact shapes this module generates: `<uuid>-<role>`, or `.ralph-<uuid>-<role>` beside the target. */
+function operationName(role: "staging" | "baseline" | "recovery"): RegExp {
+  return new RegExp(
+    `^(?:\\.ralph-)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-${role}$`,
+    "u",
+  );
+}
 function validateOperationNames(operation: TransactionOperation): void {
-  for (const name of [operation.quarantine, operation.staging, operation.recovery]) {
-    if (name !== undefined && (!/^\.?[0-9A-Za-z-]+$/u.test(name) || name === "." || name === ".."))
+  for (const [name, role] of [
+    [operation.quarantine, "baseline"],
+    [operation.staging, "staging"],
+    [operation.recovery, "recovery"],
+  ] as const)
+    if (name !== undefined && !operationName(role).test(name))
       throw new RalphError("transaction operation name is invalid", EXIT.scope);
-  }
 }
 function validateOperation(operation: TransactionOperation): void {
   if (
@@ -529,14 +539,16 @@ export function beginTransaction(paths: RuntimePaths): { journalPath: string; wo
   const pointerParent = join(meta, "pointers");
   mkdirSync(txnParent, { recursive: true, mode: 0o700 });
   mkdirSync(pointerParent, { recursive: true, mode: 0o700 });
-  const transactionDir = realpathSync.native(mkdtempSync(join(txnParent, "txn-")));
-  const providerDir = realpathSync.native(mkdtempSync(join(tmpdir(), "ralph-fs-provider-")));
-  const mirror = join(providerDir, "workspace");
-  const baselineStore = join(transactionDir, "baseline");
-  mkdirSync(mirror, { mode: 0o700 });
-  mkdirSync(baselineStore, { mode: 0o700 });
-  const runtime = realpathSync.native(paths.stateDir);
+  let transactionDir: string | undefined;
+  let providerDir: string | undefined;
   try {
+    transactionDir = realpathSync.native(mkdtempSync(join(txnParent, "txn-")));
+    providerDir = realpathSync.native(mkdtempSync(join(tmpdir(), "ralph-fs-provider-")));
+    const mirror = join(providerDir, "workspace");
+    const baselineStore = join(transactionDir, "baseline");
+    mkdirSync(mirror, { mode: 0o700 });
+    mkdirSync(baselineStore, { mode: 0o700 });
+    const runtime = realpathSync.native(paths.stateDir);
     const baseline = makeManifest(paths.repoRoot, runtime);
     copyEntries(paths.repoRoot, baselineStore, baseline);
     copyEntries(paths.repoRoot, mirror, baseline);
@@ -576,8 +588,9 @@ export function beginTransaction(paths: RuntimePaths): { journalPath: string; wo
     });
     return { journalPath, workspace: mirror };
   } catch (error) {
-    rmSync(transactionDir, { recursive: true, force: true });
-    rmSync(providerDir, { recursive: true, force: true });
+    // Only the directories this call created; either may be unset if mkdtemp itself failed.
+    if (transactionDir) rmSync(transactionDir, { recursive: true, force: true });
+    if (providerDir) rmSync(providerDir, { recursive: true, force: true });
     throw error;
   }
 }
@@ -649,13 +662,14 @@ function entryRoots(journal: TransactionJournal): string[] {
 export function transactionDiff(paths: RuntimePaths, journalPath: string): string[] {
   const journal = assertBound(paths, journalPath);
   const current = makeManifest(journal.mirror);
-  return changed(journal.baseline, current)
+  const before = maps(journal.baseline);
+  const after = maps(current);
+  const all = changed(journal.baseline, current);
+  return all
     .filter((key) => {
-      const item = maps(journal.baseline).get(key) ?? maps(current).get(key);
+      const item = before.get(key) ?? after.get(key);
       if (item?.kind !== "dir") return true;
-      return !changed(journal.baseline, current).some(
-        (other) => other !== key && under(decoded(other), decoded(key)),
-      );
+      return !all.some((other) => other !== key && under(decoded(other), decoded(key)));
     })
     .map((key) => decoded(key).toString());
 }
@@ -1554,22 +1568,4 @@ export function orphanedPointer(
   const pointer = readPointer(paths);
   if (!pointer || statOptional(pointer.data.journal)) return undefined;
   return { pointer: pointer.path, journal: pointer.data.journal, id: pointer.data.id };
-}
-
-export function transactionForTests(paths: RuntimePaths): {
-  begin: () => { journalPath: string; workspace: string };
-  prepare: (path: string) => void;
-  verify: (path: string) => string[];
-  promote: (path: string) => void;
-  recover: () => void;
-  discard: (path: string) => void;
-} {
-  return {
-    begin: () => beginTransaction(paths),
-    prepare: (path) => prepareTransaction(paths, path),
-    verify: (path) => verifyTransaction(paths, path),
-    promote: (path) => promoteTransaction(paths, path),
-    recover: () => recoverTransaction(paths),
-    discard: (path) => discardTransaction(paths, path),
-  };
 }

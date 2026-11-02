@@ -5,6 +5,12 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+- Removing a trailer no longer merges the following paragraph or strips
+  indentation; a trailer is matched on one line only.
+- An `--apply` with nothing to change creates no refs and pushes nothing.
+- Naming repositories from more than one source is an error instead of
+  silently preferring the config.
+- `rev-list` output buffer raised to 256 MiB for very large histories.
 - Replaced Bash, Python and git-filter-repo execution with compiled TypeScript
   and raw Git object plumbing. Preserved commit trees, parent order, identity
   metadata, exact ref comparisons and leased pushes.

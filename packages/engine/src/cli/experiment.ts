@@ -356,10 +356,15 @@ function percent(value: number | null): string {
   return value === null ? "n/a" : `${(value * 100).toFixed(1)}%`;
 }
 
+/** Confidence level as a percentage without float noise (alpha 0.07 prints 93, not 93.00000000000001). */
+export function confidencePercent(alpha: number): number {
+  return Number(((1 - alpha) * 100).toFixed(2));
+}
+
 function printReport(report: ExperimentsExperimentReportV2): void {
   print(`VERDICT: ${report.verdict.status} — ${report.verdict.rationale}`);
   print(
-    `arm\tcompleted trials\tpass rate\t${(1 - report.analysis.alpha) * 100}% CI (${report.analysis.unit} units)`,
+    `arm\tcompleted trials\tpass rate\t${confidencePercent(report.analysis.alpha)}% CI (${report.analysis.unit} units)`,
   );
   for (const arm of report.arms) {
     const pass = arm.proportions.pass_rate;

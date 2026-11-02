@@ -52,6 +52,10 @@ prevents a guarded rollback, it leaves the competing edit untouched and retains
 the original material in `.rae-profile-recovery-*/RECOVERY.json` for manual,
 reviewed recovery.
 
+A replaced file keeps its permission bits, and uninstall restores the original
+file with its original bits. New files are created as 0644 and new folders as
+0755, both reduced by the umask.
+
 New installs require `scripts/src/verify.ts` or `scripts/dist/verify.js` and a
 package verification command. Uninstall still accepts legacy verifier layouts
 so existing manifest-v2 receipts remain recoverable. The historical installer

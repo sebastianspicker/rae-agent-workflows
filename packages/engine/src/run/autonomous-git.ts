@@ -469,7 +469,10 @@ export function gitPrivateInfoSnapshot(root: string): { exclude: string; attribu
   };
 }
 
-export function gitStateSnapshot(root: string): GitStateSnapshot {
+export function gitStateSnapshot(
+  root: string,
+  { ignored = true }: { ignored?: boolean } = {},
+): GitStateSnapshot {
   const topLevel = realpathSync(gitOutput(root, ["rev-parse", "--show-toplevel"]).trim());
   const gitDirectory = realpathSync(gitOutput(root, ["rev-parse", "--absolute-git-dir"]).trim());
   const symbolicHead = runProcess("git", ["-C", root, "symbolic-ref", "-q", "HEAD"], {
@@ -496,7 +499,8 @@ export function gitStateSnapshot(root: string): GitStateSnapshot {
       safe: safeConfigDigest(root),
     },
     private_info: gitPrivateInfoSnapshot(root),
-    ignored_paths: ignoredPathFingerprints(root),
+    // The ignored-files walk is only needed for the recorded baseline, never for comparisons.
+    ...(ignored ? { ignored_paths: ignoredPathFingerprints(root) } : {}),
   };
 }
 
@@ -596,7 +600,7 @@ export function assertGitStateInvariant(
   phase: string,
   scope: GitStateScope = "phase",
 ): void {
-  const changes = changedGitState(baseline, gitStateSnapshot(root), scope);
+  const changes = changedGitState(baseline, gitStateSnapshot(root, { ignored: false }), scope);
   if (changes.length > 0) {
     throw new Error(
       `prohibited Git-state change after ${phase}: ${changes.join("; ")}. ` +
@@ -606,7 +610,7 @@ export function assertGitStateInvariant(
 }
 
 export function refreshResumeRefBaseline(root: string, baseline: GitStateSnapshot): void {
-  const current = gitStateSnapshot(root);
+  const current = gitStateSnapshot(root, { ignored: false });
   // Refs are not compared: the agent was not running while paused, so user ref activity is
   // legitimate. HEAD, the run branch, the index and safety-relevant config still block.
   const blocking = changedGitState(baseline, current, "resume");

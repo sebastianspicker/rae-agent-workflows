@@ -820,24 +820,29 @@ async function runLegacyWorkflow(
   context: AutonomousLifecycleContext,
   runOptions: AutonomousActionOptions,
 ): Promise<void> {
-  const { through, controlPolicy, state, completed, phases } = legacyRunConfiguration(
-    context,
-    runOptions,
-  );
   const initialProvider = runOptions.provider || "auto";
   const releaseLock = acquireWorkflowLock(context.workspaceRoot, context.runId);
   try {
-    if (!prepareLegacyRun(context, command, runOptions, completed, state, initialProvider)) return;
-    const provider = await runLegacyPhases(
+    // Read completed_gates only once the lock is held.
+    const { through, controlPolicy, state, completed, phases } = legacyRunConfiguration(
       context,
-      phases,
-      controlPolicy,
       runOptions,
-      initialProvider,
     );
-    if (provider) finalizeLegacyRun(context, through, controlPolicy, provider, runOptions);
-  } catch (error) {
-    handleLegacyFailure(context, initialProvider, runOptions, error);
+    try {
+      if (!prepareLegacyRun(context, command, runOptions, completed, state, initialProvider)) {
+        return;
+      }
+      const provider = await runLegacyPhases(
+        context,
+        phases,
+        controlPolicy,
+        runOptions,
+        initialProvider,
+      );
+      if (provider) finalizeLegacyRun(context, through, controlPolicy, provider, runOptions);
+    } catch (error) {
+      handleLegacyFailure(context, initialProvider, runOptions, error);
+    }
   } finally {
     releaseLock();
   }

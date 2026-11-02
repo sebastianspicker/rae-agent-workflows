@@ -177,6 +177,8 @@ function validate(sha256: string, sizeBytes: number): void {
   )
     throw Object.assign(new Error("invalid artifact digest or size"), { statusCode: 400 });
 }
+/** Verifications streaming through one API process at a time; extra requests are told to retry. */
+const MAX_CONCURRENT_VERIFICATIONS = 4;
 export function createArtifactService({
   store,
   storage,
@@ -194,6 +196,103 @@ export function createArtifactService({
     verificationTimeoutMs > VERIFICATION_TIMEOUT_MS
   )
     throw new Error("Invalid artifact verification deadline");
+  let verifying = 0;
+  async function verifyOne(request: VerificationRequest) {
+    validate(request.sha256, request.sizeBytes);
+    const claimId = crypto.randomUUID();
+    const claimed = { ...request, claimId };
+    const artifact = await store.claimArtifactVerification({
+      ...claimed,
+      claimSeconds: Math.ceil(verificationTimeoutMs / 1000),
+    });
+    // A retry after a lost reply finds the artifact already verified.
+    if (artifact.state === "verified") return artifact;
+    const controller = new AbortController();
+    let body: Readable | undefined;
+    let terminal = false;
+    let timedOut = false;
+    let primaryError: unknown;
+    const deadline = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+      body?.destroy();
+    }, verificationTimeoutMs);
+    deadline.unref();
+    try {
+      const object = await objects.read(artifact.objectKey, controller.signal);
+      body = object.body;
+      if (controller.signal.aborted) throw conflict("artifact verification deadline exceeded");
+      const hash = crypto.createHash("sha256");
+      let actualSize = 0;
+      let oversized =
+        object.contentLength !== undefined && object.contentLength > request.sizeBytes;
+      if (!oversized) {
+        for await (const chunk of body) {
+          if (!(chunk instanceof Uint8Array))
+            throw new Error("Object storage returned non-byte data");
+          actualSize += chunk.byteLength;
+          if (actualSize > request.sizeBytes || actualSize > MAX_ARTIFACT_BYTES) {
+            oversized = true;
+            break;
+          }
+          hash.update(chunk);
+          if (controller.signal.aborted) throw conflict("artifact verification deadline exceeded");
+        }
+      }
+      if (oversized) {
+        controller.abort();
+        body.destroy();
+        await store.rejectArtifactVerification({ ...claimed, quarantineKey: null });
+        terminal = true;
+        throw conflict("uploaded artifact exceeds its reserved size");
+      }
+      if (controller.signal.aborted) throw conflict("artifact verification deadline exceeded");
+      if (
+        actualSize !== request.sizeBytes ||
+        hash.digest("hex") !== request.sha256 ||
+        !object.versionId
+      ) {
+        let quarantineKey: string | null = null;
+        if (object.versionId) {
+          quarantineKey = `quarantine/${artifact.id}/${claimId}`;
+          await objects.quarantine(
+            artifact.objectKey,
+            object.versionId,
+            quarantineKey,
+            controller.signal,
+          );
+        }
+        await store.rejectArtifactVerification({ ...claimed, quarantineKey });
+        terminal = true;
+        throw conflict("uploaded artifact checksum, size, or immutable version is invalid");
+      }
+      const verified = await store.verifyArtifact({
+        ...claimed,
+        objectVersionId: object.versionId,
+      });
+      terminal = true;
+      return verified;
+    } catch (error) {
+      primaryError =
+        timedOut && !terminal
+          ? conflict("artifact verification deadline exceeded")
+          : error instanceof Error
+            ? error
+            : new Error("Artifact verification failed", { cause: error });
+      throw primaryError;
+    } finally {
+      clearTimeout(deadline);
+      controller.abort();
+      body?.destroy();
+      if (!terminal) {
+        try {
+          await store.releaseArtifactVerification(claimed);
+        } catch {
+          if (primaryError instanceof Error) Object.assign(primaryError, { cleanupFailed: true });
+        }
+      }
+    }
+  }
   return {
     async reserve({
       idempotencyKey,
@@ -233,98 +332,15 @@ export function createArtifactService({
       }
     },
     async verify(request: VerificationRequest) {
-      validate(request.sha256, request.sizeBytes);
-      const claimId = crypto.randomUUID();
-      const claimed = { ...request, claimId };
-      const artifact = await store.claimArtifactVerification({
-        ...claimed,
-        claimSeconds: Math.ceil(verificationTimeoutMs / 1000),
-      });
-      const controller = new AbortController();
-      let body: Readable | undefined;
-      let terminal = false;
-      let timedOut = false;
-      let primaryError: unknown;
-      const deadline = setTimeout(() => {
-        timedOut = true;
-        controller.abort();
-        body?.destroy();
-      }, verificationTimeoutMs);
-      deadline.unref();
-      try {
-        const object = await objects.read(artifact.objectKey, controller.signal);
-        body = object.body;
-        if (controller.signal.aborted) throw conflict("artifact verification deadline exceeded");
-        const hash = crypto.createHash("sha256");
-        let actualSize = 0;
-        let oversized =
-          object.contentLength !== undefined && object.contentLength > request.sizeBytes;
-        if (!oversized) {
-          for await (const chunk of body) {
-            if (!(chunk instanceof Uint8Array))
-              throw new Error("Object storage returned non-byte data");
-            actualSize += chunk.byteLength;
-            if (actualSize > request.sizeBytes || actualSize > MAX_ARTIFACT_BYTES) {
-              oversized = true;
-              break;
-            }
-            hash.update(chunk);
-            if (controller.signal.aborted)
-              throw conflict("artifact verification deadline exceeded");
-          }
-        }
-        if (oversized) {
-          controller.abort();
-          body.destroy();
-          await store.rejectArtifactVerification({ ...claimed, quarantineKey: null });
-          terminal = true;
-          throw conflict("uploaded artifact exceeds its reserved size");
-        }
-        if (controller.signal.aborted) throw conflict("artifact verification deadline exceeded");
-        if (
-          actualSize !== request.sizeBytes ||
-          hash.digest("hex") !== request.sha256 ||
-          !object.versionId
-        ) {
-          let quarantineKey: string | null = null;
-          if (object.versionId) {
-            quarantineKey = `quarantine/${artifact.id}/${claimId}`;
-            await objects.quarantine(
-              artifact.objectKey,
-              object.versionId,
-              quarantineKey,
-              controller.signal,
-            );
-          }
-          await store.rejectArtifactVerification({ ...claimed, quarantineKey });
-          terminal = true;
-          throw conflict("uploaded artifact checksum, size, or immutable version is invalid");
-        }
-        const verified = await store.verifyArtifact({
-          ...claimed,
-          objectVersionId: object.versionId,
+      if (verifying >= MAX_CONCURRENT_VERIFICATIONS)
+        throw Object.assign(new Error("too many artifact verifications in progress"), {
+          statusCode: 503,
         });
-        terminal = true;
-        return verified;
-      } catch (error) {
-        primaryError =
-          timedOut && !terminal
-            ? conflict("artifact verification deadline exceeded")
-            : error instanceof Error
-              ? error
-              : new Error("Artifact verification failed", { cause: error });
-        throw primaryError;
+      verifying += 1;
+      try {
+        return await verifyOne(request);
       } finally {
-        clearTimeout(deadline);
-        controller.abort();
-        body?.destroy();
-        if (!terminal) {
-          try {
-            await store.releaseArtifactVerification(claimed);
-          } catch {
-            if (primaryError instanceof Error) Object.assign(primaryError, { cleanupFailed: true });
-          }
-        }
+        verifying -= 1;
       }
     },
     async download({ artifact }: { artifact: ArtifactRecord }) {

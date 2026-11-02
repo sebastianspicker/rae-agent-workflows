@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { parse as parseToml } from "smol-toml";
+import { CLAIM_ID_PATTERN } from "./store-types.js";
 
 const MAX_MAP_BYTES = 64 * 1024;
 
@@ -38,15 +39,13 @@ export function assertStableProjectMapDescriptor(before: fs.Stats, after: fs.Sta
   }
 }
 
-const SAFE_ID = /^[A-Za-z0-9._-]{1,128}$/;
-
 /** Reads the node keys this worker lets write; absent means every node is read-only. */
 function writeNodeKeys(projectId: string, value: object): readonly string[] {
   if (!("writeNodes" in value) || value.writeNodes === undefined) return Object.freeze([]);
   const nodes = value.writeNodes;
   if (
     !Array.isArray(nodes) ||
-    nodes.some((node: unknown) => typeof node !== "string" || !SAFE_ID.test(node))
+    nodes.some((node: unknown) => typeof node !== "string" || !CLAIM_ID_PATTERN.test(node))
   )
     throw new Error(`invalid project map entry: ${projectId}`);
   return Object.freeze([...new Set<string>(nodes)]);
@@ -55,7 +54,7 @@ function writeNodeKeys(projectId: string, value: object): readonly string[] {
 /** Validates one untrusted TOML descriptor before resolving it on the worker. */
 export function validateProjectMapEntry(projectId: string, value: unknown) {
   if (
-    !SAFE_ID.test(projectId) ||
+    !CLAIM_ID_PATTERN.test(projectId) ||
     !value ||
     typeof value !== "object" ||
     !("root" in value) ||

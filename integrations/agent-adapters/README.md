@@ -25,6 +25,9 @@ In `--check` mode, optional personal mirrors (for example `CLAUDE.md`) are
 compared only when git tracks them; untracked or ignored mirrors are skipped
 with a notice. Write mode is unchanged.
 
+The generator writes only below `integrations/agent-adapters/content/` and the
+mirror paths the manifest declares, and never below `.git/` or `.github/`.
+
 Limit a run with repeatable `--runner <id>`. Use `--manifest <path>` only
 when validating an explicit alternate manifest.
 

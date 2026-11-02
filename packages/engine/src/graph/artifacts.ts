@@ -647,11 +647,12 @@ function projectNodeAttempts(
       family: "workflow",
       trust: "authoritative",
       kind: "NodeAttempt",
-      id: `${runId}:${nodeId}:${envelope.loop_iteration ?? 1}:${envelope.attempt}`,
+      id: `${runId}:${nodeId}:${envelope.loop_iteration ?? 1}:${envelope.attempt}${envelope.instance_id ? `:${envelope.instance_id}` : ""}`,
       attributes: {
         node_id: nodeId,
         attempt: envelope.attempt,
         loop_iteration: envelope.loop_iteration ?? 1,
+        instance_id: envelope.instance_id,
         status: envelope.status,
         input_digest: envelope.input_digest,
         output_digest: envelope.output_digest,

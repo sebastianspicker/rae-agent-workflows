@@ -99,7 +99,7 @@ export function sanitizedEnv(cwd: string): NodeJS.ProcessEnv {
 function redact(text: string): string {
   return text
     .replace(
-      /((?:[A-Za-z_][A-Za-z0-9_]*)?(?:TOKEN|SECRET|PASSWORD|API_KEY|ACCESS_KEY|PRIVATE_KEY)[A-Za-z0-9_]*\s*[:=]\s*["':]?)[^\s"'}{,]+/giu,
+      /(\b(?:[A-Za-z_][A-Za-z0-9_]{0,63})?(?:TOKEN|SECRET|PASSWORD|API_KEY|ACCESS_KEY|PRIVATE_KEY)[A-Za-z0-9_]{0,64}\s*[:=]\s*["':]?)[^\s"'}{,]+/giu,
       "$1[REDACTED]",
     )
     .replace(

@@ -24,6 +24,9 @@ function conflict(): never {
     { statusCode: 409 },
   );
 }
+export function verificationBusy() {
+  return Object.assign(new Error("artifact verification is in progress"), { statusCode: 503 });
+}
 function reusedKey(): never {
   throw Object.assign(new Error("Idempotency-Key was reused with a different request"), {
     statusCode: 422,
@@ -154,6 +157,13 @@ export class PostgresArtifactStore implements ArtifactStore {
     return this.database.transaction(async (client) => {
       await lockReservation(client, request);
       const owner = await activeLease(client, request);
+      // A retry after a lost reply finds the artifact already verified: return it unchanged.
+      const done = await client.query(
+        `SELECT ${projection} FROM artifacts WHERE id=$1 AND state='verified' AND expected_sha256=$2
+        AND expected_size_bytes=$3 AND fence=$4 AND attempt_id=$5`,
+        [request.id, request.sha256, request.sizeBytes, request.fence, owner.attemptId],
+      );
+      if (done.rowCount) return { ...artifact(done), claimId: request.claimId };
       const result = await client.query(
         `UPDATE artifacts SET verification_claim_id=$5,verification_claimed_at=clock_timestamp(),
         verification_claim_expires_at=clock_timestamp()+($7::integer * interval '1 second'),verification_attempts=verification_attempts+1
@@ -161,6 +171,15 @@ export class PostgresArtifactStore implements ArtifactStore {
           AND (verification_claim_id IS NULL OR verification_claim_expires_at<=clock_timestamp()) RETURNING ${projection}`,
         [...claimValues(request), owner.attemptId, request.claimSeconds],
       );
+      if (!result.rowCount) {
+        const live = await client.query(
+          `SELECT 1 FROM artifacts WHERE id=$1 AND state='reserved' AND expected_sha256=$2
+          AND expected_size_bytes=$3 AND fence=$4 AND attempt_id=$5 AND verification_claim_expires_at>clock_timestamp()`,
+          [request.id, request.sha256, request.sizeBytes, request.fence, owner.attemptId],
+        );
+        // Another verification still holds the claim: workers retry a 503, never a 409.
+        if (live.rowCount) throw verificationBusy();
+      }
       return { ...artifact(result), claimId: request.claimId };
     });
   }

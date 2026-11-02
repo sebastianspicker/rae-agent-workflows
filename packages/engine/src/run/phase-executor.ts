@@ -22,7 +22,11 @@ import {
   runtimeNamespaceSnapshot,
   validateConcurrentOperatorChanges,
 } from "./autonomous-git.js";
-import { createRuntimeStateGuard, reconcileRuntimeStateGuard } from "./runtime-state-guard.js";
+import {
+  createRuntimeStateGuard,
+  operatorControlRefs,
+  reconcileRuntimeStateGuard,
+} from "./runtime-state-guard.js";
 import {
   buildPrompt,
   gateStatusForArtifact,
@@ -274,11 +278,10 @@ function mutationPhase(phase: AutonomousPhase): boolean {
   return phase === "build" || phase === "post-build";
 }
 function runtimeSnapshot(context: AutonomousRunContext, traceRef: string): Map<string, string> {
-  return runtimeNamespaceSnapshot(context.workspaceRoot, [
-    controlRef(context),
-    `${controlRef(context)}.lock`,
-    traceRef,
-  ]);
+  return runtimeNamespaceSnapshot(
+    context.workspaceRoot,
+    operatorControlRefs(controlRef(context), traceRef),
+  );
 }
 function controlRef(context: AutonomousRunContext): string {
   return `runs/${context.runId}/operator-control.json`;

@@ -28,6 +28,8 @@ const LINUX_CLOCK_TICKS = 100;
 interface LockOwner {
   pid: number;
   hostname: string | null;
+  /** Stable machine identity; absent in older records. */
+  machineId: string | null;
   /** Epoch seconds at which the owner process started; absent in older records. */
   started: number | null;
 }
@@ -75,6 +77,29 @@ function parsePsStartTime(text: string): number | null {
     Number,
   );
   return Math.floor(Date.UTC(year, month, day, hour, minute, second) / 1000);
+}
+
+let cachedMachineId: string | null | undefined;
+/** Stable machine id (`/etc/machine-id` or macOS `IOPlatformUUID`), or null where unavailable. */
+export function machineId(): string | null {
+  if (cachedMachineId !== undefined) return cachedMachineId;
+  let id: string | null = null;
+  try {
+    if (process.platform === "linux") {
+      id = readFileSync("/etc/machine-id", "utf8").trim() || null;
+    } else if (process.platform === "darwin") {
+      const output = execFileSync("ioreg", ["-rd1", "-c", "IOPlatformExpertDevice"], {
+        encoding: "utf8",
+        timeout: 2000,
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      id = /"IOPlatformUUID" = "([^"]+)"/.exec(output)?.[1] ?? null;
+    }
+  } catch {
+    id = null;
+  }
+  cachedMachineId = id;
+  return id;
 }
 
 /** Process start time in epoch seconds, or null where it cannot be read (other platforms, no ps). */
@@ -140,12 +165,13 @@ function readLockContent(lockPath: string): string | null {
 function parseLockOwner(content: string): LockOwner | null {
   const trimmed = content.trim();
   if (/^\d+$/.test(trimmed)) {
-    return { pid: Number.parseInt(trimmed, 10), hostname: null, started: null };
+    return { pid: Number.parseInt(trimmed, 10), hostname: null, machineId: null, started: null };
   }
   try {
     const parsed = JSON.parse(trimmed) as {
       pid?: unknown;
       hostname?: unknown;
+      machine_id?: unknown;
       started?: unknown;
     } | null;
     const pid = parsed?.pid;
@@ -153,6 +179,7 @@ function parseLockOwner(content: string): LockOwner | null {
     return {
       pid,
       hostname: typeof parsed?.hostname === "string" ? parsed.hostname : null,
+      machineId: typeof parsed?.machine_id === "string" ? parsed.machine_id : null,
       started:
         typeof parsed?.started === "number" && Number.isFinite(parsed.started)
           ? parsed.started
@@ -164,6 +191,21 @@ function parseLockOwner(content: string): LockOwner | null {
 }
 
 /**
+ * Fail closed: foreign when the machine ids differ or the hostname differs. The one exception is
+ * macOS with equal machine ids (same Mac whose hostname followed the network; no PID namespaces).
+ */
+export function lockOwnerForeign(
+  owner: { hostname: string | null; machineId: string | null },
+  own: { hostname: string; machineId: string | null },
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  const bothIds = owner.machineId !== null && own.machineId !== null;
+  if (bothIds && owner.machineId !== own.machineId) return true;
+  if (bothIds && platform === "darwin") return false;
+  return owner.hostname !== null && owner.hostname !== own.hostname;
+}
+
+/**
  * A lock is stale only when its owner is provably gone (no such PID, or a live PID that started
  * at a different time, so the PID was reused) or it was abandoned empty long ago. A lock recorded
  * on another host throws: it cannot be checked from here and is never retired automatically.
@@ -171,7 +213,7 @@ function parseLockOwner(content: string): LockOwner | null {
 function lockIsStale(lockPath: string, snapshot: LockSnapshot): boolean {
   const owner = parseLockOwner(snapshot.content);
   if (owner) {
-    if (owner.hostname !== null && owner.hostname !== hostname()) {
+    if (lockOwnerForeign(owner, { hostname: hostname(), machineId: machineId() })) {
       throw new Error(
         `lock ${lockPath} is held by pid ${owner.pid} on host ${owner.hostname}, which cannot be ` +
           `checked from ${hostname()}; after confirming that owner is gone, remove the file ` +
@@ -184,6 +226,17 @@ function lockIsStale(lockPath: string, snapshot: LockSnapshot): boolean {
     return current !== null && Math.abs(current - owner.started) > START_TIME_TOLERANCE_S;
   }
   return Date.now() - snapshot.mtimeMs >= ABANDONED_LOCK_MS;
+}
+
+/** False when the lock is missing or its owner is provably gone; true otherwise, including another host. */
+export function lockOwnerAlive(lockPath: string): boolean {
+  try {
+    const snapshot = readLockSnapshot(lockPath);
+    if (!snapshot) return false;
+    return !lockIsStale(lockPath, snapshot);
+  } catch {
+    return true; // foreign host or unreadable lock: cannot be checked, treated as alive
+  }
 }
 
 /** Creates the lock with its complete owner record in one step; throws EEXIST when held. */
@@ -291,6 +344,7 @@ export function acquireExclusiveLock(lockPath: string): ExclusiveLock | null {
   const content = `${JSON.stringify({
     pid: process.pid,
     hostname: hostname(),
+    ...(machineId() === null ? {} : { machine_id: machineId() }),
     ...(started === null ? {} : { started }),
     acquired_at: new Date().toISOString(),
     token,

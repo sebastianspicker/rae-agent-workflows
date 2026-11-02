@@ -263,7 +263,7 @@ older runs first, then node `key` byte-wise, in both stores. This is not an
 execution-order guarantee.
 
 Node reports lock the owning run and commit the fenced attempt, node state,
-immutable event, and outbox record together. The run becomes terminal only
+and immutable event together. The run becomes terminal only
 after every node is terminal. Any failed node makes the run failed; otherwise
 it succeeds. Cancellation uses the same run lock and cannot be overwritten by
 a concurrent report. Event streams read bounded pages after their cursor,
@@ -275,7 +275,7 @@ before waiting for connections and force-closes remaining sockets after a
 bounded grace period.
 
 `POST /api/v2/runs` accepts an `Idempotency-Key`; the control plane commits the
-revision, run, queued nodes, event, and outbox record in one PostgreSQL
+revision, run, queued nodes, and event in one PostgreSQL
 transaction. Each key is stored with a digest of its request: a retry with the
 same key and request replays the reply, while the same key with a different
 request returns `422` (`code: "idempotency_key_reused"`). Worker registration

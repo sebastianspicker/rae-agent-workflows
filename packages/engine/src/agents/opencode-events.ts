@@ -1,6 +1,6 @@
 /** Normalizes OpenCode event streams and persists them after serialization. */
 import { readFileSync, existsSync } from "node:fs";
-import { replacePrivateFile } from "./agent-provider-runtime.js";
+import { redact, replacePrivateFile } from "./agent-provider-runtime.js";
 const MAX_EVENT_COUNT = 20_000,
   MAX_EVENT_LINE_BYTES = 1024 * 1024;
 
@@ -75,7 +75,8 @@ function collectEvents(lines: string[]): { events: NormalizedEvent[]; texts: str
       texts.push(event.part.text);
     }
     if (isJsonObject(event) && event.type === "error") {
-      throw new Error("OpenCode emitted a terminal error event");
+      const detail = redact(JSON.stringify(event.error ?? event.part ?? event)).slice(0, 500);
+      throw new Error(`OpenCode emitted a terminal error event: ${detail}`);
     }
   }
   return { events, texts };

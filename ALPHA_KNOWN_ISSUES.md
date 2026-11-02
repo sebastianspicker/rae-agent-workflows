@@ -70,9 +70,7 @@ yet, what to watch for, and how to report problems.
   scratch clone.
 - **A bootstrapped install is tied to one machine type.** It refuses to run on
   a different operating system or CPU type. Bootstrap again on the target
-  machine.
-- **Locked-down sandboxes are not supported.** Ralph fails with "uv_uptime
-  returned EPERM" in a sandbox that blocks the system uptime call.
+  machine; `bootstrap --force` keeps your `prd.json`, run state and reports.
 
 ## Experimental hosted platform
 

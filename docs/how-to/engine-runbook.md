@@ -139,6 +139,8 @@ Run evidence is under `.pipeline/runs/<run-id>/`:
 - `workflow/attempts/<node>/` holds each node's envelope and gate outcome; the
   `gates/` directory is written only by legacy-linear runs and
   `orchestrate` stages
+- `workflow/failed-attempts/<node>/` records failed v2.0 provider attempts for
+  experiment metrics; resume does not read it
 - `trace.jsonl` and projected events record ordered execution
 - checkpoint and control files record human decisions
 - `run-report.md` is the bounded human-readable summary

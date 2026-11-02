@@ -418,11 +418,11 @@ export function queryGraph({
   const adjacency = graphAdjacency(graph.edges, nodes, allowed, operation);
   const seedTokens = tokens(seed);
   const exactSeeds = querySeeds(nodes, nodeSearchText, seed, seedTokens);
-  const distances = graphDistances(exactSeeds, adjacency, maxDepth);
+  const { distances, parents } = graphDistances(exactSeeds, adjacency, maxDepth);
   const ranked = rankedGraphNodes(nodes, nodeSearchText, seed, seedTokens, distances);
   const records = ranked
     .slice(0, maxRecords)
-    .map((entry) => graphQueryRecord(graph, seed, entry, operation));
+    .map((entry) => graphQueryRecord(graph, parents, entry, operation));
   const bundle = graphQueryBundle(graph, {
     seed,
     phase,
@@ -598,19 +598,21 @@ function graphDistances(
   seeds: string[],
   adjacency: Map<string, string[]>,
   maxDepth: number,
-): Map<string, number> {
+): { distances: Map<string, number>; parents: Map<string, string> } {
   const distances = new Map(seeds.map((id) => [id, 0]));
+  const parents = new Map<string, string>();
   let frontier = seeds;
   for (let depth = 1; depth <= maxDepth && frontier.length; depth++) {
-    frontier = nextGraphFrontier(frontier, adjacency, distances, depth);
+    frontier = nextGraphFrontier(frontier, adjacency, distances, parents, depth);
   }
-  return distances;
+  return { distances, parents };
 }
 
 function nextGraphFrontier(
   frontier: string[],
   adjacency: Map<string, string[]>,
   distances: Map<string, number>,
+  parents: Map<string, string>,
   depth: number,
 ): string[] {
   const next: string[] = [];
@@ -618,6 +620,7 @@ function nextGraphFrontier(
     for (const neighbor of adjacency.get(id) ?? [])
       if (!distances.has(neighbor)) {
         distances.set(neighbor, depth);
+        parents.set(neighbor, id);
         next.push(neighbor);
       }
   return next;
@@ -666,7 +669,7 @@ function tokenOverlap(left: Set<string>, right: Set<string>): number {
 
 function graphQueryRecord(
   graph: LoadedGraph,
-  seed: string,
+  parents: Map<string, string>,
   entry: RankedNode,
   operation: GraphOperation,
 ): GraphGraphContext["records"][number] {
@@ -674,7 +677,7 @@ function graphQueryRecord(
     node_id: entry.node.logical_id,
     kind: entry.node.kind,
     selection_reason: querySelectionReason(entry),
-    traversal_path: entry.depth === null ? [] : [seed, entry.node.logical_id].slice(0, 5),
+    traversal_path: traversalPath(parents, entry),
     trust_class: entry.node.trust_class,
     source_ref: entry.node.source_ref,
     source_digest: entry.node.source_digest,
@@ -687,6 +690,17 @@ function graphQueryRecord(
     },
     snippet: sourceSnippet(graph.root, entry.node, operation),
   };
+}
+
+/** The BFS path from the reached seed node to the result; empty when it cannot be reconstructed. */
+function traversalPath(parents: Map<string, string>, entry: RankedNode): string[] {
+  if (entry.depth === null || entry.depth > 4) return [];
+  const path = [entry.node.logical_id];
+  for (let id = parents.get(path[0]); id !== undefined; id = parents.get(id)) {
+    if (path.length >= 5) return [];
+    path.unshift(id);
+  }
+  return path.length === entry.depth + 1 ? path : [];
 }
 
 function querySelectionReason(entry: RankedNode): string {

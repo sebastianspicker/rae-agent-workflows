@@ -13,10 +13,11 @@ port.on("message", async (request: CatalogRequest) => {
   const before = measure.snapshot();
   const response: CatalogResponse = { id: request.id };
   try {
-    response.value =
-      request.action === "page"
-        ? await catalog.page(request.project, request.options)
-        : await catalog.locate(request.project, request.runId, { view: request.view });
+    if (request.action === "page")
+      response.value = await catalog.page(request.project, request.options);
+    else if (request.action === "list") response.value = await catalog.list(request.project);
+    else
+      response.value = await catalog.locate(request.project, request.runId, { view: request.view });
   } catch (error) {
     response.error = error instanceof Error ? error.message : "Catalog operation failed";
     if (error instanceof Error && "status" in error && typeof error.status === "number")

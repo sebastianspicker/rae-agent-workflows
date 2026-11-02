@@ -174,6 +174,10 @@ export function main(args: string[]): number {
   options.dryRun = !apply || configDryRun;
   if (options.backupRemote && !/^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$/.test(options.backupRemote))
     throw new Error("Invalid backup remote name");
+  if ([repos.length > 0, Boolean(reposFile), positionals.length > 0].filter(Boolean).length > 1)
+    throw new Error(
+      "Specify repositories from one source only: config repos, --repos-file or URL/path pairs",
+    );
   if (!repos.length && reposFile) {
     const content = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true })
       .decode(readFileSync(reposFile))
@@ -205,6 +209,7 @@ export function main(args: string[]): number {
       );
       if (options.dryRun && !options.validateOnly)
         console.log("Dry run: no objects or refs were written; pass --apply to rewrite.");
+      if (result.nothingToChange) console.log("Nothing to change.");
       if (result.recoveryRef) console.log(`Recovery ref: ${result.recoveryRef}`);
       for (const warning of result.warnings ?? []) console.error(`[warn] ${warning}`);
       if (result.residualRefs?.length)

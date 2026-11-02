@@ -139,6 +139,7 @@ const REQUIRED_MIGRATIONS = [
   "004_artifact_verification_claims.sql",
   "005_idempotency_namespaces.sql",
   "006_idempotency_digests.sql",
+  "007_drop_outbox.sql",
 ];
 
 /** Lease and heartbeat durations in seconds; defaults match the worker protocol (60 and 20). */
@@ -454,6 +455,8 @@ export class PostgresStore {
   }: CreateRunInput) {
     if (!Array.isArray(nodes) || nodes.length > MAX_RUN_NODES)
       throw Object.assign(new Error("run node count exceeds 1000"), { statusCode: 400 });
+    if (nodes.length === 0)
+      throw Object.assign(new Error("run requires at least one node"), { statusCode: 400 });
     assertClaimableIds(projectId, nodes);
     assertUniqueNodeKeys(nodes);
     if (!idempotencyKey)
@@ -518,9 +521,6 @@ export class PostgresStore {
         "INSERT INTO events (run_id,type,payload,traceparent) VALUES ($1,'run.queued',$2::jsonb,$3)",
         [runId, json(response), traceparent],
       );
-      await client.query("INSERT INTO outbox (topic,payload) VALUES ('run.queued',$1::jsonb)", [
-        json({ runId, traceparent }),
-      ]);
       await client.query("SELECT pg_notify('rae_platform_work','work')");
       await insertIdempotent(client, scope, "run", response, expected);
       return response;
@@ -646,17 +646,10 @@ export class PostgresStore {
         `run.${runState}`,
         json(terminalPayload),
       ]);
-      await client.query("INSERT INTO outbox (topic,payload) VALUES ($1,$2::jsonb)", [
-        `run.${runState}`,
-        json(terminalPayload),
-      ]);
     } else {
       await client.query("UPDATE runs SET updated_at=now() WHERE id=$1", [runId]);
     }
     return runState;
-  }
-  async notifyWork() {
-    await this.query("SELECT pg_notify('rae_platform_work','work')");
   }
   async reclaimExpired(client: PgClient) {
     // Runs are locked with SKIP LOCKED too, so reclaim never waits on (or deadlocks with) a report.
@@ -701,10 +694,6 @@ export class PostgresStore {
         "node.failed",
         payload,
       ]);
-      await client.query("INSERT INTO outbox (topic,payload) VALUES ($1,$2::jsonb)", [
-        "node.failed",
-        payload,
-      ]);
     }
     for (const runId of new Set(exhausted.rows.map((node) => node.run_id)))
       await this.settleRun(client, runId);
@@ -742,13 +731,19 @@ export class PostgresStore {
   async startReconciler(onWake: (wake: WorkWake) => void = () => {}) {
     await this.ensureNotificationListener();
     this.workSubscribers.add(onWake);
+    let running = false;
     const timer = setInterval(async () => {
+      // A slow tick must not stack more reconciliations on the pool.
+      if (running) return;
+      running = true;
       try {
         const expired = await this.reconcile();
         onWake({ notified: false, expired });
       } catch (error) {
         this.logger("error", "lease reconciliation failed", { error: errorText(error) });
         onWake({ notified: false, expired: 0, failed: true });
+      } finally {
+        running = false;
       }
     }, this.reconcileIntervalMs());
     timer.unref?.();
@@ -851,10 +846,6 @@ export class PostgresStore {
         await client.query(
           "INSERT INTO events (run_id,type,payload) VALUES ($1,'run.cancelled',$2::jsonb)",
           [runId, json(payload)],
-        );
-        await client.query(
-          "INSERT INTO outbox (topic,payload) VALUES ('run.cancelled',$1::jsonb)",
-          [json(payload)],
         );
         await client.query("SELECT pg_notify('rae_platform_work','cancelled')");
         return result.rows[0];
@@ -975,7 +966,7 @@ export class PostgresStore {
   async metricsSnapshot(signal?: AbortSignal) {
     const result = await this.managementQuery<Record<string, number>>(
       signal,
-      'SELECT (SELECT count(*) FROM run_nodes WHERE state=\'queued\')::int AS "queueDepth", 0::int AS "activeWaits", COALESCE(EXTRACT(EPOCH FROM now()-max(last_seen_at)),0)::float AS "workerFreshnessSeconds", (SELECT count(*) FROM outbox WHERE delivered_at IS NULL)::int AS "outboxPending" FROM workers',
+      'SELECT (SELECT count(*) FROM run_nodes WHERE state=\'queued\')::int AS "queueDepth", 0::int AS "activeWaits", COALESCE(EXTRACT(EPOCH FROM now()-max(last_seen_at)),0)::float AS "workerFreshnessSeconds" FROM workers',
     );
     const snapshot = result.rows[0] || {};
     snapshot.activeWaits = this.workWaiters.size;
@@ -1094,7 +1085,13 @@ export class PostgresStore {
       return { found: true, response };
     });
   }
-  async claim({ workerId, longPollSeconds = 0, projects = [], idempotencyKey }: ClaimInput) {
+  async claim({
+    workerId,
+    longPollSeconds = 0,
+    projects = [],
+    idempotencyKey,
+    signal,
+  }: ClaimInput) {
     if (!idempotencyKey)
       throw Object.assign(new Error("Idempotency-Key is required"), { statusCode: 400 });
     if (this.closed) throw storeClosedError();
@@ -1109,13 +1106,24 @@ export class PostgresStore {
           waiter?.cancel();
           throw storeClosedError();
         }
+        // A caller that hung up must not receive a lease it will never see.
+        if (signal?.aborted) {
+          waiter?.cancel();
+          return null;
+        }
         const attempt = await this.claimOnce({ workerId, projects, idempotencyKey });
         if (attempt.found) {
           waiter?.cancel();
           return attempt.response;
         }
-        if (!waiter) return null;
+        if (!waiter || signal?.aborted) {
+          waiter?.cancel();
+          return null;
+        }
+        signal?.addEventListener("abort", waiter.cancel, { once: true });
         const wake = await waiter.promise;
+        signal?.removeEventListener("abort", waiter.cancel);
+        if (signal?.aborted) return null;
         if (wake.cancelled || this.closed) throw storeClosedError();
       } catch (error) {
         waiter?.cancel();
@@ -1218,10 +1226,6 @@ export class PostgresStore {
         `node.${state}`,
         json({ runId, nodeId, fence, result }),
       ]);
-      await client.query("INSERT INTO outbox (topic,payload) VALUES ($1,$2::jsonb)", [
-        `node.${state}`,
-        json({ runId, nodeId, fence, result }),
-      ]);
       const runState = await this.settleRun(client, runId);
       await client.query("SELECT pg_notify('rae_platform_work','reported')");
       const response = { state, runState };
@@ -1266,7 +1270,6 @@ export class MemoryStore {
   pendingKeys = new Map<string, { promise: Promise<unknown>; requestDigest: string | null }>();
   runLocks = new Map<string, Promise<void>>();
   artifacts = new Map<string, MemoryArtifact>();
-  outbox: OutboxRecord[] = [];
   workWaiters = new Set<(wake: WorkWake) => void>();
   now: () => number;
   closed = false;
@@ -1287,7 +1290,6 @@ export class MemoryStore {
     this.keys = new Map();
     this.pendingKeys = new Map();
     this.events = new Map();
-    this.outbox = [];
     this.revisions = new Map();
     this.active = new Map();
     this.workers = new Map();
@@ -1378,15 +1380,6 @@ export class MemoryStore {
     events.push(event);
     return event;
   }
-  appendOutbox(topic: string, payload: unknown, createdAt = this.timestamp()) {
-    this.outbox.push({
-      id: this.outbox.length + 1,
-      topic,
-      payload,
-      createdAt,
-      deliveredAt: null,
-    });
-  }
   notifyWork(message: WorkWake = { notified: true, expired: 0 }) {
     for (const wake of [...this.workWaiters]) wake(message);
   }
@@ -1420,6 +1413,8 @@ export class MemoryStore {
   }: CreateRunInput) {
     if (!Array.isArray(nodes) || nodes.length > MAX_RUN_NODES)
       throw Object.assign(new Error("run node count exceeds 1000"), { statusCode: 400 });
+    if (nodes.length === 0)
+      throw Object.assign(new Error("run requires at least one node"), { statusCode: 400 });
     assertClaimableIds(projectId, nodes);
     assertUniqueNodeKeys(nodes);
     if (Buffer.byteLength(JSON.stringify({ revision, nodes, request })) > MAX_ENVELOPE_BYTES)
@@ -1455,7 +1450,6 @@ export class MemoryStore {
         this.runs.set(run.id, run);
         this.events.set(run.id, []);
         this.appendEvent(run.id, "run.queued", { runId: run.id }, traceparent);
-        this.appendOutbox("run.queued", { runId: run.id, traceparent });
         for (const node of nodes)
           this.nodes.set(id(), {
             runId: run.id,
@@ -1505,7 +1499,6 @@ export class MemoryStore {
       workerFreshnessSeconds: lastSeen.length
         ? Math.max(0, (Date.now() - Math.max(...lastSeen)) / 1000)
         : 0,
-      outboxPending: this.outbox.filter((entry) => !entry.deliveredAt).length,
     };
   }
   async uploadRevision({
@@ -1538,15 +1531,21 @@ export class MemoryStore {
           document,
           validation: { valid, errors: [] },
         };
+        // The reply has the shape PostgresStore returns: the stored document stays internal.
+        const reply = ({ id, digest, validation }: PlatformRevision) => ({
+          id,
+          digest,
+          validation,
+        });
         for (const revision of this.revisions.values())
           if (
             revision.projectId === projectId &&
             revision.kind === kind &&
             revision.digest === actual
           )
-            return revision;
+            return reply(revision);
         this.revisions.set(record.id, record);
-        return record;
+        return reply(record);
       },
       { requestDigest: requestDigest({ projectId, kind, document, expectedDigest }) },
     );
@@ -1642,7 +1641,6 @@ export class MemoryStore {
     const payload = { runId: run.id, nodeId, fence: node.attempts, result: ATTEMPTS_EXHAUSTED };
     const completedAt = this.timestamp();
     this.appendEvent(run.id, "node.failed", payload, null, completedAt);
-    this.appendOutbox("node.failed", payload, completedAt);
     this.settleRun(run, completedAt);
   }
   /** Marks the run terminal once every node is terminal; otherwise it stays running. */
@@ -1655,7 +1653,6 @@ export class MemoryStore {
       run.updatedAt = completedAt;
       const terminalPayload = { runId: run.id, state: run.state, completedAt: run.updatedAt };
       this.appendEvent(run.id, `run.${run.state}`, terminalPayload, null, completedAt);
-      this.appendOutbox(`run.${run.state}`, terminalPayload, completedAt);
     } else {
       run.state = RUN_STATE.RUNNING;
       run.updatedAt = this.timestamp();
@@ -1725,7 +1722,13 @@ export class MemoryStore {
     }
     return null;
   }
-  async claim({ workerId, longPollSeconds = 0, projects = [], idempotencyKey }: ClaimInput) {
+  async claim({
+    workerId,
+    longPollSeconds = 0,
+    projects = [],
+    idempotencyKey,
+    signal,
+  }: ClaimInput) {
     if (this.closed) throw storeClosedError();
     const response = await this.idempotent(
       operationKey("claim", workerId),
@@ -1740,13 +1743,20 @@ export class MemoryStore {
             waiter?.cancel();
             throw storeClosedError();
           }
+          if (signal?.aborted) {
+            waiter?.cancel();
+            return null;
+          }
           const claim = this.claimOnce({ workerId, projects });
           if (claim) {
             waiter?.cancel();
             return claim;
           }
           if (!waiter) return null;
+          signal?.addEventListener("abort", waiter.cancel, { once: true });
           const wake = await waiter.promise;
+          signal?.removeEventListener("abort", waiter.cancel);
+          if (signal?.aborted) return null;
           if (wake.cancelled || this.closed) throw storeClosedError();
         }
       },
@@ -1814,7 +1824,6 @@ export class MemoryStore {
           const eventPayload = { runId: run.id, nodeId, fence, result };
           const completedAt = this.timestamp();
           this.appendEvent(run.id, `node.${state}`, eventPayload, null, completedAt);
-          this.appendOutbox(`node.${state}`, eventPayload, completedAt);
           this.settleRun(run, completedAt);
           this.notifyWork();
           return { state, runState: run.state };
@@ -1864,7 +1873,6 @@ export class MemoryStore {
           }
           const payload = { runId, state: run.state, completedAt: run.cancelledAt };
           this.appendEvent(runId, "run.cancelled", payload, null, run.cancelledAt);
-          this.appendOutbox("run.cancelled", payload, run.cancelledAt);
           this.notifyWork();
           return { id: runId, state: run.state, cancelledAt: run.cancelledAt };
         });
@@ -2018,8 +2026,21 @@ export class MemoryStore {
       request.claimSeconds > 300
     )
       throw new Error("Invalid verification claim duration");
+    const { lease } = this.artifactOwner(request);
+    const done = this.artifacts.get(request.id);
+    // A retry after a lost reply finds the artifact already verified: return it unchanged.
+    if (
+      done?.state === "verified" &&
+      done.attemptId === lease.attemptId &&
+      done.workerId === request.workerId &&
+      done.nodeId === request.nodeId &&
+      String(done.fence) === String(request.fence) &&
+      done.expectedSha256 === request.sha256 &&
+      Number(done.expectedSizeBytes) === request.sizeBytes
+    )
+      return { ...done, claimId: request.claimId };
     const artifact = this.artifactReservation(request);
-    if (artifact.claimId && (artifact.claimExpiresAt ?? 0) > this.now()) artifactConflict();
+    if (artifact.claimId && (artifact.claimExpiresAt ?? 0) > this.now()) throw verificationBusy();
     artifact.claimId = request.claimId;
     artifact.claimExpiresAt = this.now() + request.claimSeconds * 1000;
     artifact.verificationAttempts++;
@@ -2089,7 +2110,6 @@ import type {
   MemoryWorker,
   MemoryEvent,
   PlatformRevision,
-  OutboxRecord,
   RunView,
   Claim,
   ReportResult,
@@ -2098,7 +2118,7 @@ import type {
   NodeState,
   QueryResult,
 } from "./store-types.js";
-import { PostgresArtifactStore } from "./artifact-store.js";
+import { PostgresArtifactStore, verificationBusy } from "./artifact-store.js";
 import type {
   ArtifactStore,
   ArtifactRecord,

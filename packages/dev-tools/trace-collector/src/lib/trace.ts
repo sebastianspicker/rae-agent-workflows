@@ -1,7 +1,7 @@
 /**
  * Loads, schema-validates, and summarizes pipeline traces within workspace boundaries.
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { createAjvInstance, resolveWithinWorkspace } from "@rae/dev-tools-shared";
 import type { Input, TraceEvent, TraceResult, TraceSummary } from "../types.js";
 
@@ -26,29 +26,48 @@ interface SummaryState {
   retries: number;
 }
 
+const MAX_TRACE_BYTES = 64 * 1024 * 1024;
+
+function assertEventObject(event: unknown, where: string): TraceEvent {
+  if (event === null || typeof event !== "object" || Array.isArray(event)) {
+    throw Object.assign(new Error(`Invalid trace event at ${where}: event must be an object`), {
+      code: "E_BAD_TRACE",
+    });
+  }
+  return event as TraceEvent;
+}
+
 export function readJsonlEvents(tracePath: string): TraceEvent[] {
+  const size = statSync(tracePath).size;
+  if (size > MAX_TRACE_BYTES) {
+    throw Object.assign(new Error(`Trace file too large: ${size} > ${MAX_TRACE_BYTES} bytes`), {
+      code: "E_BAD_TRACE",
+    });
+  }
   const raw = readFileSync(tracePath, "utf8");
   const lines = raw
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
   return lines.map((line, idx) => {
+    let event: unknown;
     try {
-      return JSON.parse(line) as TraceEvent;
+      event = JSON.parse(line);
     } catch (error) {
       throw Object.assign(new Error(`Invalid JSONL at line ${idx + 1}: ${String(error)}`), {
         code: "E_BAD_TRACE",
       });
     }
+    return assertEventObject(event, `line ${idx + 1}`);
   });
 }
 
 function createSummaryState(): SummaryState {
   return {
-    eventsByType: {},
+    eventsByType: Object.create(null),
     gateResults: { pass: 0, fail: 0, warn: 0 },
     phaseStarts: new Map<string, number>(),
-    phaseDurations: {},
+    phaseDurations: Object.create(null),
     activityResolutions: new Map<string, ActivityResolution>(),
     totalTokensIn: 0,
     totalTokensOut: 0,
@@ -225,6 +244,9 @@ export function loadTraceSchema(schemaRoot: string, schemaRef: string): Record<s
 export function loadTraceEvents(input: Input, workspaceRoot: string, logs: string[]): TraceEvent[] {
   if (!input.trace_path) {
     const events = input.events ?? [];
+    events.forEach((event, index) => {
+      assertEventObject(event, `index ${index}`);
+    });
     logs.push(`Loaded inline trace events: ${events.length}`);
     return events;
   }

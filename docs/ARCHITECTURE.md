@@ -140,7 +140,7 @@ report and benchmark card from the records. See
 | Experiment lock, trial records, logs, reports and exports | Engine experiment runner, `.pipeline/experiments/<experiment-id>/` | Authoritative for that experiment's trial records; reports are derived |
 | Ralph PRD, reports, and runtime log | Ralph package or embedded installation | Separate from engine run state |
 | Ralph fixing journals and immutable baselines | Private external transaction directory | Recovery authority for a fixing transaction |
-| Hosted runs, leases, events, outbox, and artifact metadata | Experimental platform PostgreSQL | Hosted control-plane state only |
+| Hosted runs, leases, events, and artifact metadata | Experimental platform PostgreSQL | Hosted control-plane state only |
 | Hosted artifact bytes and quarantine | Configured S3-compatible store | Accepted only after digest and size verification |
 
 Workflow and memory registries use owner-only storage, locks, atomic writes, and
