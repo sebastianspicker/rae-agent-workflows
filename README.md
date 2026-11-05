@@ -15,6 +15,8 @@ RAE is a local-first toolkit for controlled repository changes. It combines
 versioned graph workflows, isolated Git worktrees, schema-validated artifacts,
 human checkpoints, verification gates, and durable local run evidence.
 
+> _Claude was used to polish and proof-read the code and documentation of this repository._
+
 <details>
 <summary>Status and limitations</summary>
 
