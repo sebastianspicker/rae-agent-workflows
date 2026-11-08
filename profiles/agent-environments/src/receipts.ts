@@ -173,7 +173,7 @@ function recovery(root: number, receipts: Receipt[], conflicts: string[], reason
     root,
     `${directory}/RECOVERY.json`,
     Buffer.from(
-      JSON.stringify(
+      `${JSON.stringify(
         {
           reason,
           conflicts,
@@ -182,7 +182,7 @@ function recovery(root: number, receipts: Receipt[], conflicts: string[], reason
         },
         null,
         2,
-      ) + "\n",
+      )}\n`,
     ),
   );
   return directory;

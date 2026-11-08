@@ -1,0 +1,17 @@
+---
+# Paths Codacy should not analyze. Lockfiles stay in so dependency scanning keeps working.
+exclude_paths:
+  # Benchmark harnesses that write only into fresh mkdtemp directories
+  - "scripts/src/benchmarks/**"
+  - "packages/engine/scripts/benchmark-*.ts"
+  # Fixture data
+  - "apps/operator/demo/fixtures.ts"
+  - "experiments/**/repositories/**"
+  # Generated from adapter templates
+  - "integrations/agent-adapters/content/**"
+
+engines:
+  # Lizard measures function length and complexity; JSON data files have neither.
+  lizard:
+    exclude_paths:
+      - "**/*.json"

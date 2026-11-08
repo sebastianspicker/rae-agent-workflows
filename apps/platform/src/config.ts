@@ -172,6 +172,7 @@ function assertDatabaseTransport(config: PlatformConfig) {
 
 export async function loadConfig(path = process.env.RAE_PLATFORM_CONFIG) {
   if (!path) throw new Error("RAE_PLATFORM_CONFIG must point to a TOML configuration file");
+  // nosemgrep: operator-set RAE_PLATFORM_CONFIG
   const parsed = configSchema.parse(parseToml(await fs.readFile(path, "utf8")));
   if (!parsed.oidc && !parsed.platform.allowInsecureAuth) {
     throw new Error(

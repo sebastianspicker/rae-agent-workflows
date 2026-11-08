@@ -1,6 +1,7 @@
 /** Reduces durable v2.2 wait signals with deterministic, idempotent consumption. */
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { acquireExclusiveLock } from "../primitives/stale-lock.js";
 
 const STATE_NAME = "wait-state.json";
 
@@ -220,20 +221,18 @@ function writeState(runDir: string, state: WorkflowV22State): void {
 }
 
 function withStateLock<T>(runDir: string, action: () => T): T {
-  const lock = `${statePath(runDir)}.lock`;
   mkdirSync(resolve(runDir, "workflow"), { recursive: true, mode: 0o700 });
+  // The shared lock records its owner, so a lock left by a dead process is retired.
   for (let attempt = 0; attempt < 100; attempt++) {
-    try {
-      mkdirSync(lock, { mode: 0o700 });
+    const lock = acquireExclusiveLock(`${statePath(runDir)}.lock`);
+    if (lock) {
       try {
         return action();
       } finally {
-        rmSync(lock, { recursive: true, force: true });
+        lock.release();
       }
-    } catch (error) {
-      if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2);
     }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2);
   }
   throw new Error("workflow v2.2 wait state is busy; retry the signal command");
 }

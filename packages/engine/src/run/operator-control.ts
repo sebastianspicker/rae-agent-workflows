@@ -6,7 +6,6 @@ import {
   mkdirSync,
   openSync,
   readdirSync,
-  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -274,61 +273,47 @@ export function resolveCheckpoint(
     throw badInput("checkpoint rationale is required and must be at most 4096 characters");
   }
   const path = getCheckpointPath(runId, phase, purpose, root);
-  const lockPath = `${path}.lock`;
   const identity = checkpointIdentity(runId, phase, purpose);
+  // The run's control lock serializes resolution and retires a lock left by a dead owner.
   return withControlLock(runId, root, () => {
-    let fd: number | null | undefined;
-    try {
-      fd = openSync(lockPath, "wx", 0o600);
-    } catch (error) {
-      if (error instanceof Error && "code" in error && error.code === "EEXIST") {
-        throw badInput(`checkpoint is being resolved: ${identity.checkpointId}`);
+    const checkpoint = readJson(path, null) as ArtifactsOperatorCheckpoint | null;
+    if (!checkpoint) throw badInput(`checkpoint not found: ${identity.checkpointId}`);
+    let resolved: ArtifactsOperatorCheckpoint = checkpoint;
+    if (checkpoint.status !== "pending") {
+      if (
+        checkpoint.decision?.decision_id !== decisionId ||
+        checkpoint.decision?.outcome !== status ||
+        checkpoint.decision?.actor !== actor ||
+        checkpoint.decision?.rationale !== rationale.trim()
+      ) {
+        throw badInput(
+          `checkpoint ${checkpoint.checkpoint_id} already has a conflicting terminal decision`,
+        );
       }
-      throw error;
+    } else {
+      const resolvedAt = new Date().toISOString();
+      resolved = {
+        ...(checkpoint as unknown as Record<string, unknown>),
+        status,
+        decision: {
+          decision_id: decisionId,
+          outcome: status,
+          actor,
+          at: resolvedAt,
+          rationale: rationale.trim(),
+        },
+        resolved_at: resolvedAt,
+      } as ArtifactsOperatorCheckpoint;
+      writeJson(path, resolved);
     }
-    try {
-      const checkpoint = readJson(path, null) as ArtifactsOperatorCheckpoint | null;
-      if (!checkpoint) throw badInput(`checkpoint not found: ${identity.checkpointId}`);
-      let resolved: ArtifactsOperatorCheckpoint = checkpoint;
-      if (checkpoint.status !== "pending") {
-        if (
-          checkpoint.decision?.decision_id !== decisionId ||
-          checkpoint.decision?.outcome !== status ||
-          checkpoint.decision?.actor !== actor ||
-          checkpoint.decision?.rationale !== rationale.trim()
-        ) {
-          throw badInput(
-            `checkpoint ${checkpoint.checkpoint_id} already has a conflicting terminal decision`,
-          );
-        }
-      } else {
-        const resolvedAt = new Date().toISOString();
-        resolved = {
-          ...(checkpoint as unknown as Record<string, unknown>),
-          status,
-          decision: {
-            decision_id: decisionId,
-            outcome: status,
-            actor,
-            at: resolvedAt,
-            rationale: rationale.trim(),
-          },
-          resolved_at: resolvedAt,
-        } as ArtifactsOperatorCheckpoint;
-        writeJson(path, resolved);
-      }
-      writeRunStatus(
-        runId,
-        status === "approved" ? "running" : "blocked",
-        root,
-        { waiting_checkpoint_id: null, stop_requested: false },
-        readOperatorControl(runId, root),
-      );
-      return resolved;
-    } finally {
-      closeSync(fd);
-      unlinkSync(lockPath);
-    }
+    writeRunStatus(
+      runId,
+      status === "approved" ? "running" : "blocked",
+      root,
+      { waiting_checkpoint_id: null, stop_requested: false },
+      readOperatorControl(runId, root),
+    );
+    return resolved;
   });
 }
 

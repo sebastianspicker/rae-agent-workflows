@@ -145,6 +145,11 @@ packages retain their own changelogs where applicable.
 
 ### Fixed
 
+- Graph memory, workflow 2.2 wait-state and checkpoint resolution use the
+  shared owner-recording lock. A lock left by a dead process is retired
+  instead of blocking `memory`, `agent signal` or `resolve-checkpoint`
+  forever, and a graph-memory lock that is still being created is no longer
+  mistaken for a stale one.
 - Repository audit (2026-11-02), engine: v2.2 workflows respect `resource`
   labels; graph memory no longer marks a finished run with map nodes as
   blocked, and projection accepts the `INSTANCE_OF`, `NEXT`, `SELECTS` and

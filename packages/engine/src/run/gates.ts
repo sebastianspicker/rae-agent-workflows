@@ -21,7 +21,7 @@ import {
 import { appendTraceEvent, nowIso, readTraceEvents } from "./trace.js";
 import { evaluateMustTraceability } from "./traceability.js";
 import { repositoryRoot } from "../primitives/installation-paths.js";
-import type { AutonomousPhase, PhaseGateStatus } from "./autonomous-phase-contract.js";
+import type { PhaseGateStatus } from "./autonomous-phase-contract.js";
 import type { PipelineState } from "./state.js";
 
 export interface GateCriterion extends Record<string, unknown> {

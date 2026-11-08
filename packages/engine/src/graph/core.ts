@@ -17,7 +17,7 @@ import {
 } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
+import { basename, dirname, relative, resolve } from "node:path";
 import { createRequire } from "node:module";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import type { ValidateFunction } from "ajv";

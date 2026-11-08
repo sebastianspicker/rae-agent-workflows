@@ -14,7 +14,6 @@ import {
 } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { badInput } from "../primitives/errors.js";
 import { engineRuntimeRoot } from "../primitives/installation-paths.js";
 import { isContainedRelative } from "../primitives/paths.js";

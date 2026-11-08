@@ -186,11 +186,11 @@ export async function install(
       relative: manifestPath,
       expected: state(manifestPath),
       replacement: Buffer.from(
-        JSON.stringify(
+        `${JSON.stringify(
           { manifest_version: 2, installer: manifestInstallerId, installed_files: entries },
           null,
           2,
-        ) + "\n",
+        )}\n`,
       ),
     });
     await transact(root, mutations, "install", hook);

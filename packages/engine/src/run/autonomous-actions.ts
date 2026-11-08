@@ -37,7 +37,6 @@ import { projectGraph, recordRunMemory } from "../graph/index.js";
 import { runGraphWorkflow } from "../workflow/workflow-runtime.js";
 import { recordWorkflowV22Signal } from "../workflow/workflow-v22-reducer.js";
 import { validateWorkflow } from "../workflow/workflow-contract.js";
-import type { WorkflowsWorkflowV22 } from "@rae/contracts";
 import type { AgentProvider } from "../agents/agent-executor.js";
 import type { AutonomousPhase } from "./autonomous-phase-contract.js";
 import type { PipelineState } from "./state.js";

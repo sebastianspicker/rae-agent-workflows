@@ -5,7 +5,6 @@ import { relative, resolve } from "node:path";
 import { canonicalJson } from "./workflow-contract.js";
 import { validateNodeEnvelope } from "./workflow-envelope.js";
 import type {
-  JsonValue,
   WorkflowsNodeEnvelopeV2,
   WorkflowsNodeEnvelopeV21,
   WorkflowsNodeEnvelopeV22,

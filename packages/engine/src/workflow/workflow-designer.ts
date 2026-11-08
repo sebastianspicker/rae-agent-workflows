@@ -1,10 +1,6 @@
 /** Compiles guided workflow v2.1 templates and diagnoses candidate topology without execution. */
 import type { WorkflowsWorkflowV21, WorkflowsWorkflowV21DefsNode } from "@rae/contracts";
-import {
-  resolveExecutionTier,
-  validateExecutionProfile,
-  type ExecutionProfile,
-} from "./execution-profile.js";
+import { resolveExecutionTier, validateExecutionProfile } from "./execution-profile.js";
 import { FINDING_SCHEMA, validateWorkflow, type WorkflowContract } from "./workflow-contract.js";
 
 type TemplateId =

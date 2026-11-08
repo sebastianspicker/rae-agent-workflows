@@ -588,7 +588,7 @@ export async function scheduleWorkflowV21({
     );
     if (!edge) return false;
     const loop = memberLoop.get(spec.node.id);
-    if (!loop?.loop || loop.loop.mode !== "until-dry") return false;
+    if (loop?.loop?.mode !== "until-dry") return false;
     const convergence = deduplicateDiscovery(
       pointerValue(envelope.payload, loop.loop?.source_pointer),
       loop.loop?.stable_key_pointer ?? "",

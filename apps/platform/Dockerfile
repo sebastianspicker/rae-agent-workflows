@@ -1,9 +1,10 @@
 # Build and run the experimental hosted platform through compiled TypeScript entrypoints.
 FROM node:24.14.1-bookworm-slim@sha256:b506e7321f176aae77317f99d67a24b272c1f09f1d10f1761f2773447d8da26c AS build
 WORKDIR /app
-RUN ["apt-get", "update"]
-RUN ["apt-get", "install", "-y", "--no-install-recommends", "cmake", "make", "g++", "git", "ca-certificates"]
-RUN ["rm", "-rf", "/var/lib/apt/lists"]
+# One layer per stage, so the apt lists are gone before the layer is written.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends cmake make g++ git ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
 COPY . .
 RUN ["npm", "ci", "--ignore-scripts"]
 RUN ["npm", "ci", "--prefix", "apps/platform", "--ignore-scripts"]
@@ -14,9 +15,9 @@ RUN ["npm", "--prefix", "apps/platform", "prune", "--omit=dev", "--ignore-script
 
 FROM node:24.14.1-bookworm-slim@sha256:b506e7321f176aae77317f99d67a24b272c1f09f1d10f1761f2773447d8da26c
 WORKDIR /app
-RUN ["apt-get", "update"]
-RUN ["apt-get", "install", "-y", "--no-install-recommends", "git", "ca-certificates"]
-RUN ["rm", "-rf", "/var/lib/apt/lists"]
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/scripts/dist/container-check.js ./scripts/dist/container-check.js

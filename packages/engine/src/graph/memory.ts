@@ -1,16 +1,5 @@
 /** Persists, curates, and retrieves repository-isolated graph memory. */
-import {
-  closeSync,
-  existsSync,
-  mkdirSync,
-  openSync,
-  readdirSync,
-  readFileSync,
-  realpathSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import {
   GRAPH_PROJECTOR,
@@ -26,6 +15,7 @@ import {
   sha256,
 } from "./core.js";
 import { registeredWorktreeRoots } from "../primitives/git-worktrees.js";
+import { acquireExclusiveLock } from "../primitives/stale-lock.js";
 import { loadGraph, readJsonl, sourceCurrent, tokens } from "./query.js";
 import type { GraphGraphNode } from "@rae/contracts";
 
@@ -115,52 +105,13 @@ function memorySourceCurrent(paths: MemoryContextPaths, item: MemoryNode): boole
 
 function withMemoryLock<T>(paths: MemoryPaths, operation: () => T): T {
   mkdirSync(paths.root, { recursive: true, mode: 0o700 });
-  let fd: number | undefined;
-  try {
-    fd = acquireMemoryLock(paths.lock);
-  } catch {
-    throw new Error("graph memory is locked by another process");
-  }
+  // The shared lock writes its owner record atomically, so a half-created lock never looks stale.
+  const lock = acquireExclusiveLock(paths.lock);
+  if (!lock) throw new Error("graph memory is locked by another process");
   try {
     return operation();
   } finally {
-    if (fd !== undefined) closeSync(fd);
-    rmSync(paths.lock, { force: true });
-  }
-}
-
-function acquireMemoryLock(lockPath: string): number {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const fd = openSync(lockPath, "wx", 0o600);
-      writeFileSync(fd, `${process.pid}\n`, "utf8");
-      return fd;
-    } catch (error) {
-      if (
-        !(error instanceof Error && "code" in error) ||
-        error.code !== "EEXIST" ||
-        !staleMemoryLock(lockPath) ||
-        attempt > 0
-      )
-        throw error;
-      rmSync(lockPath, { force: true });
-    }
-  }
-  throw new Error("unable to acquire graph memory lock");
-}
-
-function staleMemoryLock(lockPath: string): boolean {
-  try {
-    const pid = Number(readFileSync(lockPath, "utf8").trim());
-    if (!Number.isInteger(pid) || pid <= 0) return true;
-    process.kill(pid, 0);
-    return false;
-  } catch (error) {
-    return (
-      error instanceof Error &&
-      "code" in error &&
-      (error.code === "ESRCH" || error.code === "ENOENT")
-    );
+    lock.release();
   }
 }
 

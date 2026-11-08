@@ -1,8 +1,7 @@
 /** Loads the deliberately narrow, data-only policy seam used by autonomous runs and evals. */
 import { createHash } from "node:crypto";
 import { readFileSync, realpathSync, statSync } from "node:fs";
-import { basename, dirname, extname, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { basename, extname, resolve, sep } from "node:path";
 import type { AutonomousPolicy, JsonValue } from "@rae/contracts";
 import { PHASE_ORDER } from "./constants.js";
 import { engineRoot } from "../primitives/installation-paths.js";
