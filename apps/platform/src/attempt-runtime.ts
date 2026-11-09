@@ -54,7 +54,7 @@ export function prepareHostedAttempt(
 ) {
   if (!CLAIM_ID_PATTERN.test(runId) || !CLAIM_ID_PATTERN.test(attemptId))
     throw new Error("hosted runtime run and attempt identifiers are invalid");
-  // nosemgrep: operator-configured project root, canonicalized here
+  // nosemgrep -- operator-configured project root, canonicalized here
   const root = fs.realpathSync(projectRoot);
   const schemaBytes = Buffer.from(`${JSON.stringify(outputSchema)}\n`);
   if (schemaBytes.length > MAX_SCHEMA_BYTES)
@@ -88,7 +88,7 @@ export function prepareHostedAttempt(
       throw new Error("hosted runtime schema already exists or is unsafe", { cause: error });
     }
     try {
-      // nosemgrep: writes to a descriptor, not a path
+      // nosemgrep -- writes to a descriptor, not a path
       fs.writeFileSync(schemaFd, schemaBytes);
       fs.fsyncSync(schemaFd);
       schema = inspectSchema(schemaFd);
@@ -152,7 +152,7 @@ export function prepareHostedAttempt(
       let staged = true;
       try {
         try {
-          // nosemgrep: writes to a descriptor, not a path
+          // nosemgrep -- writes to a descriptor, not a path
           fs.writeFileSync(fileFd, bytes);
           fs.fsyncSync(fileFd);
         } finally {

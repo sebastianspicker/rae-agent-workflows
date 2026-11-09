@@ -37,14 +37,14 @@ async function main() {
   let serving = false;
   try {
     if (command === "migrate") {
-      // nosemgrep: package-relative migrations directory
+      // nosemgrep -- package-relative migrations directory
       const migrations = (await fs.readdir(path.join(root, "migrations")))
         .filter((name) => name.endsWith(".sql"))
         .sort();
       for (const version of migrations)
         await store.migrate(
           version,
-          // nosemgrep: package-relative migration file listed above
+          // nosemgrep -- package-relative migration file listed above
           await fs.readFile(path.join(root, "migrations", version), "utf8"),
         );
       console.log(`experimental platform migrations applied: ${migrations.length}`);

@@ -15,14 +15,14 @@ function contained(candidate: string, root: string): boolean {
 function canonicalPlannedPath(path: string): string {
   let ancestor = resolve(path);
   const missing: string[] = [];
-  // nosemgrep: probing ancestors of a path checked against writable roots
+  // nosemgrep -- probing ancestors of a path checked against writable roots
   while (!fs.existsSync(ancestor)) {
     missing.unshift(basename(ancestor));
     const parent = dirname(ancestor);
     if (parent === ancestor) throw new Error("Staging path has no existing ancestor");
     ancestor = parent;
   }
-  // nosemgrep: canonicalizing an existing ancestor
+  // nosemgrep -- canonicalizing an existing ancestor
   return resolve(fs.realpathSync(ancestor), ...missing);
 }
 export function assertStagingOutsideWritableRoots(
@@ -45,7 +45,7 @@ function assertOwnedDirectory(fd: number, privateMode: boolean): void {
 
 /** The low-level constructor supports disposable fixtures; runtime callers use createHostedStaging. */
 export function createPrivateStaging(home: string, writableRoots: readonly string[]) {
-  // nosemgrep: canonicalizing the user's home directory
+  // nosemgrep -- canonicalizing the user's home directory
   const root = fs.realpathSync(home);
   const segments = [".local", "state", "rae", "hosted-attempts"];
   const base = join(root, ...segments);
@@ -86,7 +86,7 @@ export function createPrivateStaging(home: string, writableRoots: readonly strin
       if (bytes.length > 1024 * 1024) throw new Error("Hosted schema exceeds byte limit");
       const fd = openFileAt(attemptFd, "output.schema.json", "create");
       try {
-        // nosemgrep: writes to a descriptor, not a path
+        // nosemgrep -- writes to a descriptor, not a path
         fs.writeFileSync(fd, bytes);
         fs.fsyncSync(fd);
       } finally {

@@ -43,29 +43,15 @@ function extractMustRequirementIds(brief: unknown): string[] {
 }
 
 function extractPlanTaskRequirementIds(plan: unknown): string[] {
-  const taskGroups = asArray(recordValue(plan).task_groups);
-  const ids: string[] = [];
-  for (const group of taskGroups) {
-    const tasks = asArray(recordValue(group).tasks);
-    for (const task of tasks) {
-      ids.push(...collectIdsFromList([task], "covers_requirement_ids"));
-    }
-  }
-  return uniqueSortedStrings(ids);
+  return uniqueSortedStrings(collectIdsFromList(planTasks(plan), "covers_requirement_ids"));
 }
 
 function extractPlanTestRequirementIds(plan: unknown): string[] {
-  const taskGroups = asArray(recordValue(plan).task_groups);
-  const ids: string[] = [];
-  for (const group of taskGroups) {
-    const tasks = asArray(recordValue(group).tasks);
-    for (const task of tasks) {
-      ids.push(
-        ...collectIdsFromList(asArray(recordValue(task).test_cases), "covers_requirement_ids"),
-      );
-    }
-  }
-  return uniqueSortedStrings(ids);
+  return uniqueSortedStrings(
+    planTasks(plan).flatMap((task) =>
+      collectIdsFromList(recordValue(task).test_cases, "covers_requirement_ids"),
+    ),
+  );
 }
 
 function planTasks(plan: unknown): unknown[] {

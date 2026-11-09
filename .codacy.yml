@@ -7,11 +7,13 @@ exclude_paths:
   # Fixture data
   - "apps/operator/demo/fixtures.ts"
   - "experiments/**/repositories/**"
-  # Generated from adapter templates
+  # Generated from adapter templates and contract schemas
   - "integrations/agent-adapters/content/**"
+  - "packages/contracts/src/generated.ts"
 
 engines:
   # Lizard measures function length and complexity; JSON data files have neither.
   lizard:
     exclude_paths:
+      - "*.json"
       - "**/*.json"

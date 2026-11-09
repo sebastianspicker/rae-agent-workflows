@@ -208,6 +208,22 @@ export function containedProcessFailure(
   }
   return null;
 }
+function effectiveConfigDigest(stdout: string, runtime: OpenCodeRuntime): string {
+  let config: unknown;
+  try {
+    config = JSON.parse(stdout) as unknown;
+  } catch (caught) {
+    throw new Error(
+      `OpenCode effective-config probe returned invalid JSON: ${caught instanceof Error ? caught.message : String(caught)}`,
+    );
+  }
+  if (!config || typeof config !== "object" || Array.isArray(config)) {
+    throw new Error("OpenCode effective-config probe returned a non-object configuration");
+  }
+  assertEffectiveConfiguration(config as Record<string, unknown>, runtime.configValue);
+  return createHash("sha256").update(JSON.stringify(config)).digest("hex");
+}
+
 export function probeEffectiveConfig(
   executable: string,
   options: OpenCodeSandboxOptions,
@@ -222,19 +238,7 @@ export function probeEffectiveConfig(
   });
   const error = processFailure("OpenCode effective-config probe", proc);
   if (error) throw error;
-  let config: unknown;
-  try {
-    config = JSON.parse(proc.stdout) as unknown;
-  } catch (caught) {
-    throw new Error(
-      `OpenCode effective-config probe returned invalid JSON: ${caught instanceof Error ? caught.message : String(caught)}`,
-    );
-  }
-  if (!config || typeof config !== "object" || Array.isArray(config)) {
-    throw new Error("OpenCode effective-config probe returned a non-object configuration");
-  }
-  assertEffectiveConfiguration(config as Record<string, unknown>, runtime.configValue);
-  return createHash("sha256").update(JSON.stringify(config)).digest("hex");
+  return effectiveConfigDigest(proc.stdout, runtime);
 }
 
 export async function probeEffectiveConfigAsync(
@@ -255,17 +259,5 @@ export async function probeEffectiveConfigAsync(
     proc,
   );
   if (failure) throw failure;
-  let config: unknown;
-  try {
-    config = JSON.parse(proc.stdout) as unknown;
-  } catch (caught) {
-    throw new Error(
-      `OpenCode effective-config probe returned invalid JSON: ${caught instanceof Error ? caught.message : String(caught)}`,
-    );
-  }
-  if (!config || typeof config !== "object" || Array.isArray(config)) {
-    throw new Error("OpenCode effective-config probe returned a non-object configuration");
-  }
-  assertEffectiveConfiguration(config as Record<string, unknown>, runtime.configValue);
-  return createHash("sha256").update(JSON.stringify(config)).digest("hex");
+  return effectiveConfigDigest(proc.stdout, runtime);
 }

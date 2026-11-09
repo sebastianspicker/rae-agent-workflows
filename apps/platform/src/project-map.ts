@@ -74,14 +74,14 @@ export function validateProjectMapEntry(projectId: string, value: unknown) {
 }
 
 function canonicalGitRoot(projectId: string, rootPath: string) {
-  // nosemgrep: operator-configured project root, verified as a Git top level
+  // nosemgrep -- operator-configured project root, verified as a Git top level
   const root = fs.realpathSync(rootPath);
   const probe = spawnSync("git", ["-C", root, "rev-parse", "--show-toplevel"], {
     encoding: "utf8",
     timeout: 10_000,
     maxBuffer: MAX_MAP_BYTES,
   });
-  // nosemgrep: git's own top-level output, compared to the canonical root
+  // nosemgrep -- git's own top-level output, compared to the canonical root
   if (probe.status !== 0 || fs.realpathSync(probe.stdout.trim()) !== root) {
     throw new Error(`project ${projectId} root must be a canonical Git top level`);
   }
@@ -90,7 +90,7 @@ function canonicalGitRoot(projectId: string, rootPath: string) {
 
 export function loadProjectMap(filePath: string) {
   if (!path.isAbsolute(filePath || "")) throw new Error("RAE_PROJECT_MAP_FILE must be absolute");
-  // nosemgrep: absolute operator-set map file, opened O_NOFOLLOW
+  // nosemgrep -- absolute operator-set map file, opened O_NOFOLLOW
   const descriptor = fs.openSync(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   try {
     const before = fs.fstatSync(descriptor);
